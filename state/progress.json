@@ -1,18 +1,18 @@
 {
   "project": "AI-Powered Payment Gateway Platform (case study)",
   "updated_at": "2026-11-01",
-  "current_phase": 0,
-  "phase_status": "awaiting_user_review",
+  "current_phase": 1,
+  "phase_status": "in_progress",
   "phases": [
     {
       "id": 0,
       "name": "Requirements breakdown, traceability, plan",
-      "status": "done_pending_review"
+      "status": "done"
     },
     {
       "id": 1,
       "name": "Repo skeleton, docker compose, synthetic dataset",
-      "status": "not_started"
+      "status": "in_progress"
     },
     {
       "id": 2,
@@ -64,6 +64,10 @@
       "item": "Product purpose and mandatory capabilities confirmed",
       "file": "docs/product-brief.md",
       "log": "~/.claude/logs/consults/20261101-031155-consult.md"
+    },
+    {
+      "phase": 1,
+      "item": "Submission repo created outside resume; docs/ and state/ moved; initial commit c653b6e"
     }
   ],
   "remaining": [
@@ -247,7 +251,7 @@
       "partial_answer_2026-11-01": "Submission format = GitHub repository (recruiter). Still open: repo location (must not be inside the private resume repo) and visibility (public, or private with reviewer access).",
       "status": "answered",
       "answered_at": "2026-11-01",
-      "answer": "New repository outside the resume repo; private on GitHub, reviewers invited. Resume side keeps only application documents. Exact path not yet chosen."
+      "answer": "New repository at ~/Develop/private/non-products/prodapt-case-study-2026 (git init 2026-11-01, branch main); private on GitHub with reviewers invited (remote not created yet). The brief PDF stays in resume/applications/prodapt-case-study-2026/docs/ and is gitignored here."
     },
     {
       "id": "Q-003",
