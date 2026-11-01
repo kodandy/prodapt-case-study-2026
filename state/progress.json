@@ -238,6 +238,53 @@
       "why": "Positioning B needs a real, enforced boundary; panel will attack stale-observation actions, so the gateway is the enforcement point.",
       "supersedes": "Earlier stance that AI may propose retrying definitive failures (removed).",
       "consult_log": "~/.claude/logs/consults/20261101-032903-consult.md"
+    },
+    {
+      "id": "D-014",
+      "status": "confirmed",
+      "confirmed_at": "2026-11-01",
+      "topic": "Agent runtime",
+      "decision": "Thin hand-rolled tool loop on the OpenAI Responses API behind an LlmPort protocol; max 6 tool calls and 20 s budget, then T2 fallback; tool schemas generated from Pydantic; tool allowlist by role and adapter capability. Deterministic mock implements the same port (wiring proof only); a real-API run of the 4 sample queries is reported separately with date and model. OpenAI Agents SDK reconsidered only for Advanced multi-agent.",
+      "why": "Deterministic tests and mock parity; explicit guardrails; avoids framework lock-in on a 5-day timeline.",
+      "consult_log": "~/.claude/logs/consults/20261101-130100-consult.md",
+      "resolves": "D-011 deferred point: agent framework"
+    },
+    {
+      "id": "D-015",
+      "status": "confirmed",
+      "confirmed_at": "2026-11-01",
+      "topic": "Differentiator: verifiable answers",
+      "decision": "Answer contract: the LLM returns claims[] {kind: fact|hypothesis|cause|action, text with slots, evidence_refs[]}; slot values rendered from referenced tool outputs, never typed by the LLM; checker rejects refs not produced this turn, scope (merchant/window) mismatch, digits outside slots; a cause claim without a baseline comparison and a timeline ref is demoted to hypothesis; on failure regenerate once, then evidence list only. Every answer carries data-as-of and gaps. Stated limit: matching numbers does not prove causation.",
+      "why": "Turns the thesis (explain with evidence) into an enforceable mechanism and an eval metric.",
+      "consult_log": "~/.claude/logs/consults/20261101-130100-consult.md",
+      "resolves": "D-011 deferred point: single differentiator"
+    },
+    {
+      "id": "D-016",
+      "status": "confirmed",
+      "confirmed_at": "2026-11-01",
+      "topic": "Dataset ingestion path",
+      "decision": "Generator emits a canonical scenario log (minor units); the brief's 16-field CSV/JSON export and the gateway import are both derived from it. A gateway backfill importer writes historical payments with balanced journals and emits outbox events with original occurred_at and origin=backfill; projection consumers apply them, side-effect consumers (notifications, alerts, tickets) skip them; historical incidents/tickets imported as state.",
+      "why": "Gateway lookups (SQ2, SQ4) agree with ops-ai projections; the diagram shows the real dataset -> ingestion -> port -> AI path.",
+      "consult_log": "~/.claude/logs/consults/20261101-130100-consult.md"
+    },
+    {
+      "id": "D-017",
+      "status": "confirmed",
+      "confirmed_at": "2026-11-01",
+      "topic": "Tenant enforcement",
+      "decision": "Every repository function requires a Scope built from auth; cross-tenant probe tests over search, tools, session and memory. Postgres RLS is a stretch goal (only with a non-owner DB role and SET LOCAL per transaction).",
+      "why": "Verifiable within 5 days; RLS without verified pool/role handling would weaken the claim.",
+      "consult_log": "~/.claude/logs/consults/20261101-130100-consult.md"
+    },
+    {
+      "id": "D-018",
+      "status": "confirmed",
+      "confirmed_at": "2026-11-01",
+      "topic": "Detailed architecture (remaining sections)",
+      "decision": "All remaining sections of docs/architecture-detail.md confirmed as written: repo layout; ledger and per-method state machines; refund+chargeback principal cap under the payment lock; sync charge path (tx1 reserves idempotency key + payment + attempt, provider call outside tx, guarded tx2, reconciler with provider acceptance deadline, 202 for async methods); SQ2 decline rule recording; settlement line items; provider simulator; identity/roles; audit; stream topics, relay, consumer dedupe, entity_version; query/command API and approval binding; ops-ai projections with query-time aggregates; hybrid search with swappable keyword side; investigation tools; memory; fraud_watch; tickets; web/ops; tested restart behavior; top-3 risks fixed first.",
+      "file": "docs/architecture-detail.md",
+      "consult_log": "~/.claude/logs/consults/20261101-130100-consult.md"
     }
   ],
   "open_questions": [
@@ -322,5 +369,20 @@
       "Reliability, robustness and completeness with real operation in mind"
     ]
   },
-  "consult_log": "~/.claude/logs/consults/20261030-122334-consult.md"
+  "consult_log": "~/.claude/logs/consults/20261030-122334-consult.md",
+  "architecture_detail": {
+    "file": "docs/architecture-detail.md",
+    "status": "confirmed",
+    "confirmed_parts": [
+      "D-014",
+      "D-015",
+      "D-016",
+      "D-017",
+      "D-018"
+    ],
+    "consult_log": "~/.claude/logs/consults/20261101-130100-consult.md",
+    "still_deferred": [
+      "Japan context (Japanese tokenization / multilingual embedder)"
+    ]
+  }
 }
