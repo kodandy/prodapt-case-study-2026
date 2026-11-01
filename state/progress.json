@@ -73,11 +73,11 @@
   "remaining": [
     {
       "phase": 1,
-      "item": "Repo layout: services/platform (Python, api/grpc/worker entrypoints), web (Vite), proto/, scripts/, docs/, state/"
+      "item": "Repo layout: services/gateway, services/ops-ai (Python), web (Vite), proto/, scripts/, docs/, state/"
     },
     {
       "phase": 1,
-      "item": "docker compose: postgres+pgvector, redis, api, grpc, worker, web; one-command start without API key"
+      "item": "docker compose: postgres+pgvector (separate schemas), redis, gateway api/worker, ops-ai api/worker, web; one-command start without API key"
     },
     {
       "phase": 1,
@@ -123,12 +123,14 @@
   "decisions": [
     {
       "id": "D-001",
-      "status": "proposed",
+      "status": "confirmed",
       "topic": "Deployable shape",
-      "decision": "One Python codebase, feature-sliced, run as 3 processes (api / grpc / worker). Described honestly as one platform service with bounded contexts, not as 3 microservices. Design doc shows the production split (payments-ledger, fraud, support-ai).",
-      "why": "Ledger atomicity stays in one DB transaction; demo reliability; all 13 Basic items first.",
-      "needs_user_confirmation": true,
-      "question_ref": "Q-005"
+      "decision": "Two services in one monorepo, same stack: (1) gateway service (payment core: accounts, wallets, payments + ledger, refunds/disputes, merchant REST+gRPC, risk scoring, transactional notifications; owns its Postgres schema and the outbox) and (2) ops-ai service (projections, search, assistant/agents, alerts, tickets; own schema). They talk only through the D-013 ops port: events (outbox -> Redis Streams), gateway query API, gateway command API (routing override). No shared tables, no cross-service imports. Each service may run api / worker processes. Ledger atomicity stays inside the gateway.",
+      "why": "Makes positioning B (D-012) and the tiered failure behavior (D-011) real in code, allows independent scaling (evaluation criterion: scalability), and matches the brief's 'microservice' deliverable without splitting the sync auth path.",
+      "question_ref": "Q-005",
+      "confirmed_at": "2026-11-01",
+      "supersedes": "Earlier proposal: one platform service run as api/grpc/worker processes.",
+      "cost": "Service-to-service auth and startup wiring, estimated ~half a day."
     },
     {
       "id": "D-002",
@@ -268,7 +270,10 @@
     {
       "id": "Q-005",
       "question": "OK to ship one platform service run as api/grpc/worker processes (D-001) instead of several independent microservices?",
-      "default_if_no_answer": "Proposed D-001."
+      "default_if_no_answer": "Proposed D-001.",
+      "status": "answered",
+      "answered_at": "2026-11-01",
+      "answer": "Two services (gateway, ops-ai) joined only by the ops port. See D-001."
     },
     {
       "id": "Q-006",
