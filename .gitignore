@@ -1,0 +1,17 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# build / deps
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+dist/
+outputs/
+
+# brief from the hiring company; reviewers already have it
+docs/caes-study.pdf
+
+.DS_Store

@@ -1,0 +1,317 @@
+{
+  "project": "AI-Powered Payment Gateway Platform (case study)",
+  "updated_at": "2026-11-01",
+  "current_phase": 0,
+  "phase_status": "awaiting_user_review",
+  "phases": [
+    {
+      "id": 0,
+      "name": "Requirements breakdown, traceability, plan",
+      "status": "done_pending_review"
+    },
+    {
+      "id": 1,
+      "name": "Repo skeleton, docker compose, synthetic dataset",
+      "status": "not_started"
+    },
+    {
+      "id": 2,
+      "name": "Basic payments side: accounts, wallets, payments, refunds_disputes, merchant_api, notifications, tickets",
+      "status": "not_started"
+    },
+    {
+      "id": 3,
+      "name": "Basic AI side: search, support_assistant, fraud + 4 sample queries E2E",
+      "status": "not_started"
+    },
+    {
+      "id": 4,
+      "name": "Advanced (priority order)",
+      "status": "not_started"
+    },
+    {
+      "id": 5,
+      "name": "Diagram, design doc, README, presentation, final traceability re-check",
+      "status": "not_started"
+    }
+  ],
+  "completed": [
+    {
+      "phase": 0,
+      "item": "Read docs/caes-study.pdf in full (3 pages)"
+    },
+    {
+      "phase": 0,
+      "item": "Basic split into 13 groups / 43 sub-items with acceptance criteria",
+      "file": "docs/requirements-traceability.md"
+    },
+    {
+      "phase": 0,
+      "item": "Sample query specs SQ1-SQ4, dataset D1-D4, deliverables DL1-DL4 added to traceability"
+    },
+    {
+      "phase": 0,
+      "item": "Cross-model design consult with GPT (Sol), 2 rounds",
+      "log": "~/.claude/logs/consults/20261030-122334-consult.md"
+    },
+    {
+      "phase": 0,
+      "item": "Big-picture architecture consult with Sol (stablecoin core rejected, closed loop, 3 tiers)",
+      "log": "~/.claude/logs/consults/20261101-025513-consult.md"
+    },
+    {
+      "phase": 0,
+      "item": "Product purpose and mandatory capabilities confirmed",
+      "file": "docs/product-brief.md",
+      "log": "~/.claude/logs/consults/20261101-031155-consult.md"
+    }
+  ],
+  "remaining": [
+    {
+      "phase": 1,
+      "item": "Repo layout: services/platform (Python, api/grpc/worker entrypoints), web (Vite), proto/, scripts/, docs/, state/"
+    },
+    {
+      "phase": 1,
+      "item": "docker compose: postgres+pgvector, redis, api, grpc, worker, web; one-command start without API key"
+    },
+    {
+      "phase": 1,
+      "item": "Tooling: mypy strict, ruff, pytest, tsc strict, eslint no-explicit-any; .env.example"
+    },
+    {
+      "phase": 1,
+      "item": "scripts/generate_dataset.py (>=10k, seeded, CSV+JSON, planted SQ1-SQ4 scenarios) + tests"
+    },
+    {
+      "phase": 2,
+      "item": "accounts, wallets, payments (ledger, FX, tokenization), refunds_disputes, merchant_api (REST+gRPC, idempotency), notifications (outbox), tickets"
+    },
+    {
+      "phase": 2,
+      "item": "security-auditor + red-team lane on accounts/payments/merchant_api (auth, payment tags)"
+    },
+    {
+      "phase": 3,
+      "item": "search (FTS + pgvector + RRF), support_assistant (taxonomy, tools, RAG, memory, guardrails), fraud (sync score, card-testing detector)"
+    },
+    {
+      "phase": 3,
+      "item": "SQ1-SQ4 E2E tests on mock LLM; manual run on real OpenAI key"
+    },
+    {
+      "phase": 4,
+      "item": "Advanced 1: evaluation (golden set independent of generator templates, keyword/vector/hybrid ablation, DeepEval when key present, custom fraud/failure metrics)"
+    },
+    {
+      "phase": 4,
+      "item": "Advanced 2: LLM-as-judge (rank root-cause hypotheses, validate dispute decisions)"
+    },
+    {
+      "phase": 4,
+      "item": "Advanced 3-8 as time allows"
+    },
+    {
+      "phase": 5,
+      "item": "docs/architecture.md (+ PDF/PNG via mmdc), docs/design.md, README.md, docs/presentation.md, traceability re-check"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "D-001",
+      "status": "proposed",
+      "topic": "Deployable shape",
+      "decision": "One Python codebase, feature-sliced, run as 3 processes (api / grpc / worker). Described honestly as one platform service with bounded contexts, not as 3 microservices. Design doc shows the production split (payments-ledger, fraud, support-ai).",
+      "why": "Ledger atomicity stays in one DB transaction; demo reliability; all 13 Basic items first.",
+      "needs_user_confirmation": true,
+      "question_ref": "Q-005"
+    },
+    {
+      "id": "D-002",
+      "status": "proposed",
+      "topic": "LLM role",
+      "decision": "Deterministic tools compute facts and money; LLM parses NL into typed filters, picks tools, and narrates. Settlement narration is generated from a verified typed breakdown.",
+      "why": "Numbers must never be invented; also gives an evaluable boundary."
+    },
+    {
+      "id": "D-003",
+      "status": "proposed",
+      "topic": "Idempotency",
+      "decision": "Postgres unique (merchant_id, idempotency_key) + request hash as source of truth; stored response replayed; Redis is only a fast path.",
+      "why": "Redis loss must not allow a double charge."
+    },
+    {
+      "id": "D-004",
+      "status": "proposed",
+      "topic": "Async delivery",
+      "decision": "Transactional outbox in the payment DB transaction -> relay -> Redis Streams -> consumers with dedupe by event id.",
+      "why": "Without it a crash between commit and publish loses confirmations and fraud alerts (raised by Sol)."
+    },
+    {
+      "id": "D-005",
+      "status": "proposed",
+      "topic": "Guardrails scope",
+      "decision": "Both API validation (Pydantic / protobuf + business rules) and AI guardrails (tenant scope from auth only, tool allowlist + typed args, retrieved text untrusted, abstain on weak evidence).",
+      "why": "The brief's wording is ambiguous; covering both is safer for a 'missing item = fail' rule."
+    },
+    {
+      "id": "D-006",
+      "status": "proposed",
+      "topic": "Memory",
+      "decision": "Redis session (TTL, merchant-isolated) + last N turns + structured conversation state; long-term = explicit auditable merchant_memory written only via confirmed tool call, with source turn id, correct/delete. No silent LLM fact extraction.",
+      "why": "Interview weak spot; must be demonstrable and auditable without false-memory risk."
+    },
+    {
+      "id": "D-007",
+      "status": "proposed",
+      "topic": "Card-testing demo (SQ3)",
+      "decision": "Primary: live burst through the merchant API on a fixed fixture; fallback: seeded dataset burst.",
+      "why": "Shows sync + async pipeline end to end."
+    },
+    {
+      "id": "D-008",
+      "status": "proposed",
+      "topic": "Evaluation design",
+      "decision": "Ground truth from planted scenarios, but questions written independently of generator templates (paraphrases, compound conditions, no-answer, cross-merchant probes). Separate metrics for retrieval, tool choice/args, and answer grounding; keyword vs vector vs hybrid ablation. Deterministic metrics in CI; DeepEval LLM metrics only with a real key.",
+      "why": "Avoid a circular RAG evaluation story."
+    },
+    {
+      "id": "D-009",
+      "status": "proposed",
+      "topic": "Merchant auth",
+      "decision": "Merchant API keys stored hashed; users use session tokens after password + TOTP.",
+      "why": "Separate B2B and B2C auth paths."
+    },
+    {
+      "id": "D-010",
+      "status": "confirmed",
+      "confirmed_at": "2026-11-01",
+      "topic": "Product purpose, users, mandatory capabilities, scope",
+      "decision": "Purpose: safe and reliable payments; when a payment fails, is declined, looks fraudulent or settles differently than expected, merchants and operations staff decide cause and response with evidence and act within safe limits. Primary users: merchants and operations staff; consumers use payment functions; financial institutions are counterparties. Mandatory = the 13 Basic items only, in 6 groups (payment core B1-B3, merchant integration B8, risk B7, operations intelligence B4-B6/B9/B10, operations workflow B11-B12, interfaces B13). Ledger / zero double charge / card-testing detection are kept as design choices or verification scenarios, not requirements. No real money movement; Advanced and NFRs are not part of the purpose; scale/compliance reported as demonstrated vs production-design-only.",
+      "why": "The Overview's last sentence is a capability list, not a purpose; it drops the problem (failures, fraud, settlement) and the users the sample queries come from.",
+      "file": "docs/product-brief.md"
+    },
+    {
+      "id": "D-011",
+      "status": "confirmed",
+      "topic": "Big-picture architecture",
+      "decision": {
+        "thesis": "Explain payment outcomes with evidence, and guide the next safe step.",
+        "entry_points": "A question (primary; all 4 sample queries) or an alert (secondary; shown with card testing), both into one investigation flow. Proactive failure-rate anomaly detection kept light (not Basic).",
+        "loop": "Investigate (ranked hypotheses with evidence, data-as-of, gaps; SQ1 also shows alternative hypotheses and when NOT to reroute) -> Respond (approved routing override, or ticket/notification with evidence pack) -> Verify (time-ordered replay; 'recovery observed', never 'effect proven') -> Learn (AI layer only; human verdicts go to a separate feedback set; golden eval set stays frozen).",
+        "routing_override_safety": "Applied conditionally on config version + operation id; TTL expiry reverts only if the config is still at the version it set.",
+        "tiers": "Failure-behavior classification, not an availability guarantee. T0 must not stop: gateway sync path, no LLM. T1 may delay, must not lose: outbox (retained, replayable) / stream / settlement / notifications, plus AI-layer deterministic parts (projections rebuildable from Postgres, alert rules, ticket routing) that work without an LLM. T2 may degrade: LLM diagnosis/assistant falls back to dashboards + evidence list with retrieval time (no NL fallback).",
+        "authorization": "Tenant and role checked at every stage (retrieval, history, tool call); instructions inside merchant documents never grant permissions.",
+        "claims": "Every tier/region claim labeled demonstrated vs production-design-only. Data residency claim covers the LLM provider: prompts minimized, provider regional terms verified before any claim.",
+        "unchanged": "Stablecoin not the core (design-only rail at most). Home region per account, production design only; AI projections in the same home region.",
+        "design_doc": "Keeps a Basic 13-item mapping so payment features are not hidden behind the AI story."
+      },
+      "why": "Align with D-012/D-013; critical review found the push-first loop, action-centric thesis, unsupported 'no loss' claim, eval contamination and override conflicts.",
+      "confirmed_at": "2026-11-01",
+      "consult_log": "~/.claude/logs/consults/20261101-123254-consult.md",
+      "still_deferred": [
+        "Single differentiator",
+        "Agent framework incl. OpenAI Agents SDK",
+        "Japan market context"
+      ]
+    },
+    {
+      "id": "D-012",
+      "status": "confirmed",
+      "confirmed_at": "2026-11-01",
+      "topic": "Positioning",
+      "decision": "Narrate as a payment-operations AI layer that attaches to any gateway through an event and tool boundary (B); satisfy Basic by also implementing the gateway as the reference implementation (A).",
+      "why": "Matches the FDE job (add AI on top of a customer's existing system); Basic still requires the payment core."
+    },
+    {
+      "id": "D-013",
+      "status": "confirmed",
+      "topic": "Gateway / AI layer boundary (ops port)",
+      "decision": "Ops port = 3 contracts, every one carrying merchant scope taken from caller auth (never from LLM args). (1) Events in via outbox: payment outcomes (raw provider code + normalized code + mapping version, 'unclassified' allowed; retry eligibility not normalized), provider health, risk flags, settlement/payout breakdowns, config/routing/rule/deploy changes; each with event id, schema version, occurred_at, entity version; token id + BIN/last4 only, no PAN, minimal PII. (2) Reads: thin AI-side projections (search documents, investigation aggregates; no ledger/balance copies); authoritative point lookups via gateway query API; answers state data-as-of time and gaps; time coincidence with a change is a hypothesis, not a cause. (3) Commands: one only - routing override for new payments, scoped to a route, with TTL; approval token bound to operation, target, tenant, expiry; gateway re-validates current state and permission at execution. Other responses go to humans via tickets/notifications. Never: vault/PAN, ledger writes, sync auth path, fraud rules. Card testing: real-time detection/blocking = gateway; delayed detection, investigation, alerts = AI layer. Transactional notifications = gateway; alerts and tickets = AI layer, both deduped. Normalized taxonomy belongs to the port; adapters normalize. Adapter capabilities filter the tools exposed to the LLM. No AI-to-gateway learning channel for now. One codebase; boundary enforced by an import-rule test.",
+      "confirmed_at": "2026-11-01",
+      "why": "Positioning B needs a real, enforced boundary; panel will attack stale-observation actions, so the gateway is the enforcement point.",
+      "supersedes": "Earlier stance that AI may propose retrying definitive failures (removed).",
+      "consult_log": "~/.claude/logs/consults/20261101-032903-consult.md"
+    }
+  ],
+  "open_questions": [
+    {
+      "id": "Q-001",
+      "question": "The PDF is at docs/caes-study.pdf (typo), not docs/case-study.pdf. Rename it?",
+      "default_if_no_answer": "Keep as is and reference the actual path."
+    },
+    {
+      "id": "Q-002",
+      "question": "This folder is untracked inside the private resume repo (applications/). Where should the submission code live: a separate git repo here (git init), a separate repo elsewhere, or tracked inside the resume repo? How is it submitted (GitHub link / zip)?",
+      "default_if_no_answer": "Do not git init until answered.",
+      "partial_answer_2026-11-01": "Submission format = GitHub repository (recruiter). Still open: repo location (must not be inside the private resume repo) and visibility (public, or private with reviewer access).",
+      "status": "answered",
+      "answered_at": "2026-11-01",
+      "answer": "New repository outside the resume repo; private on GitHub, reviewers invited. Resume side keeps only application documents. Exact path not yet chosen."
+    },
+    {
+      "id": "Q-003",
+      "question": "Deadline and time budget? This decides how far Phase 4 (Advanced) goes.",
+      "default_if_no_answer": "Advanced 1-2 only.",
+      "answer_2026-11-01": "Submit by Fri 2026-11-06 if possible (recruiter). Advanced is optional bonus. Presentation date still being confirmed."
+    },
+    {
+      "id": "Q-004",
+      "question": "Presentation language (English / Japanese)?",
+      "default_if_no_answer": "English slides and script.",
+      "answer_2026-11-01": "Japanese is fine; an English translation is welcome (AI translation OK)."
+    },
+    {
+      "id": "Q-005",
+      "question": "OK to ship one platform service run as api/grpc/worker processes (D-001) instead of several independent microservices?",
+      "default_if_no_answer": "Proposed D-001."
+    },
+    {
+      "id": "Q-006",
+      "question": "Stack addition: for no-key mode, bundle a pinned small local embedding model (e.g. fastembed ONNX bge-small, ~130MB, baked into the image) instead of a hashing embedder? Alternatives: hashing embedder (weak semantics), or require an OpenAI key for the demo.",
+      "default_if_no_answer": "Not decided; blocks Phase 3 search.",
+      "status": "answered",
+      "answered_at": "2026-11-01",
+      "answer": "Use a pinned local embedding model (fastembed bge-small, ~130MB, baked into the image) in no-key mode; OpenAI embeddings when a key is present."
+    },
+    {
+      "id": "Q-007",
+      "question": "Demo clock: the brief says 'this afternoon'. Use an injectable clock with a fixed DEMO_NOW + timezone shown in the UI (reproducible), with the dataset anchored to it? Or anchor to the real current date?",
+      "default_if_no_answer": "Fixed DEMO_NOW, configurable."
+    },
+    {
+      "id": "Q-008",
+      "question": "Project-level dependencies: Python via uv (pyproject + lock) and frontend via npm (package-lock), inside Docker and under nix shell locally. No global installs. Acceptable under the 'Nix only' rule?",
+      "default_if_no_answer": "Not decided; blocks Phase 1.",
+      "status": "answered",
+      "answered_at": "2026-11-01",
+      "answer": "uv (pyproject + lock) and npm (package-lock), project-local only, used inside Docker and nix shell; no global installs. Reviewers need Docker only."
+    },
+    {
+      "id": "Q-009",
+      "question": "OpenAI default model names for .env.example (chat, embedding, judge)? Will you provide an OPENAI_API_KEY for the demo and DeepEval runs (cost)?",
+      "default_if_no_answer": "Placeholders in .env.example; mock everywhere until a key is provided."
+    },
+    {
+      "id": "Q-010",
+      "question": "Notification channels: in-app (stored + shown in UI) plus a console/log email adapter enough, or do you want a local mail catcher (e.g. Mailpit) in compose?",
+      "default_if_no_answer": "In-app + log adapter."
+    }
+  ],
+  "recruiter_confirmation_2026-11-01": {
+    "deadline": "2026-11-06 (Fri), 'if possible'",
+    "presentation_language": "Japanese OK; English translation welcome (AI translation OK)",
+    "advanced": "Optional bonus, not required",
+    "ai_coding_tools": "Allowed",
+    "submission": "GitHub repository",
+    "presentation_date": "Being confirmed",
+    "evaluation_criteria": [
+      "Knowledge of AI / generative AI and ability to explain the technology and implementation used",
+      "Appropriateness of architecture, design and implementation",
+      "Reasons for choosing the architecture, technologies and design approach",
+      "Scalability for growth in users, data volume and load",
+      "Reliability, robustness and completeness with real operation in mind"
+    ]
+  },
+  "consult_log": "~/.claude/logs/consults/20261030-122334-consult.md"
+}
