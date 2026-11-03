@@ -46,6 +46,7 @@ No `.env` file and no `OPENAI_API_KEY` are needed: without a key the assistant u
 |---|---|
 | `demo-secrets` | One-shot. Generates the demo secrets (two HMAC keys and an RSA 2048 key pair) into the named volume `demo-secrets`, creating only missing files |
 | `migrate` | One-shot. Runs both Alembic histories |
+| `seed` | One-shot. Loads the synthetic dataset (seed 42, 12000 records) and its incidents into ops-ai, shifted so the planted SQ1 afternoon ends now. A re-run adds nothing |
 | `gateway-api` | Gateway HTTP API on `127.0.0.1:8080` |
 | `relay` | Outbox relay: publishes committed outbox rows to the Redis stream |
 | `ops-ai-api` | Ops assistant HTTP API on `127.0.0.1:8081` |
@@ -57,14 +58,20 @@ the JWT private key, and ops-ai gets only the public key.
 
 `scripts/demo.py`, run by the `demo` service:
 
-1. Creates a new merchant (so a re-run never collides) and signs up `demo+<random>@example.com`.
-2. Over HTTP: one approved charge, one declined charge (`4000000000000002`), and a retry of the approved charge with the
-   same `Idempotency-Key`. The retry must return the identical body.
+1. Gets an API key for the seeded SQ1 merchant `mch_0001` (the same id in both services: uuid5 of the dataset id) and
+   signs up `demo+<random>@example.com`.
+2. Over HTTP: one approved charge, one declined charge on the SQ1 BIN (`4000000000000119`, issuer unavailable), and a
+   retry of the approved charge with the same `Idempotency-Key`. The retry must return the identical body.
 3. Exchanges the API key for a merchant token (`POST /v1/merchant-tokens`). This is an RS256 JWT, issuer `gateway`,
    audience `ops-ai`, lifetime 15 minutes. ops-ai accepts only RS256 and takes the merchant scope from the token alone.
 4. Waits until both payments are on the stream and the consumer group has lag 0 and pending 0.
 5. Asks the assistant "declined payments" and checks that the evidence cites the declined payment and not the approved
    one.
+6. Asks SQ1 ("15% of my card payments are failing this afternoon — what is the root cause and how do we fix it?") on
+   `POST /v1/assistant/investigate`. The tools run first (`aggregate_failures`, `compare_baseline`,
+   `search_incidents`), and the label and numbers come from them, never from the LLM. The demo checks the label
+   `issuer_outage_on_bin`, top BIN `400000`, a window rate of 10–20% against a baseline under 5%, the cited incident
+   `inc_0001` with its fix, and that the live declined charge from step 2 is cited. See `docs/specs/sq1.md`.
 
 Only the first 8 characters of the API key are printed, and the token is never printed.
 
@@ -159,6 +166,17 @@ These were found by the Day 1 audit and are planned:
 - No request body size limit in front of the APIs (oversized bodies are rejected only after they are read).
 - The token verifier checks `iss`/`aud`/`exp`/`merchant_id` but does not require `iat`/`sub` or check `roles` yet.
 - Base images are pinned by tag, not by digest, and CI does not run osv-scanner yet.
+- The relay loads the full gateway settings, so it mounts the gateway secrets (JWT private key, HMAC keys) although it
+  needs only the database and Redis URLs. Fix: a relay-only settings loader.
+- An incident with `merchant_id` NULL is shown to every merchant. A NULL written by mistake would leak that incident.
+  Fix: an explicit `visibility` column with a CHECK constraint.
+- `card_bin` on the event has no format check and goes into the incident search query (bound parameter, so no SQL
+  injection, but it can change which incidents match).
+- `/v1/assistant/investigate` runs five queries per request with no rate limit, and `payment_facts` has no
+  `(merchant_id, occurred_at)` index.
+- API keys have no `revoked_at`; every `make demo` adds one more key to the demo merchant.
+- The seed is not re-anchored: run more than 6 hours after the first seed, SQ1 answers `no_anomaly`. Start over with
+  `make demo-down` and `docker volume rm payplat_pgdata` (or truncate `ops_ai`).
 
 ## Development notes
 

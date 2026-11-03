@@ -58,6 +58,7 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-payplat}:${POSTGRES_PASSWORD:-payplat-local-only}@postgres:5432/${POSTGRES_DB:-payplat}
       REDIS_URL: redis://redis:6379/0
+      PYTHONPATH: /workspace
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -79,6 +80,16 @@ services:
       - alembic -c services/gateway/alembic.ini upgrade head && alembic -c services/ops-ai/alembic.ini upgrade head
     depends_on:
       postgres: { condition: service_healthy }
+
+  seed:
+    image: payplat-app
+    environment:
+      <<: *app-env
+      # ops_ai.seed and scripts/demo.py import scripts.generate_dataset from the repo root
+      PYTHONPATH: /app
+    command: ["python", "-m", "ops_ai.seed"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
 
   gateway-api:
     image: payplat-app
@@ -116,20 +127,23 @@ services:
     ports: ["127.0.0.1:${OPS_AI_PORT:-8081}:8000"]
     volumes: [*ops-ai-secrets]
     healthcheck: *readyz
-    depends_on: *runtime-deps
+    depends_on: &ops-ai-deps
+      <<: *runtime-deps
+      seed: { condition: service_completed_successfully }
 
   ops-ai-consumer:
     image: payplat-app
     environment: *app-env
     command: ["python", "-m", "ops_ai.ingest.worker"]
     restart: unless-stopped
-    depends_on: *runtime-deps
+    depends_on: *ops-ai-deps
 
   demo:
     profiles: ["demo"]
     image: payplat-app
     environment:
       <<: *app-env
+      PYTHONPATH: /app
       GATEWAY_SECRETS_DIR: /run/secrets/gateway
       GATEWAY_URL: http://gateway-api:8000
       OPS_AI_URL: http://ops-ai-api:8000

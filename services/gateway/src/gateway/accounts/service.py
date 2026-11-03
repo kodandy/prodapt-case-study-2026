@@ -38,6 +38,10 @@ class EmailAlreadyRegisteredError(Exception):
     pass
 
 
+class UnknownMerchantError(Exception):
+    pass
+
+
 def hash_password(password: str) -> str:
     """argon2id hash."""
     return _password_hasher.hash(password)
@@ -76,23 +80,48 @@ def _hash_api_key(api_key: str, pepper: str) -> str:
     return hmac.new(pepper.encode(), api_key.encode(), hashlib.sha256).hexdigest()
 
 
-def create_merchant(session: Session, clock: Clock, name: str, api_key_pepper: str) -> MerchantCredentials:
-    """Creates the merchant and an API key `sk_test_...`. Does not commit."""
-    merchant = Merchant(id=uuid.uuid4(), name=name, created_at=clock())
+def create_merchant(
+    session: Session, clock: Clock, name: str, api_key_pepper: str, merchant_id: uuid.UUID | None = None
+) -> MerchantCredentials:
+    """Creates the merchant (under `merchant_id`, else a random id) and an API key `sk_test_...`.
+
+    Does not commit.
+    """
+    merchant = Merchant(id=merchant_id or uuid.uuid4(), name=name, created_at=clock())
     session.add(merchant)
     session.flush()
+    return MerchantCredentials(
+        merchant_id=merchant.id, api_key=_add_api_key(session, clock, merchant.id, api_key_pepper)
+    )
+
+
+def issue_api_key(
+    session: Session, clock: Clock, merchant_id: uuid.UUID, api_key_pepper: str
+) -> MerchantCredentials:
+    """A new API key for an existing merchant; earlier keys keep working.
+
+    Raises UnknownMerchantError when the merchant does not exist. Does not commit.
+    """
+    if session.get(Merchant, merchant_id) is None:
+        raise UnknownMerchantError
+    return MerchantCredentials(
+        merchant_id=merchant_id, api_key=_add_api_key(session, clock, merchant_id, api_key_pepper)
+    )
+
+
+def _add_api_key(session: Session, clock: Clock, merchant_id: uuid.UUID, api_key_pepper: str) -> str:
     api_key = f"{API_KEY_PREFIX}{secrets.token_urlsafe(32)}"
     session.add(
         ApiKey(
             id=uuid.uuid4(),
-            merchant_id=merchant.id,
+            merchant_id=merchant_id,
             key_hash=_hash_api_key(api_key, api_key_pepper),
             prefix=api_key[: len(API_KEY_PREFIX) + 4],
             created_at=clock(),
         )
     )
     session.flush()
-    return MerchantCredentials(merchant_id=merchant.id, api_key=api_key)
+    return api_key
 
 
 def authenticate_api_key(session: Session, api_key: str, api_key_pepper: str) -> uuid.UUID | None:

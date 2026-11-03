@@ -7,6 +7,7 @@ TEST_PANS: frozenset[str] = frozenset(
         "5555555555554444",
         "4000000000009995",
         "4000000000000002",
+        "4000000000000119",
     }
 )
 """Allowlist: only these test PANs are accepted anywhere in the system."""

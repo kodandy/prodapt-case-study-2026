@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -13,6 +14,8 @@ from ops_ai.assistant.llm_port import LlmPort
 from ops_ai.assistant.service import AnswerMode, ask
 from ops_ai.auth import InvalidTokenError, verify_merchant_token
 from ops_ai.clock import Clock
+from ops_ai.investigation.service import CauseLabel, Intent, investigate
+from ops_ai.investigation.tools import FailureAggregate
 from ops_ai.scope import Scope
 
 
@@ -49,10 +52,66 @@ class AskResponse(BaseModel):
     evidence: list[EvidenceOut]
 
 
+class BinShareOut(BaseModel):
+    card_bin: str
+    failed: int
+    total: int
+
+
+class CodeCountOut(BaseModel):
+    decline_code: str
+    count: int
+
+
+class AggregateOut(BaseModel):
+    start: datetime
+    end: datetime
+    total: int
+    failed: int
+    rate: float
+    by_bin: list[BinShareOut]
+    by_code: list[CodeCountOut]
+
+    @classmethod
+    def of(cls, aggregate: FailureAggregate | None) -> "AggregateOut | None":
+        if aggregate is None:
+            return None
+        return cls(
+            start=aggregate.start,
+            end=aggregate.end,
+            total=aggregate.total,
+            failed=aggregate.failed,
+            rate=aggregate.rate,
+            by_bin=[
+                BinShareOut(card_bin=b.card_bin, failed=b.failed, total=b.total) for b in aggregate.by_bin
+            ],
+            by_code=[CodeCountOut(decline_code=c.decline_code, count=c.count) for c in aggregate.by_code],
+        )
+
+
+class ToolCallOut(BaseModel):
+    name: str
+    args: dict[str, str]
+
+
+class InvestigateResponse(BaseModel):
+    intent: Intent
+    cause_label: CauseLabel
+    mode: AnswerMode
+    text: str | None
+    model: str | None
+    window: AggregateOut | None
+    baseline: AggregateOut | None
+    suggested_fixes: list[str]
+    tool_calls: list[ToolCallOut]
+    evidence: list[EvidenceOut]
+
+
 def create_app(deps: OpsAiAppDeps) -> FastAPI:
     """Routes:
     - GET /healthz → 200 (liveness). GET /readyz → 200 ready, or 503 with the failed components.
     - POST /v1/assistant/ask (Authorization: Bearer <merchant token>) {question} → AskResponse.
+    - POST /v1/assistant/investigate (same auth and body as /ask) → InvestigateResponse; now = deps.clock().
       Missing/invalid/expired token → 401 {"detail": "invalid token"}.
     """
     app = FastAPI(title="ops-ai")
@@ -89,6 +148,25 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
             text=answer.text,
             model=answer.model,
             evidence=[EvidenceOut(ref=item.ref, summary=item.summary) for item in answer.evidence],
+        )
+
+    @app.post("/v1/assistant/investigate")
+    def assistant_investigate(
+        body: AskRequest, scope: Annotated[Scope, Depends(scope_from_token)]
+    ) -> InvestigateResponse:
+        with deps.session_factory() as session:
+            result = investigate(session, scope, body.question, deps.clock(), deps.llm)
+        return InvestigateResponse(
+            intent=result.intent,
+            cause_label=result.cause_label,
+            mode=result.mode,
+            text=result.text,
+            model=result.model,
+            window=AggregateOut.of(result.window),
+            baseline=AggregateOut.of(result.baseline),
+            suggested_fixes=list(result.suggested_fixes),
+            tool_calls=[ToolCallOut(name=call.name, args=call.args) for call in result.tool_calls],
+            evidence=[EvidenceOut(ref=item.ref, summary=item.summary) for item in result.evidence],
         )
 
     return app

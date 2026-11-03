@@ -12,6 +12,7 @@ from gateway.payments.providers.simulator.models import SimulatedCharge
 DECLINES_BY_CARD: dict[tuple[str, str], str] = {
     ("400000", "9995"): "insufficient_funds",
     ("400000", "0002"): "card_declined",
+    ("400000", "0119"): "issuer_unavailable",
 }
 
 

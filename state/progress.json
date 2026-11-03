@@ -504,13 +504,15 @@
       "security-auditor report triaged: hardening H1-H7 (docs/specs/hardening.md) implemented; compose ports bound to 127.0.0.1",
       "README with setup, e2e example, dataset, config, known gaps",
       "hardening H1-H7 + tests committed (76e644b); red-team: no CRITICAL/HIGH, RT-001 fixed by H5, A3 stuck-409 fixed by H1",
-      "private repo https://github.com/kodandy/prodapt-case-study-2026 created and pushed; first Actions run (41584082293) green"
+      "private repo https://github.com/kodandy/prodapt-case-study-2026 created and pushed; first Actions run (41584082293) green",
+      "SQ1 vertical (docs/specs/sq1.md): test card 4000000000000119 -> issuer_unavailable; SQ1_BIN=400000; shared merchant uuid5; ops_ai.seed (time-shifted backfill via apply_payment_event, idempotent) + ops_ai.incidents (FTS) migration; tools aggregate_failures/compare_baseline/search_incidents; POST /v1/assistant/investigate (label + numbers from tools, LLM narrates only); compose seed service; make demo checks SQ1 incl. live decline cited. make ci 505 passed, scripts tests green, make demo all checks passed. security-auditor: no CRITICAL/HIGH (M1 NULL-merchant incident visibility + LOWs -> README known gaps, PYTHONPATH scoped to seed/demo); red-team INCONCLUSIVE (no dynamic run; static trace clean). One RED test fixed with user approval (clock +1h -> +10min, token TTL 15 min)."
     ],
     "blocked": [],
     "todo": [
       "reviewer invite once username is known",
       ".env.example (user must create; .env* writes are denied)",
-      "Day 2: reconciler (unknown + lease reclaim), DB roles for audit_log, ledger DB invariants, stream maxlen, logging"
+      "Day 2: reconciler (unknown + lease reclaim), DB roles for audit_log, ledger DB invariants, stream maxlen, logging",
+      "SQ2-SQ4 verticals; change_timeline is Design only"
     ]
   }
 }
