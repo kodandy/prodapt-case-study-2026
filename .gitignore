@@ -15,3 +15,6 @@ outputs/
 docs/caes-study.pdf
 
 .DS_Store
+
+# generated synthetic dataset (python scripts/generate_dataset.py)
+data/generated/

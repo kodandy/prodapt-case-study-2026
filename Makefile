@@ -24,7 +24,7 @@ fmt:
 	$(RUN) uv run --frozen ruff check --fix .
 
 type:
-	$(RUN) uv run --frozen mypy contracts/src services/gateway/src services/ops-ai/src
+	$(RUN) uv run --frozen mypy contracts/src services/gateway/src services/ops-ai/src scripts/generate_dataset.py
 
 migrate:
 	$(RUN) uv run --frozen alembic -c services/gateway/alembic.ini upgrade head
