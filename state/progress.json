@@ -1,6 +1,6 @@
 {
   "project": "AI-Powered Payment Gateway Platform (case study)",
-  "updated_at": "2026-11-01",
+  "updated_at": "2026-11-03",
   "current_phase": 1,
   "phase_status": "in_progress",
   "phases": [
@@ -11,27 +11,27 @@
     },
     {
       "id": 1,
-      "name": "Repo skeleton, docker compose, synthetic dataset",
+      "name": "Day 1 (11-03/04): repo skeleton, compose, Alembic per service, tooling, make ci + GitHub Actions, synthetic dataset, thin vertical slice (sign-up -> wallet -> charge -> event -> projection -> mock answer) green",
       "status": "in_progress"
     },
     {
       "id": 2,
-      "name": "Basic payments side: accounts, wallets, payments, refunds_disputes, merchant_api, notifications, tickets",
+      "name": "Day 2: Basic payments side + P0 correctness (idempotency, ledger property test, locking, crash matrix, RBAC, audit, log canary) + P1-6 graceful shutdown",
       "status": "not_started"
     },
     {
       "id": 3,
-      "name": "Basic AI side: search, support_assistant, fraud + 4 sample queries E2E",
+      "name": "Day 2: Basic AI side (taxonomy, search, assistant, tools, memory, fraud_watch, alerts, tickets) + SQ1-SQ4 E2E + P0 AI safety (LLM outage, LLM input masking, read-only tools, injection fixtures) + P0 observability (OTel, metrics, alert rules) + eval gate",
       "status": "not_started"
     },
     {
       "id": 4,
-      "name": "Advanced (priority order)",
+      "name": "P1 if ahead, in order: P1-6 health/shutdown -> P1-8 model pinning + fallback + cost cap -> P1-5 load test -> P1-3 circuit breaker -> P1-4 rate limits -> P1-2 retry/DLQ; then Advanced",
       "status": "not_started"
     },
     {
       "id": 5,
-      "name": "Diagram, design doc, README, presentation, final traceability re-check",
+      "name": "Day 3 (11-05/06): observability dashboard (Grafana), UI completion, diagram, design doc with P2 (GCP), production-readiness + runbooks, README, presentation, final traceability re-check",
       "status": "not_started"
     }
   ],
@@ -68,28 +68,46 @@
     {
       "phase": 1,
       "item": "Submission repo created outside resume; docs/ and state/ moved; initial commit c653b6e"
+    },
+    {
+      "phase": 1,
+      "item": "Detailed architecture confirmed (D-014..D-018), commit 8479d92"
+    },
+    {
+      "phase": 1,
+      "item": "Requirements-fit review applied (D-019) and production-grade P0 axis adopted (D-020)",
+      "file": "docs/architecture-detail.md",
+      "log": "~/.claude/logs/consults/20261103-124449-consult.md"
     }
   ],
   "remaining": [
     {
       "phase": 1,
-      "item": "Repo layout: services/gateway, services/ops-ai (Python), web (Vite), proto/, scripts/, docs/, state/"
+      "item": "Repo layout per docs/architecture-detail.md section 1 (services/gateway, services/ops-ai, contracts, proto, web, scripts, ops, .github)"
     },
     {
       "phase": 1,
-      "item": "docker compose: postgres+pgvector (separate schemas), redis, gateway api/worker, ops-ai api/worker, web; one-command start without API key"
+      "item": "docker compose: postgres+pgvector (separate schemas), redis, gateway api/worker, ops-ai api/worker, web, nginx, otel-collector, prometheus, grafana (provisioned dashboard); one-command start without API key"
     },
     {
       "phase": 1,
-      "item": "Tooling: mypy strict, ruff, pytest, tsc strict, eslint no-explicit-any; .env.example"
+      "item": "Tooling: mypy strict, ruff, pytest, tsc strict, eslint no-explicit-any; .env.example; Makefile `make ci` mirroring .github/workflows/ci.yml (P0-15); Alembic migration history per service, upgrade/downgrade in CI (P1-7, pulled forward)"
     },
     {
       "phase": 1,
-      "item": "scripts/generate_dataset.py (>=10k, seeded, CSV+JSON, planted SQ1-SQ4 scenarios) + tests"
+      "item": "scripts/generate_dataset.py (>=10k, seeded, canonical scenario log -> CSV+JSON + gateway import, planted SQ1-SQ4, incident effectiveness fields) + tests"
+    },
+    {
+      "phase": 1,
+      "item": "Thin vertical slice green in make ci (risk mitigation, architecture-detail section 10 #4)"
     },
     {
       "phase": 2,
-      "item": "accounts, wallets, payments (ledger, FX, tokenization), refunds_disputes, merchant_api (REST+gRPC, idempotency), notifications (outbox), tickets"
+      "item": "accounts (RBAC P0-9), wallets (holds, locking P0-3), payments (ledger P0-2, FX, tokenization, idempotency P0-1, reconciler), refunds_disputes, history, risk (rules + dependency policy), merchant_api REST+gRPC, outbox, notifications, audit (P0-10), settlement, simulator with charge ledger + fault hooks"
+    },
+    {
+      "phase": 2,
+      "item": "Crash matrix C1-C5 (P0-4), log canary test (P0-11)"
     },
     {
       "phase": 2,
@@ -97,27 +115,47 @@
     },
     {
       "phase": 3,
-      "item": "search (FTS + pgvector + RRF), support_assistant (taxonomy, tools, RAG, memory, guardrails), fraud (sync score, card-testing detector)"
+      "item": "ingest, taxonomy, search (FTS + pgvector + RRF), investigation tools (read-only), assistant (LlmPort, mock, llm_input masking P0-6, injection guardrails P0-8, answer contract, AI audit trail), memory, fraud_watch, alerts, tickets"
     },
     {
       "phase": 3,
-      "item": "SQ1-SQ4 E2E tests on mock LLM; manual run on real OpenAI key"
+      "item": "LLM outage test (P0-5), read-only tool registry + human-confirmed refund (P0-7)"
+    },
+    {
+      "phase": 3,
+      "item": "Observability: structured logs with trace_id, OTel traces across API/worker/LLM (P0-12), /metrics (P0-13), alert rules + promtool tests (P0-14), /healthz /readyz"
+    },
+    {
+      "phase": 3,
+      "item": "SQ1-SQ4 E2E tests on mock LLM; deterministic DeepEval custom metrics gate + cross-tenant hard gate (P0-15); manual run on real OpenAI key"
     },
     {
       "phase": 4,
-      "item": "Advanced 1: evaluation (golden set independent of generator templates, keyword/vector/hybrid ablation, DeepEval when key present, custom fraud/failure metrics)"
+      "item": "P1 in order: graceful shutdown on SIGTERM (P1-6), model/prompt pinning + fallback model + daily token budget (P1-8), k6/Locust load test (P1-5), circuit breaker (P1-3), rate limits (P1-4), retry/backoff/jitter + DLQ (P1-2)"
     },
     {
       "phase": 4,
-      "item": "Advanced 2: LLM-as-judge (rank root-cause hypotheses, validate dispute decisions)"
-    },
-    {
-      "phase": 4,
-      "item": "Advanced 3-8 as time allows"
+      "item": "Advanced if time: extended eval, LLM-as-judge, Stripe test-mode adapter (only with reconciliation path)"
     },
     {
       "phase": 5,
-      "item": "docs/architecture.md (+ PDF/PNG via mmdc), docs/design.md, README.md, docs/presentation.md, traceability re-check"
+      "item": "docs/architecture.md (+ PDF/PNG via mmdc), docs/design.md (Decision / Why / What we gave up / Alternatives per decision, lock strategy, P0 evidence map, P2-1..P2-8 on GCP), README.md, traceability re-check"
+    },
+    {
+      "phase": 5,
+      "item": "docs/production-readiness.md (DOC-1, per-NFR status + evidence; absorbs architecture-detail section 8)"
+    },
+    {
+      "phase": 5,
+      "item": "docs/runbooks/card-failure-spike.md (DOC-2) and docs/runbooks/llm-provider-outage.md (DOC-3)"
+    },
+    {
+      "phase": 5,
+      "item": "Add gave_up field to every decision in state/progress.json (DOC-4)"
+    },
+    {
+      "phase": 5,
+      "item": "docs/presentation.md: 0:30 goal, 4:00 SQ1-SQ4, >=3:00 production (PR-1 same-key concurrency test, PR-2 failure spike -> alert -> Grafana -> runbook, PR-3 NFR status table, crash recovery one-liner), 0:30 wrap-up, 2:00 Q&A"
     }
   ],
   "decisions": [
@@ -285,6 +323,35 @@
       "decision": "All remaining sections of docs/architecture-detail.md confirmed as written: repo layout; ledger and per-method state machines; refund+chargeback principal cap under the payment lock; sync charge path (tx1 reserves idempotency key + payment + attempt, provider call outside tx, guarded tx2, reconciler with provider acceptance deadline, 202 for async methods); SQ2 decline rule recording; settlement line items; provider simulator; identity/roles; audit; stream topics, relay, consumer dedupe, entity_version; query/command API and approval binding; ops-ai projections with query-time aggregates; hybrid search with swappable keyword side; investigation tools; memory; fraud_watch; tickets; web/ops; tested restart behavior; top-3 risks fixed first.",
       "file": "docs/architecture-detail.md",
       "consult_log": "~/.claude/logs/consults/20261101-130100-consult.md"
+    },
+    {
+      "id": "D-019",
+      "status": "confirmed",
+      "confirmed_at": "2026-11-03",
+      "topic": "Requirements-fit fixes to the detailed architecture",
+      "decision": "B4 failure taxonomy in ops-ai (rules first, LLM fallback proposes from a closed list with confidence, low confidence -> unclassified, retryable from a deterministic policy, versioned fix playbook + RAG notes); B11 recipients (gateway 'was this you?' to cardholder/merchant, ops-ai alerts to ops staff only, both deduped); B3 history endpoints and dispute arbiter (simulated network or ops_lead; merchant submits evidence); B8 gRPC idempotency key in metadata, one validation module; no synchronous balance rows on platform accounts; funds hold for wallet debits leaving via external rails with stated invariants; observability + AI audit trail; risk dependency policy (rules only, risk_unavailable / degraded_scoring, DB down -> stop, unknown never rerouted); NFR claim wording (P99, multi-region, E2E encryption, GDPR, PCI, AML/KYC); Requirement 2 fit and fraud-pattern conflict answer; incident resolution-effectiveness fields in the dataset.",
+      "file": "docs/architecture-detail.md",
+      "why": "Review against Requirement 1/2 and NFRs found 4 Basic gaps, 3 design defects and over-claims."
+    },
+    {
+      "id": "D-020",
+      "status": "confirmed",
+      "confirmed_at": "2026-11-03",
+      "topic": "Production-grade design as the main axis",
+      "decision": "Strict priority Basic > P0 > P1 > P2. P0 items P0-1..P0-15 (requirements-traceability.md) folded into the Basic slices as acceptance criteria. Key choices: Redis SET NX is contention suppression only, Postgres unique + provider key give correctness; 'charged once' proved at the provider (simulator charge ledger); crash matrix C1-C5 with one real process kill; pessimistic row locks on user accounts in id order, platform accounts append-only; unknown never retried with a new key, past the retention window -> manual reconciliation; agent tools read-only, money moves only via gateway API with the human's JWT after explicit confirmation (no new port command); allowlisted LLM input DTO + free-text redaction + canary tests; injection fixtures; RBAC policy table with ownership/tenant tests; audit in the same tx, trigger + grants (no tamper-detection claim unless the cut-first hash chain ships); OTel traces across API/worker/LLM with trace_id as correlation id; Prometheus metrics and promtool-tested alert rules; CI with deterministic DeepEval custom metrics as gate and cross-tenant hard gate, LLM-judge only with a key; mock-derived numbers labeled. Outbox stays core (Basic), although the instruction lists it as P1. Cut order if behind: audit hash chain -> Jaeger UI -> P1.",
+      "file": "docs/architecture-detail.md",
+      "why": "The user was rejected elsewhere for 'PoC only, no production evidence'; reviewers must see production experience in code, tests, docs and demo.",
+      "consult_log": "~/.claude/logs/consults/20261103-124449-consult.md"
+    },
+    {
+      "id": "D-021",
+      "status": "confirmed",
+      "confirmed_at": "2026-11-03",
+      "topic": "Rest of P1, P2 on GCP, production documents and presentation",
+      "decision": "P1 adds P1-6 health/readiness/graceful shutdown, P1-7 Alembic (pulled forward to Day 1), P1-8 model and prompt pinning + fallback model + daily token budget. P1 order: P1-6, P1-8, P1-5, P1-3, P1-4, P1-2. Outbox stays Basic. P2-1..P2-8 written in docs/design.md for GCP (Spanner vs. per-region Cloud SQL, 99.999 % with error budget, PCI scope reduction with KMS/HSM, residency + crypto-shredding, canary/flags/rollback, backup/restore RTO/RPO, 100k TPS, mTLS/WORM/AML); Redis Streams locally, Pub/Sub on GCP. New docs: production-readiness.md (DOC-1), two runbooks (DOC-2, DOC-3), Decision/Why/Gave up/Alternatives format (DOC-4). Grafana added to compose for the dashboard demo. Presentation gives >=3 min to production design with 3 demos (PR-1..PR-3).",
+      "file": "docs/requirements-traceability.md",
+      "why": "The full production-readiness instruction answered Q-011.",
+      "gave_up": "A hand-built metrics UI (Grafana instead); Alembic as a later P1 item (moved to Day 1); implementing any P2 item; listing outbox under P1."
     }
   ],
   "open_questions": [
@@ -352,6 +419,13 @@
       "id": "Q-010",
       "question": "Notification channels: in-app (stored + shown in UI) plus a console/log email adapter enough, or do you want a local mail catcher (e.g. Mailpit) in compose?",
       "default_if_no_answer": "In-app + log adapter."
+    },
+    {
+      "id": "Q-011",
+      "question": "The production-readiness instruction was cut off at P1 'ヘルスチェックと起...'. What are the rest of P1 and the P2 list?",
+      "default_if_no_answer": "P1 = items received + /healthz /readyz (already P0); P2 = design-only items already in architecture-detail section 7/8.",
+      "status": "resolved",
+      "resolved_by": "D-021 (full instruction received 2026-11-03)"
     }
   ],
   "recruiter_confirmation_2026-11-01": {
@@ -378,11 +452,19 @@
       "D-015",
       "D-016",
       "D-017",
-      "D-018"
+      "D-018",
+      "D-019",
+      "D-020",
+      "D-021"
     ],
     "consult_log": "~/.claude/logs/consults/20261101-130100-consult.md",
     "still_deferred": [
       "Japan context (Japanese tokenization / multilingual embedder)"
+    ],
+    "consult_logs": [
+      "~/.claude/logs/consults/20261101-130100-consult.md",
+      "~/.claude/logs/consults/20261103-124449-consult.md"
     ]
-  }
+  },
+  "priority_order": "Basic 13 items > P0 (implemented + tested) > P1 (if time) > P2 (design doc only); P0/P1 never displace Basic (D-020)"
 }
