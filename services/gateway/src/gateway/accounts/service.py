@@ -42,6 +42,10 @@ class UnknownMerchantError(Exception):
     pass
 
 
+class UnknownUserError(Exception):
+    pass
+
+
 def hash_password(password: str) -> str:
     """argon2id hash."""
     return _password_hasher.hash(password)
@@ -54,8 +58,20 @@ def verify_password(password_hash: str, password: str) -> bool:
         return False
 
 
-def sign_up(session: Session, clock: Clock, email: str, password: str, currency: str = "USD") -> SignUpResult:
-    """Creates the user and one wallet ledger account (with a zero balance row) in `currency`.
+_DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(16))
+"""Verified against for an unknown email, so both login failures cost one argon2 verification."""
+
+
+def sign_up(
+    session: Session,
+    clock: Clock,
+    email: str,
+    password: str,
+    currency: str = "USD",
+    user_id: uuid.UUID | None = None,
+) -> SignUpResult:
+    """Creates the user (under `user_id`, else a random id) and one wallet ledger account (with a zero
+    balance row) in `currency`.
 
     Raises EmailAlreadyRegisteredError for a duplicate email (case-insensitive). Does not commit.
     """
@@ -63,7 +79,12 @@ def sign_up(session: Session, clock: Clock, email: str, password: str, currency:
     existing = session.scalar(select(User.id).where(func.lower(User.email) == normalized))
     if existing is not None:
         raise EmailAlreadyRegisteredError
-    user = User(id=uuid.uuid4(), email=normalized, password_hash=hash_password(password), created_at=clock())
+    user = User(
+        id=user_id or uuid.uuid4(),
+        email=normalized,
+        password_hash=hash_password(password),
+        created_at=clock(),
+    )
     session.add(user)
     try:
         with session.begin_nested():
@@ -74,6 +95,26 @@ def sign_up(session: Session, clock: Clock, email: str, password: str, currency:
     session.add(AccountBalance(account_id=wallet_id, available_minor=0, held_minor=0))
     session.flush()
     return SignUpResult(user_id=user.id, wallet_account_id=wallet_id)
+
+
+def authenticate_user(session: Session, email: str, password: str) -> uuid.UUID | None:
+    """The user id for a matching email (case-insensitive) and correct password, else None."""
+    row = session.execute(
+        select(User.id, User.password_hash).where(func.lower(User.email) == email.strip().lower())
+    ).one_or_none()
+    if row is None:
+        verify_password(_DUMMY_PASSWORD_HASH, password)
+        return None
+    return row.id if verify_password(row.password_hash, password) else None
+
+
+def set_password(session: Session, user_id: uuid.UUID, password: str) -> None:
+    """Operator-side password replacement. Raises UnknownUserError for an unknown id. Does not commit."""
+    user = session.get(User, user_id)
+    if user is None:
+        raise UnknownUserError
+    user.password_hash = hash_password(password)
+    session.flush()
 
 
 def _hash_api_key(api_key: str, pepper: str) -> str:

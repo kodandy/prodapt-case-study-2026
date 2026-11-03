@@ -1,3 +1,4 @@
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -12,11 +13,13 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from ops_ai.assistant.llm_port import LlmPort
 from ops_ai.assistant.service import AnswerMode, ask
-from ops_ai.auth import InvalidTokenError, verify_merchant_token
+from ops_ai.auth import InvalidTokenError, verify_token
 from ops_ai.clock import Clock
 from ops_ai.investigation.service import CauseLabel, Intent, investigate
 from ops_ai.investigation.tools import FailureAggregate
-from ops_ai.scope import Scope
+from ops_ai.scope import Principal, Scope, UserScope
+from ops_ai.transfers import CauseCode, RemediationOwner, TransferStatus
+from ops_ai.transfers.service import investigate_transfer
 
 
 def _always_ready() -> list[str]:
@@ -94,6 +97,64 @@ class ToolCallOut(BaseModel):
     args: dict[str, str]
 
 
+class InvestigateTransferRequest(BaseModel):
+    """No identity field: the sender comes from the token only, so `user_id` here is a 422."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(min_length=1, max_length=2000)
+    transfer_id: uuid.UUID | None = None
+
+
+class TransferOut(BaseModel):
+    """No `rule_id` and no `reason_code`: the sender is told the numbers, not the external system's codes."""
+
+    transfer_id: uuid.UUID
+    amount_minor: int
+    currency: str
+    method: str
+    status: str
+    country_sender: str
+    country_receiver: str
+    kyc_tier: int | None
+    limit_minor: int | None
+    limit_currency: str | None
+    next_tier_limit_minor: int | None
+    sender_balance_minor: int | None
+    decided_at: datetime
+
+    @classmethod
+    def of(cls, transfer: TransferStatus) -> "TransferOut":
+        return cls(
+            transfer_id=transfer.transfer_id,
+            amount_minor=transfer.amount_minor,
+            currency=transfer.currency,
+            method=transfer.method,
+            status=transfer.status,
+            country_sender=transfer.country_sender,
+            country_receiver=transfer.country_receiver,
+            kyc_tier=transfer.kyc_tier,
+            limit_minor=transfer.limit_minor,
+            limit_currency=transfer.limit_currency,
+            next_tier_limit_minor=transfer.next_tier_limit_minor,
+            sender_balance_minor=transfer.sender_balance_minor,
+            decided_at=transfer.decided_at,
+        )
+
+
+class InvestigateTransferResponse(BaseModel):
+    cause_code: CauseCode
+    remediation_owner: RemediationOwner
+    mode: AnswerMode
+    text: str | None
+    model: str | None
+    transfer: TransferOut
+    balance_covered_amount: bool | None
+    suggested_fixes: list[str]
+    tool_calls: list[ToolCallOut]
+    evidence: list[EvidenceOut]
+
+
 class InvestigateResponse(BaseModel):
     intent: Intent
     cause_label: CauseLabel
@@ -112,21 +173,34 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
     - GET /healthz → 200 (liveness). GET /readyz → 200 ready, or 503 with the failed components.
     - POST /v1/assistant/ask (Authorization: Bearer <merchant token>) {question} → AskResponse.
     - POST /v1/assistant/investigate (same auth and body as /ask) → InvestigateResponse; now = deps.clock().
-      Missing/invalid/expired token → 401 {"detail": "invalid token"}.
+    - POST /v1/assistant/investigate-transfer (Authorization: Bearer <user token>) {question, transfer_id?}
+      → InvestigateTransferResponse. Another sender's transfer and a missing one → the identical 404.
+    Missing/invalid/expired token → 401 {"detail": "invalid token"}. A valid token of the other kind
+    (user token on the merchant routes, merchant token on the transfer route) → 403 {"detail": "forbidden"}.
     """
     app = FastAPI(title="ops-ai")
     app.add_exception_handler(RequestValidationError, _validation_error_without_input)
     bearer = HTTPBearer(auto_error=False)
 
-    def scope_from_token(
+    def principal_from_token(
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
-    ) -> Scope:
+    ) -> Principal:
         if credentials is None or credentials.scheme.lower() != "bearer":
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid token")
         try:
-            return verify_merchant_token(credentials.credentials, deps.jwt_public_key_pem, deps.clock())
+            return verify_token(credentials.credentials, deps.jwt_public_key_pem, deps.clock())
         except InvalidTokenError:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid token") from None
+
+    def merchant_scope(principal: Annotated[Principal, Depends(principal_from_token)]) -> Scope:
+        if not isinstance(principal, Scope):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
+        return principal
+
+    def user_scope(principal: Annotated[Principal, Depends(principal_from_token)]) -> UserScope:
+        if not isinstance(principal, UserScope):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
+        return principal
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -140,7 +214,7 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
         return JSONResponse({"status": "ready"})
 
     @app.post("/v1/assistant/ask")
-    def assistant_ask(body: AskRequest, scope: Annotated[Scope, Depends(scope_from_token)]) -> AskResponse:
+    def assistant_ask(body: AskRequest, scope: Annotated[Scope, Depends(merchant_scope)]) -> AskResponse:
         with deps.session_factory() as session:
             answer = ask(session, scope, body.question, deps.llm)
         return AskResponse(
@@ -152,7 +226,7 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
 
     @app.post("/v1/assistant/investigate")
     def assistant_investigate(
-        body: AskRequest, scope: Annotated[Scope, Depends(scope_from_token)]
+        body: AskRequest, scope: Annotated[Scope, Depends(merchant_scope)]
     ) -> InvestigateResponse:
         with deps.session_factory() as session:
             result = investigate(session, scope, body.question, deps.clock(), deps.llm)
@@ -164,6 +238,27 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
             model=result.model,
             window=AggregateOut.of(result.window),
             baseline=AggregateOut.of(result.baseline),
+            suggested_fixes=list(result.suggested_fixes),
+            tool_calls=[ToolCallOut(name=call.name, args=call.args) for call in result.tool_calls],
+            evidence=[EvidenceOut(ref=item.ref, summary=item.summary) for item in result.evidence],
+        )
+
+    @app.post("/v1/assistant/investigate-transfer")
+    def assistant_investigate_transfer(
+        body: InvestigateTransferRequest, scope: Annotated[UserScope, Depends(user_scope)]
+    ) -> InvestigateTransferResponse:
+        with deps.session_factory() as session:
+            result = investigate_transfer(session, scope, body.question, body.transfer_id, deps.llm)
+        if result is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "transfer not found")
+        return InvestigateTransferResponse(
+            cause_code=result.cause_code,
+            remediation_owner=result.remediation_owner,
+            mode=result.mode,
+            text=result.text,
+            model=result.model,
+            transfer=TransferOut.of(result.transfer),
+            balance_covered_amount=result.balance_covered_amount,
             suggested_fixes=list(result.suggested_fixes),
             tool_calls=[ToolCallOut(name=call.name, args=call.args) for call in result.tool_calls],
             evidence=[EvidenceOut(ref=item.ref, summary=item.summary) for item in result.evidence],

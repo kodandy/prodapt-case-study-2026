@@ -7,3 +7,13 @@ class Scope:
     """Built from auth only, never from model output. Every repository function takes one."""
 
     merchant_id: uuid.UUID
+
+
+@dataclass(frozen=True)
+class UserScope:
+    """A consumer's own data only. Built from a verified user token, never from the request body."""
+
+    user_id: uuid.UUID
+
+
+Principal = Scope | UserScope

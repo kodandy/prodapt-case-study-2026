@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from conftest import ALEMBIC_CONFIGS
 
 INITIAL_REVISION = "4bfd36022245"
+INCIDENTS_REVISION = "318aeacd647d"
 STARTED_AT = datetime(2026, 9, 14, 13, 0, tzinfo=UTC)
 RESOLVED_AT = datetime(2026, 9, 14, 16, 40, tzinfo=UTC)
 
@@ -166,15 +167,15 @@ def test_merchant_id_and_resolved_at_accept_null(session_factory: sessionmaker[S
     assert (row.merchant_id, row.resolved_at, row.recurrence_within_7d) == (None, None, False)
 
 
-def test_the_latest_migration_is_a_single_step_after_the_initial_ops_ai_schema() -> None:
+def test_the_incidents_migration_is_a_single_step_after_the_initial_ops_ai_schema() -> None:
     # Arrange
     script = ScriptDirectory.from_config(_ops_ai_config())
 
     # Act
-    head = script.get_revision(script.get_current_head() or "")
+    incidents = script.get_revision(INCIDENTS_REVISION)
 
     # Assert
-    assert head.down_revision == INITIAL_REVISION
+    assert incidents.down_revision == INITIAL_REVISION
 
 
 def test_migration_downgrade_removes_incidents_and_upgrade_restores_it(engine: Engine) -> None:

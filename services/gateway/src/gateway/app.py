@@ -9,8 +9,18 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-from gateway.accounts.service import EmailAlreadyRegisteredError, authenticate_api_key, sign_up
-from gateway.accounts.tokens import MERCHANT_TOKEN_TTL_SECONDS, issue_merchant_token
+from gateway.accounts.service import (
+    EmailAlreadyRegisteredError,
+    authenticate_api_key,
+    authenticate_user,
+    sign_up,
+)
+from gateway.accounts.tokens import (
+    MERCHANT_TOKEN_TTL_SECONDS,
+    USER_TOKEN_TTL_SECONDS,
+    issue_merchant_token,
+    issue_user_token,
+)
 from gateway.payments.charge import ChargeDeps, charge_card
 from gateway.payments.schemas import ChargeRequest
 
@@ -30,6 +40,10 @@ class SignUpRequest(BaseModel):
     password: SecretStr = Field(min_length=8, max_length=256)
 
 
+class UserTokenRequest(SignUpRequest):
+    """Same field rules as sign-up."""
+
+
 class SignUpResponse(BaseModel):
     user_id: str
     wallet_account_id: str
@@ -41,6 +55,10 @@ class MerchantTokenResponse(BaseModel):
     expires_in: int
 
 
+class UserTokenResponse(MerchantTokenResponse):
+    pass
+
+
 def create_app(deps: GatewayAppDeps) -> FastAPI:
     """Routes:
     - POST /v1/signup {email, password} → 201 {user_id, wallet_account_id}; duplicate email → 409.
@@ -49,6 +67,8 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
       missing Idempotency-Key → 400; invalid card → 422.
     - POST /v1/merchant-tokens (Bearer API key) → 201 {access_token, token_type, expires_in}: an RS256 token
       for ops-ai. Invalid API key → 401; no private key configured → 503.
+    - POST /v1/user-tokens {email, password} → 201 {access_token, token_type, expires_in}: an RS256 user token
+      for ops-ai. Unknown email and wrong password → the identical 401; no private key configured → 503.
     - GET /healthz → 200 (liveness). GET /readyz → 200 ready, or 503 with the failed components.
     """
     app = FastAPI(title="gateway")
@@ -89,6 +109,19 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
         return MerchantTokenResponse(access_token=token, expires_in=MERCHANT_TOKEN_TTL_SECONDS)
+
+    @app.post("/v1/user-tokens", status_code=status.HTTP_201_CREATED)
+    def user_tokens(body: UserTokenRequest, response: Response) -> UserTokenResponse:
+        if deps.jwt_private_key_pem is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "token issuing not configured")
+        with session_factory() as session:
+            user_id = authenticate_user(session, body.email, body.password.get_secret_value())
+        if user_id is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
+        token = issue_user_token(deps.jwt_private_key_pem, user_id, deps.charge.clock())
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        return UserTokenResponse(access_token=token, expires_in=USER_TOKEN_TTL_SECONDS)
 
     @app.post("/v1/signup", status_code=status.HTTP_201_CREATED)
     def signup(body: SignUpRequest) -> SignUpResponse:

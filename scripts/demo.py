@@ -1,8 +1,9 @@
-"""End-to-end walkthrough for `make demo`: charges over HTTP, wait for the consumer, ask the assistant, then
-investigate SQ1 over the seeded history (docs/specs/sq1.md section 9).
+"""End-to-end walkthrough for `make demo`: charges over HTTP, wait for the consumer, ask the assistant,
+investigate SQ1 over the seeded history (docs/specs/sq1.md section 9), then log in as the seeded SQ2 sender
+and investigate the declined transfer (docs/specs/sq2.md section 8).
 
-Prints one ✓/✗ line per check and exits 0 only if every check passed. Never prints the API key in full or the
-merchant token.
+Prints one ✓/✗ line per check and exits 0 only if every check passed. Never prints the API key in full, a
+password or a token.
 """
 
 import os
@@ -14,12 +15,15 @@ from collections.abc import Callable
 
 import httpx
 from contracts.events import PAYMENTS_TOPIC
-from gateway.admin import bootstrap_merchant
+from gateway.admin import bootstrap_merchant, bootstrap_user
 from gateway.clock import system_clock
 from gateway.config import load_gateway_settings
 from gateway.db import make_engine, make_session_factory
 from ops_ai.seed import merchant_uuid
 from redis import Redis
+from sqlalchemy.orm import Session, sessionmaker
+
+from scripts.generate_dataset import generate
 
 PAYMENT_FACTS_GROUP = "ops-ai.payment-facts"
 APPROVED_PAN = "4242424242424242"
@@ -33,6 +37,8 @@ SQ1_QUESTION = (
     "15% of my card payments are failing this afternoon — what is the root cause and how do we fix it?"
 )
 INVESTIGATION_TOOLS = ["aggregate_failures", "compare_baseline", "search_incidents"]
+SQ2_SENDER_EMAIL = "sq2-sender@example.com"
+SQ2_QUESTION = "My international transfer was declined even though I had enough money — what triggered it?"
 
 
 class Demo:
@@ -131,6 +137,91 @@ def _investigate_sq1(demo: Demo, ops_ai: httpx.Client, token: str, declined_ref:
         print(f"    evidence {ref}", flush=True)
 
 
+def _sq2_sender_id() -> uuid.UUID:
+    """The planted SQ2 sender of the same dataset the seed loads (seed 42, default record count)."""
+    log = generate(seed=42)
+    return next(tx for tx in log.transactions if tx.transaction_id == log.planted.sq2_transaction_id).user_id
+
+
+def _investigate_sq2(
+    demo: Demo,
+    gateway: httpx.Client,
+    ops_ai: httpx.Client,
+    merchant_token: str,
+    session_factory: sessionmaker[Session],
+) -> None:
+    print("\nSQ2: " + SQ2_QUESTION, flush=True)
+    password = secrets.token_urlsafe(18)
+    sender_id = bootstrap_user(session_factory, system_clock, SQ2_SENDER_EMAIL, password, _sq2_sender_id())
+    demo.check("SQ2 sender ready", True, f"user {sender_id}")
+    login = gateway.post("/v1/user-tokens", json={"email": SQ2_SENDER_EMAIL, "password": password})
+    demo.check("user token issued (email + password login)", login.status_code == 201, f"{login.status_code}")
+    user_token = login.json().get("access_token", "") if login.status_code == 201 else ""
+
+    response = ops_ai.post(
+        "/v1/assistant/investigate-transfer",
+        headers={"Authorization": f"Bearer {user_token}"},
+        json={"question": SQ2_QUESTION},
+    )
+    body = response.json() if response.status_code == 200 else {}
+    transfer = body.get("transfer") or {}
+    amount, limit = transfer.get("amount_minor", 0), transfer.get("limit_minor")
+    tools = [call["name"] for call in body.get("tool_calls", [])]
+    refs = [item["ref"] for item in body.get("evidence", [])]
+    fixes = body.get("suggested_fixes", [])
+    transfer_id = transfer.get("transfer_id")
+    demo.check(
+        "transfer investigation answered",
+        response.status_code == 200,
+        f"{response.status_code} mode={body.get('mode')}",
+    )
+    demo.check(
+        "cause code is cross_border_limit_for_kyc_tier",
+        body.get("cause_code") == "cross_border_limit_for_kyc_tier",
+        str(body.get("cause_code")),
+    )
+    demo.check(
+        "the sender can fix it", body.get("remediation_owner") == "sender", str(body.get("remediation_owner"))
+    )
+    demo.check(
+        "balance covered the amount",
+        body.get("balance_covered_amount") is True,
+        f"balance {transfer.get('sender_balance_minor')} vs amount {amount} "
+        f"{transfer.get('currency')} (minor)",
+    )
+    demo.check(
+        "amount above the KYC tier limit",
+        isinstance(limit, int) and amount > limit,
+        f"amount {amount} > tier {transfer.get('kyc_tier')} limit {limit} {transfer.get('limit_currency')} "
+        f"(minor), {transfer.get('country_sender')} to {transfer.get('country_receiver')}",
+    )
+    demo.check(
+        "one fix: upgrade to KYC tier 2",
+        len(fixes) == 1 and "tier 2" in str(fixes[0]).lower(),
+        str(fixes[0]) if fixes else "none",
+    )
+    demo.check("tool called", tools == ["get_payment_status"], ", ".join(tools))
+    demo.check(
+        "evidence cites the transfer, the balance and the limit",
+        refs == [f"transfer:{transfer_id}", f"balance:{transfer_id}", f"limit:{transfer_id}"],
+    )
+    for item in body.get("evidence", []):
+        print(f"    evidence {item['ref']}: {item['summary']}", flush=True)
+
+    as_merchant = ops_ai.post(
+        "/v1/assistant/investigate-transfer",
+        headers={"Authorization": f"Bearer {merchant_token}"},
+        json={"question": SQ2_QUESTION},
+    )
+    demo.check("merchant token gets 403 on the transfer route", as_merchant.status_code == 403)
+    as_user = ops_ai.post(
+        "/v1/assistant/investigate",
+        headers={"Authorization": f"Bearer {user_token}"},
+        json={"question": SQ1_QUESTION},
+    )
+    demo.check("user token gets 403 on /investigate", as_user.status_code == 403)
+
+
 def run() -> int:
     demo = Demo()
     settings = load_gateway_settings()
@@ -202,6 +293,7 @@ def run() -> int:
     demo.check("evidence leaves out the approved charge", approved_ref not in refs)
 
     _investigate_sq1(demo, ops_ai, token, declined_ref)
+    _investigate_sq2(demo, gateway, ops_ai, token, session_factory)
 
     summary = "all checks passed" if demo.failures == 0 else f"{demo.failures} check(s) failed"
     print(f"\n{summary}", flush=True)

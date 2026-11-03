@@ -46,7 +46,7 @@ No `.env` file and no `OPENAI_API_KEY` are needed: without a key the assistant u
 |---|---|
 | `demo-secrets` | One-shot. Generates the demo secrets (two HMAC keys and an RSA 2048 key pair) into the named volume `demo-secrets`, creating only missing files |
 | `migrate` | One-shot. Runs both Alembic histories |
-| `seed` | One-shot. Loads the synthetic dataset (seed 42, 12000 records) and its incidents into ops-ai, shifted so the planted SQ1 afternoon ends now. A re-run adds nothing |
+| `seed` | One-shot. Loads the synthetic dataset (seed 42, 12000 records) and its incidents into ops-ai, shifted so the planted SQ1 afternoon ends now, then the P2P transfer decision records (`python -m ops_ai.transfers`, same shift). A re-run adds nothing |
 | `gateway-api` | Gateway HTTP API on `127.0.0.1:8080` |
 | `relay` | Outbox relay: publishes committed outbox rows to the Redis stream |
 | `ops-ai-api` | Ops assistant HTTP API on `127.0.0.1:8081` |
@@ -72,8 +72,16 @@ the JWT private key, and ops-ai gets only the public key.
    `search_incidents`), and the label and numbers come from them, never from the LLM. The demo checks the label
    `issuer_outage_on_bin`, top BIN `400000`, a window rate of 10–20% against a baseline under 5%, the cited incident
    `inc_0001` with its fix, and that the live declined charge from step 2 is cited. See `docs/specs/sq1.md`.
+7. SQ2 as the seeded sender: sets a fresh random password on the planted SQ2 sender (`bootstrap_user`, operator-side,
+   no HTTP route), logs in with email and password (`POST /v1/user-tokens`, an RS256 user token with role
+   `consumer`), and asks "My international transfer was declined even though I had enough money — what triggered
+   it?" on `POST /v1/assistant/investigate-transfer`. The tool `get_payment_status` reads only the sender's own
+   transfers. The demo checks the cause `cross_border_limit_for_kyc_tier`, owner `sender`, a balance that covered the
+   amount, an amount above the KYC tier 1 limit, the one fix (upgrade to KYC tier 2), the evidence refs
+   `transfer:` / `balance:` / `limit:`, and that the merchant token gets 403 on this route and the user token gets 403
+   on `/investigate`. See `docs/specs/sq2.md`.
 
-Only the first 8 characters of the API key are printed, and the token is never printed.
+Only the first 8 characters of the API key are printed. Passwords and tokens are never printed.
 
 ## End-to-end test
 
@@ -164,7 +172,13 @@ These were found by the Day 1 audit and are planned:
   payment events. The consumer refuses to move a payment to another merchant, but it can still record payments that
   never happened. Fix: per-service Redis ACL users and DB roles with schema grants.
 - No request body size limit in front of the APIs (oversized bodies are rejected only after they are read).
-- The token verifier checks `iss`/`aud`/`exp`/`merchant_id` but does not require `iat`/`sub` or check `roles` yet.
+- The token verifier checks `iss`/`aud`/`exp`, exactly one of `merchant_id`/`user_id`, the role list, and `sub` on
+  user tokens, but does not require `iat` or `sub` on merchant tokens yet.
+- `POST /v1/user-tokens` has no rate limit and no lockout, so passwords can be guessed online. Unknown email and
+  wrong password cost the same argon2 verification and give the identical 401.
+- User tokens cannot be revoked before they expire (15 minutes).
+- The transfer system is a fixture (`scripts/transfer_fixture.py`) loaded by the seed. There is no transfer execution,
+  no stream event for transfers, and no FX.
 - Base images are pinned by tag, not by digest, and CI does not run osv-scanner yet.
 - The relay loads the full gateway settings, so it mounts the gateway secrets (JWT private key, HMAC keys) although it
   needs only the database and Redis URLs. Fix: a relay-only settings loader.
