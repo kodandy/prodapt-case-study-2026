@@ -491,13 +491,13 @@
       "test typing fixes approved by user; make ci green (113 tests)",
       "dataset generator scripts/generate_dataset.py + 91 tests (cb4422e); output in data/generated (git-ignored)",
       "security-auditor report triaged: hardening H1-H7 (docs/specs/hardening.md) implemented; compose ports bound to 127.0.0.1",
-      "README with setup, e2e example, dataset, config, known gaps"
+      "README with setup, e2e example, dataset, config, known gaps",
+      "hardening H1-H7 + tests committed (76e644b); red-team: no CRITICAL/HIGH, RT-001 fixed by H5, A3 stuck-409 fixed by H1",
+      "private repo https://github.com/kodandy/prodapt-case-study-2026 created and pushed; first Actions run (41584082293) green"
     ],
     "blocked": [],
     "todo": [
-      "hardening tests (test-writer) green, then commit",
-      "red-team report triage",
-      "GitHub private repo + push + first Actions run; reviewer invite once username is known",
+      "reviewer invite once username is known",
       ".env.example (user must create; .env* writes are denied)",
       "Day 2: reconciler (unknown + lease reclaim), DB roles for audit_log, ledger DB invariants, stream maxlen, logging"
     ]
