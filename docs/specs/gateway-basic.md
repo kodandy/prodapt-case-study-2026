@@ -191,8 +191,9 @@ factor and a wallet read. `/v1/user-tokens` is unchanged (it does not ask for TO
 3. **TOTP = RFC 6238, SHA-1, 6 digits, 30 s step**, accepting steps −1, 0, +1 around now. **Replay**: a code is
    accepted only if its step is greater than the last accepted step for that user (stored), so a code works once.
 4. **Lockout** on the second factor: `TOTP_MAX_FAILURES = 5` consecutive wrong codes (verify or login) lock TOTP
-   for `TOTP_LOCKOUT = 15 minutes`; a success resets the counter. While locked, every TOTP check fails with
-   `TotpLockedError` even for a correct code. Password-only brute force stays bounded by the existing login
+   for `TOTP_LOCKOUT = 15 minutes`; only a success resets the counter, so after a lock expires one more wrong
+   code locks again (audit M1: the budget does not refill every 15 minutes). While locked, every TOTP check fails
+   with `TotpLockedError` even for a correct code. A stored secret that fails to decrypt answers 503. Password-only brute force stays bounded by the existing login
    semaphore; per-IP / per-email throttling is Design.
 5. **Audit** (append-only `audit_log`, actor `user:<id>`, role `consumer`): `auth.login` (success, summary `amr`),
    `auth.login_failed` (known user only, summary `{"factor": "password" | "totp"}`), `mfa.totp_enrolled`,

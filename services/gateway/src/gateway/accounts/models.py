@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, String
+from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Integer, LargeBinary, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from gateway.db import GatewayBase, uuid_pk
@@ -32,3 +32,19 @@ class ApiKey(GatewayBase):
     key_hash: Mapped[str] = mapped_column(String(64), unique=True)
     prefix: Mapped[str] = mapped_column(String(16))
     created_at: Mapped[datetime]
+
+
+class UserTotp(GatewayBase):
+    """`confirmed_at` set = TOTP enabled. The secret is AES-256-GCM ciphertext (`gateway.accounts.mfa`)."""
+
+    __tablename__ = "user_totp"
+    __table_args__ = (CheckConstraint("failed_attempts >= 0", name="failed_attempts_non_negative"),)
+
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    secret_ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
+    confirmed_at: Mapped[datetime | None]
+    last_used_step: Mapped[int | None] = mapped_column(BigInteger)
+    failed_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    locked_until: Mapped[datetime | None]
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]

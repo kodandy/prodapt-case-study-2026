@@ -11,12 +11,32 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
+from gateway.accounts.mfa import (
+    InvalidTotpCodeError,
+    TotpAlreadyEnabledError,
+    TotpDecryptError,
+    TotpLockedError,
+    TotpNotEnrolledError,
+    check_totp,
+    confirm_totp,
+    enrol_totp,
+    totp_enabled,
+)
 from gateway.accounts.service import (
     EmailAlreadyRegisteredError,
+    LoginRecord,
     authenticate_api_key,
     find_login,
     sign_up,
     verify_login,
+)
+from gateway.accounts.sessions import (
+    AMR_FIRST_FACTOR,
+    AMR_OTP,
+    SESSION_TOKEN_TTL_SECONDS,
+    InvalidSessionError,
+    issue_session_token,
+    verify_session_token,
 )
 from gateway.accounts.tokens import (
     MERCHANT_TOKEN_TTL_SECONDS,
@@ -24,6 +44,7 @@ from gateway.accounts.tokens import (
     issue_merchant_token,
     issue_user_token,
 )
+from gateway.audit.models import AuditLog
 from gateway.payments.charge import ChargeDeps, charge_card
 from gateway.payments.disputes import (
     DisputeNotFoundError,
@@ -44,6 +65,7 @@ from gateway.payments.schemas import (
     RefundRequest,
 )
 from gateway.payments.state import PaymentState
+from gateway.wallets.service import WalletBalanceView, list_wallets
 
 LOGIN_CONCURRENCY = 4
 LOGIN_SLOT_WAIT_SECONDS = 2.0
@@ -58,6 +80,7 @@ class GatewayAppDeps:
     readiness: Callable[[], list[str]] = field(default=lambda: [])
     login_slots: threading.BoundedSemaphore | None = None
     """Caps concurrent argon2 verifications on login; None → LOGIN_CONCURRENCY slots."""
+    totp_encryption_key: str | None = field(default=None, repr=False)
 
 
 class SignUpRequest(BaseModel):
@@ -86,6 +109,33 @@ class UserTokenResponse(MerchantTokenResponse):
     pass
 
 
+class SessionRequest(SignUpRequest):
+    totp_code: SecretStr | None = Field(default=None, min_length=1, max_length=16)
+
+
+class SessionResponse(MerchantTokenResponse):
+    amr: list[str]
+
+
+class TotpEnrolResponse(BaseModel):
+    secret: str
+    otpauth_uri: str
+
+
+class TotpVerifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: SecretStr = Field(min_length=1, max_length=16)
+
+
+class TotpVerifyResponse(BaseModel):
+    totp_enabled: bool
+
+
+class WalletListResponse(BaseModel):
+    items: list[WalletBalanceView]
+
+
 class PaymentListResponse(BaseModel):
     items: list[PaymentSummary]
     next_cursor: str | None
@@ -103,6 +153,15 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
       for ops-ai. Unknown email and wrong password → the identical 401; no private key configured → 503.
       At most LOGIN_CONCURRENCY password checks run at once; no slot within LOGIN_SLOT_WAIT_SECONDS → 503
       {"detail": "try again later"} with Retry-After: 1.
+    - POST /v1/sessions {email, password, totp_code?} → 201 {access_token, token_type, expires_in, amr}: a
+      gateway session (aud "gateway"). Bad credentials or a wrong TOTP code → 401 "invalid credentials"; TOTP
+      enabled without a code → 401 "mfa required"; TOTP locked → 423; enabled without an encryption key → 503.
+      Same login slots as /v1/user-tokens.
+    - POST /v1/me/mfa/totp (Bearer session) → 201 {secret, otpauth_uri}; already enabled → 409.
+    - POST /v1/me/mfa/totp/verify (Bearer session) {code} → 200 {"totp_enabled": true}; wrong code → 400;
+      not enrolled → 404; already enabled → 409; locked → 423. Both MFA routes → 503 without the key.
+    - GET /v1/me/wallets (Bearer session) → 200 {items}. Once TOTP is enabled, a `/v1/me/*` session must carry
+      "otp" in amr, else 401 "mfa required".
     - GET /v1/payments?limit&cursor&state (Bearer API key) → 200 {items, next_cursor}: the merchant's
       payments, newest first. Invalid cursor → 400.
     - GET /v1/payments/{payment_id}/risk (Bearer API key) → 200 PaymentRiskView (flags only); unknown or
@@ -132,6 +191,57 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid api key")
         return merchant_id
 
+    def check_password(body: SignUpRequest) -> tuple[LoginRecord | None, uuid.UUID | None]:
+        """Unknown email and wrong password take the same argon2 path; 503 when no login slot is free."""
+        with session_factory() as session:
+            record = find_login(session, body.email)
+        if not login_slots.acquire(timeout=LOGIN_SLOT_WAIT_SECONDS):
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE, "try again later", headers={"Retry-After": "1"}
+            )
+        try:
+            return record, verify_login(record, body.password.get_secret_value())
+        finally:
+            login_slots.release()
+
+    def write_user_audit(user_id: uuid.UUID, action: str, summary: dict[str, object]) -> None:
+        with session_factory.begin() as session:
+            session.add(
+                AuditLog(
+                    actor_id=f"user:{user_id}",
+                    actor_role="consumer",
+                    action=action,
+                    target=f"user:{user_id}",
+                    summary=summary,
+                    correlation_id=uuid.uuid4().hex,
+                    occurred_at=deps.charge.clock(),
+                )
+            )
+
+    def session_user(
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+    ) -> uuid.UUID:
+        if credentials is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing session")
+        if deps.jwt_private_key_pem is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid session")
+        try:
+            claims = verify_session_token(
+                deps.jwt_private_key_pem, credentials.credentials, deps.charge.clock()
+            )
+        except InvalidSessionError:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid session") from None
+        with session_factory() as session:
+            needs_otp = totp_enabled(session, claims.user_id)
+        if needs_otp and AMR_OTP not in claims.amr:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "mfa required")
+        return claims.user_id
+
+    def totp_key() -> str:
+        if deps.totp_encryption_key is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "mfa not configured")
+        return deps.totp_encryption_key
+
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
@@ -159,22 +269,95 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     def user_tokens(body: UserTokenRequest, response: Response) -> UserTokenResponse:
         if deps.jwt_private_key_pem is None:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "token issuing not configured")
-        with session_factory() as session:
-            record = find_login(session, body.email)
-        if not login_slots.acquire(timeout=LOGIN_SLOT_WAIT_SECONDS):
-            raise HTTPException(
-                status.HTTP_503_SERVICE_UNAVAILABLE, "try again later", headers={"Retry-After": "1"}
-            )
-        try:
-            user_id = verify_login(record, body.password.get_secret_value())
-        finally:
-            login_slots.release()
+        _, user_id = check_password(body)
         if user_id is None:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
         token = issue_user_token(deps.jwt_private_key_pem, user_id, deps.charge.clock())
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
         return UserTokenResponse(access_token=token, expires_in=USER_TOKEN_TTL_SECONDS)
+
+    @app.post("/v1/sessions", status_code=status.HTTP_201_CREATED)
+    def create_session(body: SessionRequest, response: Response) -> SessionResponse:
+        if deps.jwt_private_key_pem is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "token issuing not configured")
+        record, user_id = check_password(body)
+        if user_id is None:
+            if record is not None:
+                write_user_audit(record.user_id, "auth.login_failed", {"factor": "password"})
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
+        with session_factory() as session:
+            needs_otp = totp_enabled(session, user_id)
+        amr: tuple[str, ...] = (AMR_FIRST_FACTOR,)
+        if needs_otp:
+            if deps.totp_encryption_key is None:
+                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "mfa not configured")
+            if body.totp_code is None:
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "mfa required")
+            try:
+                check_totp(
+                    session_factory,
+                    deps.charge.clock,
+                    deps.totp_encryption_key,
+                    user_id,
+                    body.totp_code.get_secret_value(),
+                )
+            except InvalidTotpCodeError:
+                write_user_audit(user_id, "auth.login_failed", {"factor": "totp"})
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials") from None
+            except TotpLockedError:
+                raise HTTPException(status.HTTP_423_LOCKED, "mfa locked") from None
+            except TotpDecryptError:
+                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "mfa unavailable") from None
+            amr = (AMR_FIRST_FACTOR, AMR_OTP)
+        token = issue_session_token(deps.jwt_private_key_pem, user_id, deps.charge.clock(), amr)
+        write_user_audit(user_id, "auth.login", {"amr": list(amr)})
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        return SessionResponse(access_token=token, expires_in=SESSION_TOKEN_TTL_SECONDS, amr=list(amr))
+
+    @app.post("/v1/me/mfa/totp", status_code=status.HTTP_201_CREATED)
+    def enrol_mfa_totp(
+        user_id: Annotated[uuid.UUID, Depends(session_user)],
+        key: Annotated[str, Depends(totp_key)],
+        response: Response,
+    ) -> TotpEnrolResponse:
+        try:
+            enrolment = enrol_totp(session_factory, deps.charge.clock, key, user_id)
+        except TotpAlreadyEnabledError:
+            raise HTTPException(status.HTTP_409_CONFLICT, "totp already enabled") from None
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        return TotpEnrolResponse(secret=enrolment.secret, otpauth_uri=enrolment.otpauth_uri)
+
+    @app.post("/v1/me/mfa/totp/verify")
+    def verify_mfa_totp(
+        body: TotpVerifyRequest,
+        user_id: Annotated[uuid.UUID, Depends(session_user)],
+        key: Annotated[str, Depends(totp_key)],
+    ) -> TotpVerifyResponse:
+        try:
+            confirm_totp(session_factory, deps.charge.clock, key, user_id, body.code.get_secret_value())
+        except InvalidTotpCodeError:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid code") from None
+        except TotpNotEnrolledError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "totp not enrolled") from None
+        except TotpAlreadyEnabledError:
+            raise HTTPException(status.HTTP_409_CONFLICT, "totp already enabled") from None
+        except TotpLockedError:
+            raise HTTPException(status.HTTP_423_LOCKED, "mfa locked") from None
+        except TotpDecryptError:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "mfa unavailable") from None
+        return TotpVerifyResponse(totp_enabled=True)
+
+    @app.get("/v1/me/wallets")
+    def my_wallets(
+        user_id: Annotated[uuid.UUID, Depends(session_user)], response: Response
+    ) -> WalletListResponse:
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        with session_factory() as session:
+            return WalletListResponse(items=list_wallets(session, user_id))
 
     @app.post("/v1/signup", status_code=status.HTTP_201_CREATED)
     def signup(body: SignUpRequest) -> SignUpResponse:
