@@ -78,6 +78,12 @@
       "item": "Requirements-fit review applied (D-019) and production-grade P0 axis adopted (D-020)",
       "file": "docs/architecture-detail.md",
       "log": "~/.claude/logs/consults/20261103-124449-consult.md"
+    },
+    {
+      "phase": 1,
+      "item": "Submission outline (scope anchor): Basic coverage depth per item, non-goals, demo script, doc/slide skeleton, schedule",
+      "file": "docs/submission-outline.md",
+      "log": "~/.claude/logs/consults/20261103-145215-consult.md"
     }
   ],
   "remaining": [
