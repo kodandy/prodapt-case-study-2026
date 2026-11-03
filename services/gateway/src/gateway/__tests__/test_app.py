@@ -7,7 +7,7 @@ from gateway.app import GatewayAppDeps, create_app
 from gateway.clock import FixedClock
 from gateway.payments.charge import ChargeDeps
 from gateway.payments.providers.simulator.provider import SimulatorProvider
-from gateway.payments.schemas import CardSummary, ChargeResponse
+from gateway.payments.schemas import MAX_AMOUNT_MINOR, CardSummary, ChargeResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -190,3 +190,88 @@ def test_payments_repeat_with_the_same_key_returns_the_same_body(
         payment_count = session.execute(text("SELECT count(*) FROM gateway.payments")).scalar_one()
         simulator_count = session.execute(text("SELECT count(*) FROM simulator.charges")).scalar_one()
     assert (payment_count, simulator_count) == (1, 1)
+
+
+# --- H3: concurrent duplicate sign-up over HTTP ---
+
+
+def _precheck_misses(*_args: object, **_kwargs: object) -> None:
+    return None
+
+
+def test_signup_race_on_the_email_unique_constraint_returns_409_email_already_registered(
+    session_factory: sessionmaker[Session], clock: FixedClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange
+    client = _client(session_factory, clock)
+    first = client.post("/v1/signup", json={"email": "alice@example.com", "password": "correct horse"})
+    monkeypatch.setattr(Session, "scalar", _precheck_misses)
+
+    # Act
+    response = client.post("/v1/signup", json={"email": "alice@example.com", "password": "another one"})
+
+    # Assert
+    assert first.status_code == 201
+    assert response.status_code == 409
+    assert response.json() == {"detail": "email already registered"}
+    with session_factory() as session:
+        emails = session.execute(text("SELECT email FROM gateway.users")).scalars().all()
+    assert emails == ["alice@example.com"]
+
+
+# --- H5: amount upper bound over HTTP ---
+
+
+def test_payments_with_an_amount_beyond_int64_returns_422_validation_failed_without_echoing_the_pan(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    client = _client(session_factory, clock)
+    _, auth = _merchant_auth(session_factory, clock)
+    body = {**_charge_body(), "amount_minor": 2**63}
+
+    # Act
+    response = client.post("/v1/payments", json=body, headers={**auth, "Idempotency-Key": "key-huge"})
+
+    # Assert
+    payload = response.json()
+    assert response.status_code == 422
+    assert payload["error"] == "validation_failed"
+    assert [error["loc"] for error in payload["detail"]] == [["body", "amount_minor"]]
+    assert VALID_CARD["number"] not in response.text
+    with session_factory() as session:
+        payment_count = session.execute(text("SELECT count(*) FROM gateway.payments")).scalar_one()
+    assert payment_count == 0
+
+
+def test_payments_with_an_amount_just_above_the_maximum_returns_422_validation_failed(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    client = _client(session_factory, clock)
+    _, auth = _merchant_auth(session_factory, clock)
+    body = {**_charge_body(), "amount_minor": MAX_AMOUNT_MINOR + 1}
+
+    # Act
+    response = client.post("/v1/payments", json=body, headers={**auth, "Idempotency-Key": "key-max-plus-one"})
+
+    # Assert
+    assert response.status_code == 422
+    assert response.json()["error"] == "validation_failed"
+
+
+def test_payments_with_an_amount_equal_to_the_maximum_returns_201(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    client = _client(session_factory, clock)
+    _, auth = _merchant_auth(session_factory, clock)
+    body = {**_charge_body(), "amount_minor": MAX_AMOUNT_MINOR}
+
+    # Act
+    response = client.post("/v1/payments", json=body, headers={**auth, "Idempotency-Key": "key-max"})
+
+    # Assert
+    assert response.status_code == 201
+    assert response.json()["amount_minor"] == MAX_AMOUNT_MINOR
+    assert response.json()["state"] == "succeeded"

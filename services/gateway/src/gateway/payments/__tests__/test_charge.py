@@ -9,7 +9,7 @@ from contracts.events import PAYMENTS_TOPIC, PaymentEventV1
 from gateway.accounts.models import Merchant
 from gateway.clock import FixedClock
 from gateway.payments.charge import ChargeDeps, ChargeHooks, ChargeOutcome, charge_card
-from gateway.payments.providers.port import CardRef, ProviderPort, ProviderResult
+from gateway.payments.providers.port import CardRef, ProviderPort, ProviderResult, ProviderTimeoutError
 from gateway.payments.providers.simulator.provider import SimulatorProvider
 from gateway.payments.schemas import CardSummary, ChargeRequest, ChargeResponse
 from gateway.payments.tokenization.cards import card_fingerprint
@@ -523,3 +523,198 @@ def test_e2_crash_after_tx2_commit_then_retry_returns_the_stored_body_without_a_
     assert h.simulator.charge_count() == 1
     assert _count(session_factory, "journals") == 1
     assert _count(session_factory, "outbox") == 1
+
+
+# --- H1 / H2: unknown outcome is stored and replayed; only transport failures count as unknown ---------
+
+
+class FailingProvider:
+    """Provider whose `charge` always raises the given error type; counts calls (thread-safe)."""
+
+    def __init__(self, error_type: type[Exception], name: str = "acq_failing") -> None:
+        self.name = name
+        self._error_type = error_type
+        self._lock = threading.Lock()
+        self._calls = 0
+
+    @property
+    def calls(self) -> int:
+        with self._lock:
+            return self._calls
+
+    def charge(self, provider_key: str, amount_minor: int, currency: str, card: CardRef) -> ProviderResult:
+        with self._lock:
+            self._calls += 1
+        raise self._error_type("boom")
+
+    def lookup(self, provider_key: str) -> ProviderResult | None:
+        return None
+
+
+def _failing_harness(
+    session_factory: sessionmaker[Session],
+    clock: FixedClock,
+    error_type: type[Exception],
+    redis: Redis | None = None,
+    idempotency_wait_seconds: float = 5.0,
+) -> tuple[ChargeDeps, FailingProvider, uuid.UUID]:
+    base = _harness(session_factory, clock, redis=redis, idempotency_wait_seconds=idempotency_wait_seconds)
+    provider = FailingProvider(error_type)
+    return dataclasses.replace(base.deps, provider=provider), provider, base.merchant_id
+
+
+def _stored_idempotency_rows(session_factory: sessionmaker[Session]) -> list[dict[str, object]]:
+    return _rows(
+        session_factory,
+        "SELECT key, payment_id, response_status, response_body FROM gateway.idempotency_keys",
+    )
+
+
+UNKNOWN_ERROR_TYPES = [ProviderTimeoutError, ConnectionError, TimeoutError]
+PROPAGATING_ERROR_TYPES = [ValueError, RuntimeError]
+
+
+def test_h1_unknown_outcome_returns_202_and_stores_status_and_body_on_the_idempotency_row(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    deps, _, merchant_id = _failing_harness(session_factory, clock, ProviderTimeoutError)
+
+    # Act
+    outcome = charge_card(deps, merchant_id, "key-unknown", _request())
+
+    # Assert
+    assert outcome.status_code == 202
+    assert outcome.body == _expected_body(
+        outcome.body, state="unknown", bin_="424242", last4="4242", decline_code=None
+    )
+    assert _stored_idempotency_rows(session_factory) == [
+        {
+            "key": "key-unknown",
+            "payment_id": uuid.UUID(str(outcome.body["payment_id"])),
+            "response_status": 202,
+            "response_body": outcome.body,
+        }
+    ]
+
+
+@pytest.mark.parametrize("use_redis", [False, True], ids=["without_redis", "with_redis"])
+def test_h1_retry_after_unknown_replays_the_202_body_without_waiting_or_calling_the_provider_again(
+    session_factory: sessionmaker[Session], clock: FixedClock, redis_client: Redis, use_redis: bool
+) -> None:
+    # Arrange
+    deps, provider, merchant_id = _failing_harness(
+        session_factory,
+        clock,
+        ProviderTimeoutError,
+        redis=redis_client if use_redis else None,
+        idempotency_wait_seconds=5.0,
+    )
+    request = _request()
+    first = charge_card(deps, merchant_id, "key-unknown-retry", request)
+
+    # Act
+    started = time.monotonic()
+    retry = charge_card(deps, merchant_id, "key-unknown-retry", request)
+    elapsed = time.monotonic() - started
+
+    # Assert
+    assert first.status_code == 202
+    assert retry.status_code == 202
+    assert retry.body == first.body
+    assert elapsed < 2.0
+    assert provider.calls == 1
+    assert _count(session_factory, "payments") == 1
+
+
+def test_h1_retry_after_unknown_with_a_different_body_is_rejected_as_key_reuse(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    deps, provider, merchant_id = _failing_harness(session_factory, clock, ProviderTimeoutError)
+    charge_card(deps, merchant_id, "key-unknown-reuse", _request(amount_minor=1500))
+
+    # Act
+    outcome = charge_card(deps, merchant_id, "key-unknown-reuse", _request(amount_minor=1501))
+
+    # Assert
+    assert outcome.status_code == 422
+    assert outcome.body == {"error": "idempotency_key_reused"}
+    assert provider.calls == 1
+    assert _count(session_factory, "payments") == 1
+
+
+def test_h1_unknown_outcome_writes_no_journal_no_outbox_row_and_no_audit_row(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    deps, _, merchant_id = _failing_harness(session_factory, clock, ProviderTimeoutError)
+
+    # Act
+    charge_card(deps, merchant_id, "key-unknown-quiet", _request())
+
+    # Assert
+    assert _count(session_factory, "journals") == 0
+    assert _count(session_factory, "postings") == 0
+    assert _count(session_factory, "outbox") == 0
+    assert _count(session_factory, "audit") == 0
+    assert _rows(session_factory, "SELECT state FROM gateway.payments") == [{"state": "unknown"}]
+
+
+@pytest.mark.parametrize("error_type", UNKNOWN_ERROR_TYPES)
+def test_h2_transport_level_provider_failures_are_an_unknown_outcome_returned_as_202(
+    session_factory: sessionmaker[Session], clock: FixedClock, error_type: type[Exception]
+) -> None:
+    # Arrange
+    deps, provider, merchant_id = _failing_harness(session_factory, clock, error_type)
+
+    # Act
+    outcome = charge_card(deps, merchant_id, "key-transport", _request())
+
+    # Assert
+    assert outcome.status_code == 202
+    assert outcome.body == _expected_body(
+        outcome.body, state="unknown", bin_="424242", last4="4242", decline_code=None
+    )
+    assert provider.calls == 1
+    assert _rows(session_factory, "SELECT state FROM gateway.payments") == [{"state": "unknown"}]
+
+
+@pytest.mark.parametrize("error_type", PROPAGATING_ERROR_TYPES)
+def test_h2_any_other_provider_exception_propagates_with_its_type_and_is_not_turned_into_202(
+    session_factory: sessionmaker[Session], clock: FixedClock, error_type: type[Exception]
+) -> None:
+    # Arrange
+    deps, provider, merchant_id = _failing_harness(session_factory, clock, error_type)
+
+    # Act
+    with pytest.raises(error_type) as raised:
+        charge_card(deps, merchant_id, "key-bug", _request())
+
+    # Assert
+    assert type(raised.value) is error_type
+    assert str(raised.value) == "boom"
+    assert provider.calls == 1
+
+
+@pytest.mark.parametrize("error_type", PROPAGATING_ERROR_TYPES)
+def test_h2_a_propagated_provider_exception_leaves_the_payment_unfinalized(
+    session_factory: sessionmaker[Session], clock: FixedClock, error_type: type[Exception]
+) -> None:
+    # Arrange
+    deps, _, merchant_id = _failing_harness(session_factory, clock, error_type)
+
+    # Act
+    with pytest.raises(error_type):
+        charge_card(deps, merchant_id, "key-bug-state", _request())
+
+    # Assert
+    assert _rows(session_factory, "SELECT state FROM gateway.payments") == [{"state": "created"}]
+    assert _rows(session_factory, "SELECT state FROM gateway.payment_attempts") == [{"state": "created"}]
+    rows = _stored_idempotency_rows(session_factory)
+    assert [(row["key"], row["response_status"], row["response_body"]) for row in rows] == [
+        ("key-bug-state", None, None)
+    ]
+    assert _count(session_factory, "journals") == 0
+    assert _count(session_factory, "outbox") == 0
+    assert _count(session_factory, "audit") == 0

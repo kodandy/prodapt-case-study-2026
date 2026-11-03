@@ -28,10 +28,13 @@ class CardInput(BaseModel):
         return value
 
 
+MAX_AMOUNT_MINOR = 10**12
+
+
 class ChargeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    amount_minor: int = Field(gt=0)
+    amount_minor: int = Field(gt=0, le=MAX_AMOUNT_MINOR)
     currency: Literal["USD", "EUR", "JPY", "INR"]
     method: Literal["card"] = "card"
     card: CardInput

@@ -13,7 +13,7 @@ TEST_PANS: frozenset[str] = frozenset(
 
 
 def luhn_valid(pan: str) -> bool:
-    if not pan.isdigit() or not 12 <= len(pan) <= 19:
+    if not (pan.isascii() and pan.isdigit()) or not 12 <= len(pan) <= 19:
         return False
     total = 0
     for index, char in enumerate(reversed(pan)):

@@ -1,5 +1,5 @@
 import pytest
-from gateway.payments.schemas import ChargeRequest
+from gateway.payments.schemas import MAX_AMOUNT_MINOR, ChargeRequest
 from gateway.payments.tokenization.cards import TEST_PANS
 from pydantic import ValidationError
 
@@ -99,4 +99,45 @@ def test_charge_request_rejects_an_unknown_card_field() -> None:
     # Assert
     assert [(error["type"], error["loc"]) for error in exc.value.errors()] == [
         ("extra_forbidden", ("card", "holder"))
+    ]
+
+
+# --- H5: amount upper bound ------------------------------------------------------------------------------
+
+
+def test_max_amount_minor_is_one_trillion_minor_units() -> None:
+    # Arrange: constant exported from the schema module
+
+    # Act
+    value = MAX_AMOUNT_MINOR
+
+    # Assert
+    assert value == 10**12
+
+
+def test_charge_request_accepts_an_amount_equal_to_the_maximum() -> None:
+    # Arrange
+    payload = _payload(amount_minor=MAX_AMOUNT_MINOR)
+
+    # Act
+    request = ChargeRequest.model_validate(payload)
+
+    # Assert
+    assert request.amount_minor == MAX_AMOUNT_MINOR
+
+
+@pytest.mark.parametrize(
+    "amount_minor", [MAX_AMOUNT_MINOR + 1, 2**63], ids=["max_plus_one", "int64_overflow"]
+)
+def test_charge_request_rejects_an_amount_above_the_maximum(amount_minor: int) -> None:
+    # Arrange
+    payload = _payload(amount_minor=amount_minor)
+
+    # Act
+    with pytest.raises(ValidationError) as exc:
+        ChargeRequest.model_validate(payload)
+
+    # Assert
+    assert [(error["type"], error["loc"]) for error in exc.value.errors()] == [
+        ("less_than_equal", ("amount_minor",))
     ]

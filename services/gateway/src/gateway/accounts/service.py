@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from gateway.accounts.models import ApiKey, Merchant, User
@@ -60,7 +61,11 @@ def sign_up(session: Session, clock: Clock, email: str, password: str, currency:
         raise EmailAlreadyRegisteredError
     user = User(id=uuid.uuid4(), email=normalized, password_hash=hash_password(password), created_at=clock())
     session.add(user)
-    session.flush()
+    try:
+        with session.begin_nested():
+            session.flush()
+    except IntegrityError as exc:
+        raise EmailAlreadyRegisteredError from exc
     wallet_id = ensure_account(session, "user", user.id, WALLET_KIND, currency)
     session.add(AccountBalance(account_id=wallet_id, available_minor=0, held_minor=0))
     session.flush()

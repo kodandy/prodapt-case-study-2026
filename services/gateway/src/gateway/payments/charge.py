@@ -21,7 +21,7 @@ from gateway.outbox.models import OutboxEvent
 from gateway.payments.idempotency.models import IdempotencyRecord
 from gateway.payments.ledger.service import PostingLine, ensure_account, post_journal
 from gateway.payments.models import Payment, PaymentAttempt
-from gateway.payments.providers.port import CardRef, ProviderPort, ProviderResult
+from gateway.payments.providers.port import CardRef, ProviderPort, ProviderResult, ProviderTimeoutError
 from gateway.payments.schemas import CardSummary, ChargeRequest, ChargeResponse
 from gateway.payments.state import FINALIZABLE_STATES, PaymentState
 from gateway.payments.tokenization.cards import card_fingerprint
@@ -212,7 +212,7 @@ def _call_provider(provider: ProviderPort, claim: _Claim, request: ChargeRequest
     """Outside any transaction. None means the outcome is unknown (timeout or transport failure)."""
     try:
         return provider.charge(str(claim.attempt_id), request.amount_minor, request.currency, claim.card)
-    except Exception:
+    except (ProviderTimeoutError, ConnectionError, TimeoutError):
         return None
 
 
@@ -262,6 +262,11 @@ def _finalize(
             decline_code=decline_code,
         ).model_dump(mode="json")
         if state == "unknown":
+            session.execute(
+                update(IdempotencyRecord)
+                .where(IdempotencyRecord.merchant_id == merchant_id, IdempotencyRecord.key == idempotency_key)
+                .values(response_status=202, response_body=response)
+            )
             return ChargeOutcome(202, response)
         if state == "succeeded":
             _post_charge_journal(session, deps.clock, merchant_id, claim.payment_id, request)

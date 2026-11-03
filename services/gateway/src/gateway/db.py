@@ -33,7 +33,9 @@ def uuid_pk() -> Mapped[uuid.UUID]:
 
 
 def make_engine(database_url: str) -> Engine:
-    return create_engine(database_url, pool_size=30, max_overflow=10, pool_pre_ping=True)
+    return create_engine(
+        database_url, pool_size=30, max_overflow=10, pool_pre_ping=True, hide_parameters=True
+    )
 
 
 def make_session_factory(engine: Engine) -> sessionmaker[Session]:

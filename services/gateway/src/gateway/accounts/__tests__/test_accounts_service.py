@@ -190,3 +190,36 @@ def test_authenticate_api_key_returns_none_when_the_pepper_differs(
     # Assert
     assert result is None
     assert isinstance(credentials.merchant_id, uuid.UUID)
+
+
+# --- H3: concurrent duplicate sign-up maps to the domain error ---------------------------------------------
+
+
+def _precheck_misses(*_args: object, **_kwargs: object) -> None:
+    """Stands in for `Session.scalar`: the e-mail pre-check misses a rival sign-up that commits later."""
+    return None
+
+
+@pytest.mark.parametrize("second_email", ["alice@example.com", "ALICE@Example.COM"])
+def test_sign_up_maps_a_unique_violation_after_a_missed_precheck_to_the_domain_error(
+    session_factory: sessionmaker[Session],
+    clock: FixedClock,
+    monkeypatch: pytest.MonkeyPatch,
+    second_email: str,
+) -> None:
+    # Arrange
+    with session_factory() as session:
+        sign_up(session, clock, "alice@example.com", PASSWORD)
+        session.commit()
+
+    # Act
+    with session_factory() as session:
+        monkeypatch.setattr(session, "scalar", _precheck_misses)
+        with pytest.raises(EmailAlreadyRegisteredError) as raised:
+            sign_up(session, clock, second_email, PASSWORD)
+        session.rollback()
+
+    # Assert
+    assert type(raised.value) is EmailAlreadyRegisteredError
+    assert _rows(session_factory, "SELECT email FROM gateway.users") == [{"email": "alice@example.com"}]
+    assert _rows(session_factory, "SELECT kind FROM gateway.ledger_accounts") == [{"kind": "wallet"}]

@@ -1,11 +1,13 @@
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+MIN_SECRET_LENGTH = 32
+
 
 class GatewaySettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="GATEWAY_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="GATEWAY_", extra="ignore", hide_input_in_errors=True)
 
     database_url: str = Field(validation_alias="DATABASE_URL")
     redis_url: str = Field(validation_alias="REDIS_URL")
-    api_key_pepper: SecretStr
-    card_fingerprint_key: SecretStr
+    api_key_pepper: SecretStr = Field(min_length=MIN_SECRET_LENGTH)
+    card_fingerprint_key: SecretStr = Field(min_length=MIN_SECRET_LENGTH)
