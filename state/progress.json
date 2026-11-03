@@ -84,6 +84,11 @@
       "item": "Submission outline (scope anchor): Basic coverage depth per item, non-goals, demo script, doc/slide skeleton, schedule",
       "file": "docs/submission-outline.md",
       "log": "~/.claude/logs/consults/20261103-145215-consult.md"
+    },
+    {
+      "phase": 1,
+      "item": "Runtime R1-R8: merchant RS256 token (gateway) + verification (ops-ai), /readyz on both APIs, relay and consumer workers with signal handling and PEL retry, demo secrets volume, compose services, make demo green (10/10 checks); make ci 315 passed + scripts tests; security-auditor MEDIUM (M1 merchant_id overwrite fixed, M2 shared DB role + Redis ACL documented), red-team HARDENED (0 exploits), dependency-auditor LOW (pyjwt>=2.10.1, uv sync --locked)",
+      "file": "docs/specs/runtime.md"
     }
   ],
   "remaining": [

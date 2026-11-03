@@ -274,3 +274,104 @@ def test_consume_payments_on_an_empty_stream_reads_nothing(
     # Assert
     assert read == 0
     assert _facts(session_factory) == []
+
+
+# --- security-audit follow-up: merchant_id of a projected payment is immutable ---
+
+DOCUMENTS_QUERY = "SELECT kind, ref_id, merchant_id, title, body FROM ops_ai.search_documents"
+
+
+def test_apply_payment_event_ignores_a_higher_version_event_from_a_different_merchant(
+    session_factory: sessionmaker[Session],
+) -> None:
+    # Arrange
+    payment_id = uuid.uuid4()
+    owner = uuid.uuid4()
+    intruder = uuid.uuid4()
+    original = _event(payment_id=payment_id, merchant_id=owner, declined=True, entity_version=1)
+    conflicting = _event(payment_id=payment_id, merchant_id=intruder, declined=False, entity_version=2)
+    _apply(session_factory, original)
+    facts_before = _facts(session_factory)
+    documents_before = _rows(session_factory, DOCUMENTS_QUERY)
+
+    # Act
+    applied = _apply(session_factory, conflicting)
+
+    # Assert
+    assert facts_before[0]["merchant_id"] == owner
+    assert applied is True
+    assert _facts(session_factory) == facts_before
+    assert _rows(session_factory, DOCUMENTS_QUERY) == documents_before
+    assert _rows(session_factory, "SELECT count(*) AS n FROM ops_ai.processed_events") == [{"n": 2}]
+
+
+def test_apply_payment_event_creates_no_second_document_or_fact_for_a_conflicting_merchant(
+    session_factory: sessionmaker[Session],
+) -> None:
+    # Arrange
+    payment_id = uuid.uuid4()
+    owner = uuid.uuid4()
+    intruder = uuid.uuid4()
+    _apply(session_factory, _event(payment_id=payment_id, merchant_id=owner, entity_version=1))
+
+    # Act
+    _apply(session_factory, _event(payment_id=payment_id, merchant_id=intruder, entity_version=5))
+
+    # Assert
+    assert [fact["merchant_id"] for fact in _facts(session_factory)] == [owner]
+    assert [row["merchant_id"] for row in _rows(session_factory, DOCUMENTS_QUERY)] == [owner]
+    assert _rows(session_factory, "SELECT count(*) AS n FROM ops_ai.search_documents") == [{"n": 1}]
+
+
+def test_apply_payment_event_still_updates_every_column_for_a_higher_version_from_the_same_merchant(
+    session_factory: sessionmaker[Session],
+) -> None:
+    # Arrange
+    payment_id = uuid.uuid4()
+    merchant_id = uuid.uuid4()
+    original = _event(payment_id=payment_id, merchant_id=merchant_id, declined=True, entity_version=1)
+    _apply(session_factory, original)
+    newer = _event(payment_id=payment_id, merchant_id=merchant_id, declined=False, entity_version=2)
+
+    # Act
+    applied = _apply(session_factory, newer)
+
+    # Assert
+    assert applied is True
+    facts = _facts(session_factory)
+    assert len(facts) == 1
+    assert (
+        facts[0]["merchant_id"],
+        facts[0]["state"],
+        facts[0]["decline_code"],
+        facts[0]["card_bin"],
+        facts[0]["entity_version"],
+    ) == (merchant_id, "succeeded", None, "424242", 2)
+    documents = _rows(session_factory, DOCUMENTS_QUERY)
+    assert [(doc["merchant_id"], doc["title"]) for doc in documents] == [
+        (merchant_id, "Card payment succeeded")
+    ]
+
+
+def test_consume_payments_acknowledges_a_conflicting_merchant_event_without_changing_the_projection(
+    session_factory: sessionmaker[Session], redis_client: Redis
+) -> None:
+    # Arrange
+    ensure_group(redis_client, PAYMENTS_TOPIC, PAYMENT_FACTS_GROUP)
+    payment_id = uuid.uuid4()
+    owner = uuid.uuid4()
+    _stream_add(redis_client, _event(payment_id=payment_id, merchant_id=owner, entity_version=1))
+    consume_payments(session_factory, redis_client, _clock_now, "consumer-1")
+    facts_before = _facts(session_factory)
+    documents_before = _rows(session_factory, DOCUMENTS_QUERY)
+    conflicting = _event(payment_id=payment_id, merchant_id=uuid.uuid4(), declined=False, entity_version=2)
+    _stream_add(redis_client, conflicting)
+
+    # Act
+    read = consume_payments(session_factory, redis_client, _clock_now, "consumer-1")
+
+    # Assert
+    assert read == 1
+    assert _facts(session_factory) == facts_before
+    assert _rows(session_factory, DOCUMENTS_QUERY) == documents_before
+    assert redis_client.xpending(PAYMENTS_TOPIC, PAYMENT_FACTS_GROUP)["pending"] == 0

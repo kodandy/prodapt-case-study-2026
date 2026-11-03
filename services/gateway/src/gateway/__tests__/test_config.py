@@ -1,6 +1,8 @@
+from pathlib import Path
+
 import pytest
 from gateway.config import GatewaySettings
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 SECRET_32 = "k" * 32
 DATABASE_URL = "postgresql+psycopg://user:pw@localhost:5432/db"
@@ -100,3 +102,67 @@ def test_gateway_settings_validation_error_does_not_contain_the_rejected_secret(
     # Assert
     assert leaked not in str(exc.value)
     assert leaked not in repr(exc.value)
+
+
+# --- R3: jwt_private_key_pem ---
+
+
+def _reveal(secret: SecretStr | None) -> str | None:
+    return None if secret is None else secret.get_secret_value()
+
+
+PEM_VALUE = "-----BEGIN PRIVATE KEY-----\nTEST-KEY-BODY-NOT-A-SECRET\n-----END PRIVATE KEY-----"
+
+
+def test_gateway_settings_jwt_private_key_pem_defaults_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Arrange
+    _set_env(monkeypatch, pepper=SECRET_32, fingerprint_key=SECRET_32)
+    monkeypatch.delenv("GATEWAY_JWT_PRIVATE_KEY_PEM", raising=False)
+
+    # Act
+    settings = GatewaySettings()
+
+    # Assert
+    assert settings.jwt_private_key_pem is None
+
+
+def test_gateway_settings_reads_jwt_private_key_pem_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    _set_env(monkeypatch, pepper=SECRET_32, fingerprint_key=SECRET_32)
+    monkeypatch.setenv("GATEWAY_JWT_PRIVATE_KEY_PEM", PEM_VALUE)
+
+    # Act
+    settings = GatewaySettings()
+
+    # Assert
+    assert _reveal(settings.jwt_private_key_pem) == PEM_VALUE
+
+
+def test_gateway_settings_reads_jwt_private_key_pem_from_the_secrets_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Arrange
+    _set_env(monkeypatch, pepper=SECRET_32, fingerprint_key=SECRET_32)
+    monkeypatch.delenv("GATEWAY_JWT_PRIVATE_KEY_PEM", raising=False)
+    (tmp_path / "gateway_jwt_private_key_pem").write_text(PEM_VALUE)
+
+    # Act
+    settings = GatewaySettings(_secrets_dir=tmp_path)
+
+    # Assert
+    assert _reveal(settings.jwt_private_key_pem) == PEM_VALUE
+
+
+def test_gateway_settings_repr_does_not_contain_the_jwt_private_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Arrange
+    _set_env(monkeypatch, pepper=SECRET_32, fingerprint_key=SECRET_32)
+    monkeypatch.setenv("GATEWAY_JWT_PRIVATE_KEY_PEM", PEM_VALUE)
+
+    # Act
+    settings = GatewaySettings()
+
+    # Assert
+    assert "TEST-KEY-BODY-NOT-A-SECRET" not in repr(settings)
+    assert "TEST-KEY-BODY-NOT-A-SECRET" not in str(settings)

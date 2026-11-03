@@ -1,5 +1,29 @@
 name: payplat
 
+x-app-env: &app-env
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-payplat}:${POSTGRES_PASSWORD:-payplat-local-only}@postgres:5432/${POSTGRES_DB:-payplat}
+  REDIS_URL: redis://redis:6379/0
+
+x-readyz: &readyz
+  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)"]
+  interval: 2s
+  timeout: 3s
+  retries: 30
+
+x-gateway-secrets: &gateway-secrets
+  type: volume
+  source: demo-secrets
+  target: /run/secrets/gateway
+  read_only: true
+  volume: { subpath: gateway }
+
+x-ops-ai-secrets: &ops-ai-secrets
+  type: volume
+  source: demo-secrets
+  target: /run/secrets/ops-ai
+  read_only: true
+  volume: { subpath: ops-ai }
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -38,7 +62,87 @@ services:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
 
+  # --- runtime services (make demo). One image, one command per process. ---
+
+  demo-secrets:
+    image: payplat-app
+    build: { context: ., dockerfile: docker/app.Dockerfile }
+    command: ["python", "scripts/demo_secrets.py", "/run/demo-secrets"]
+    volumes: ["demo-secrets:/run/demo-secrets"]
+
+  migrate:
+    image: payplat-app
+    environment: *app-env
+    command:
+      - sh
+      - -c
+      - alembic -c services/gateway/alembic.ini upgrade head && alembic -c services/ops-ai/alembic.ini upgrade head
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  gateway-api:
+    image: payplat-app
+    environment:
+      <<: *app-env
+      GATEWAY_SECRETS_DIR: /run/secrets/gateway
+    command: ["uvicorn", "--factory", "gateway.main:build_app_from_env", "--host", "0.0.0.0", "--port", "8000"]
+    restart: unless-stopped
+    ports: ["127.0.0.1:${GATEWAY_PORT:-8080}:8000"]
+    volumes: [*gateway-secrets]
+    healthcheck: *readyz
+    depends_on: &runtime-deps
+      demo-secrets: { condition: service_completed_successfully }
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  relay:
+    image: payplat-app
+    environment:
+      <<: *app-env
+      GATEWAY_SECRETS_DIR: /run/secrets/gateway
+    command: ["python", "-m", "gateway.outbox.worker"]
+    restart: unless-stopped
+    volumes: [*gateway-secrets]
+    depends_on: *runtime-deps
+
+  ops-ai-api:
+    image: payplat-app
+    environment:
+      <<: *app-env
+      OPS_AI_SECRETS_DIR: /run/secrets/ops-ai
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    command: ["uvicorn", "--factory", "ops_ai.main:build_app_from_env", "--host", "0.0.0.0", "--port", "8000"]
+    restart: unless-stopped
+    ports: ["127.0.0.1:${OPS_AI_PORT:-8081}:8000"]
+    volumes: [*ops-ai-secrets]
+    healthcheck: *readyz
+    depends_on: *runtime-deps
+
+  ops-ai-consumer:
+    image: payplat-app
+    environment: *app-env
+    command: ["python", "-m", "ops_ai.ingest.worker"]
+    restart: unless-stopped
+    depends_on: *runtime-deps
+
+  demo:
+    profiles: ["demo"]
+    image: payplat-app
+    environment:
+      <<: *app-env
+      GATEWAY_SECRETS_DIR: /run/secrets/gateway
+      GATEWAY_URL: http://gateway-api:8000
+      OPS_AI_URL: http://ops-ai-api:8000
+    command: ["python", "scripts/demo.py"]
+    volumes: [*gateway-secrets]
+    depends_on:
+      gateway-api: { condition: service_healthy }
+      ops-ai-api: { condition: service_healthy }
+      relay: { condition: service_started }
+      ops-ai-consumer: { condition: service_started }
+
 volumes:
   pgdata:
   venv:
   uvcache:
+  demo-secrets:

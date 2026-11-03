@@ -37,10 +37,15 @@ def apply_payment_event(session: Session, clock: Clock, event: PaymentEventV1) -
     ).scalar_one_or_none()
     if first_delivery is None:
         return False
-    current = session.scalar(
-        select(PaymentFact.entity_version).where(PaymentFact.payment_id == event.payment_id).with_for_update()
-    )
-    if current is not None and current >= event.entity_version:
+    current = session.execute(
+        select(PaymentFact.entity_version, PaymentFact.merchant_id)
+        .where(PaymentFact.payment_id == event.payment_id)
+        .with_for_update()
+    ).one_or_none()
+    if current is not None and (
+        current.merchant_id != event.merchant_id or current.entity_version >= event.entity_version
+    ):
+        # A payment's merchant is immutable once projected; a conflicting event is consumed and dropped.
         return True
     fact = {
         "payment_id": event.payment_id,
@@ -93,14 +98,16 @@ def consume_payments(
     consumer_name: str,
     count: int = 100,
     block_ms: int | None = None,
+    start_id: str = ">",
 ) -> int:
     """Reads gw.payments.v1 via PAYMENT_FACTS_GROUP, applies each event, commits, then XACKs.
 
+    `start_id` ">" reads new entries; "0" re-reads this consumer's unacked entries (after a failed apply).
     Returns the number of entries read (duplicates included).
     """
     ensure_group(redis, PAYMENTS_TOPIC, PAYMENT_FACTS_GROUP)
     response = redis.xreadgroup(
-        PAYMENT_FACTS_GROUP, consumer_name, {PAYMENTS_TOPIC: ">"}, count=count, block=block_ms
+        PAYMENT_FACTS_GROUP, consumer_name, {PAYMENTS_TOPIC: start_id}, count=count, block=block_ms
     )
     entries = _stream_entries(response)
     for entry_id, fields in entries:

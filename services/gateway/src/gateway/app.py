@@ -1,14 +1,16 @@
 import uuid
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from gateway.accounts.service import EmailAlreadyRegisteredError, authenticate_api_key, sign_up
+from gateway.accounts.tokens import MERCHANT_TOKEN_TTL_SECONDS, issue_merchant_token
 from gateway.payments.charge import ChargeDeps, charge_card
 from gateway.payments.schemas import ChargeRequest
 
@@ -16,7 +18,9 @@ from gateway.payments.schemas import ChargeRequest
 @dataclass(frozen=True)
 class GatewayAppDeps:
     charge: ChargeDeps
-    api_key_pepper: str
+    api_key_pepper: str = field(repr=False)
+    jwt_private_key_pem: str | None = field(default=None, repr=False)
+    readiness: Callable[[], list[str]] = field(default=lambda: [])
 
 
 class SignUpRequest(BaseModel):
@@ -31,13 +35,21 @@ class SignUpResponse(BaseModel):
     wallet_account_id: str
 
 
+class MerchantTokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "Bearer"  # noqa: S105 - OAuth token type label, not a secret
+    expires_in: int
+
+
 def create_app(deps: GatewayAppDeps) -> FastAPI:
     """Routes:
     - POST /v1/signup {email, password} → 201 {user_id, wallet_account_id}; duplicate email → 409.
     - POST /v1/payments (Authorization: Bearer <api key>, Idempotency-Key header required)
       body ChargeRequest → ChargeOutcome status/body. Missing/invalid API key → 401;
       missing Idempotency-Key → 400; invalid card → 422.
-    - GET /healthz → 200.
+    - POST /v1/merchant-tokens (Bearer API key) → 201 {access_token, token_type, expires_in}: an RS256 token
+      for ops-ai. Invalid API key → 401; no private key configured → 503.
+    - GET /healthz → 200 (liveness). GET /readyz → 200 ready, or 503 with the failed components.
     """
     app = FastAPI(title="gateway")
     app.add_exception_handler(RequestValidationError, _validation_error_without_input)
@@ -58,6 +70,25 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/readyz")
+    def readyz() -> JSONResponse:
+        failed = deps.readiness()
+        if failed:
+            return JSONResponse({"status": "not_ready", "failed": failed}, status_code=503)
+        return JSONResponse({"status": "ready"})
+
+    @app.post("/v1/merchant-tokens", status_code=status.HTTP_201_CREATED)
+    def merchant_tokens(
+        merchant_id: Annotated[uuid.UUID, Depends(merchant_from_api_key)],
+        response: Response,
+    ) -> MerchantTokenResponse:
+        if deps.jwt_private_key_pem is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "token issuing not configured")
+        token = issue_merchant_token(deps.jwt_private_key_pem, merchant_id, deps.charge.clock())
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        return MerchantTokenResponse(access_token=token, expires_in=MERCHANT_TOKEN_TTL_SECONDS)
 
     @app.post("/v1/signup", status_code=status.HTTP_201_CREATED)
     def signup(body: SignUpRequest) -> SignUpResponse:

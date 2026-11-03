@@ -13,6 +13,7 @@ dependencies = [
   "alembic>=1.14",
   "redis>=5.2",
   "httpx>=0.28",
+  "pyjwt[crypto]>=2.10.1",
 ]
 
 [tool.uv.sources]

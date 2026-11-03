@@ -5,9 +5,8 @@ expected, merchants and operations staff can find the cause with evidence. See `
 statement, `docs/architecture-detail.md` for the design and its trade-offs, and `docs/requirements-traceability.md` for the
 mapping from the brief to code and tests.
 
-Status (2026-11-03): the Day 1 thin slice (decision D-022) runs end to end and is covered by tests. The HTTP gateway,
-the outbox relay, the ops-ai projection, search and the assistant are implemented as libraries and exercised in-process by
-the tests. Containerised long-running services and the React UI come next.
+Status (2026-11-03): the Day 1 thin slice (decision D-022) runs end to end as long-running compose services, and
+`make demo` shows it working over HTTP. The React UI comes next.
 
 ## Layout
 
@@ -34,9 +33,44 @@ make ci        # start Postgres + Redis, sync deps, lint, type-check, migration 
 Individual targets: `make up`, `make sync`, `make lint`, `make type`, `make migrate`, `make migrate-check`, `make test`,
 `make down`.
 
-## End-to-end example
+## Run the services: `make demo`
 
-The thin slice runs inside one test process against the real Postgres and Redis containers:
+```bash
+make demo        # build the image, start every service, run the walkthrough; exits 0 only if every check passed
+make demo-down   # stop everything
+```
+
+No `.env` file and no `OPENAI_API_KEY` are needed: without a key the assistant uses the mock LLM.
+
+| Service | What |
+|---|---|
+| `demo-secrets` | One-shot. Generates the demo secrets (two HMAC keys and an RSA 2048 key pair) into the named volume `demo-secrets`, creating only missing files |
+| `migrate` | One-shot. Runs both Alembic histories |
+| `gateway-api` | Gateway HTTP API on `127.0.0.1:8080` |
+| `relay` | Outbox relay: publishes committed outbox rows to the Redis stream |
+| `ops-ai-api` | Ops assistant HTTP API on `127.0.0.1:8081` |
+| `ops-ai-consumer` | Stream consumer that builds the ops-ai projection and search index |
+
+All services use one image (`docker/app.Dockerfile`, non-root). The APIs have a healthcheck on `/readyz`, which checks
+Postgres and Redis. Each service mounts only its own secrets subdirectory, read-only. The gateway gets the HMAC keys and
+the JWT private key, and ops-ai gets only the public key.
+
+`scripts/demo.py`, run by the `demo` service:
+
+1. Creates a new merchant (so a re-run never collides) and signs up `demo+<random>@example.com`.
+2. Over HTTP: one approved charge, one declined charge (`4000000000000002`), and a retry of the approved charge with the
+   same `Idempotency-Key`. The retry must return the identical body.
+3. Exchanges the API key for a merchant token (`POST /v1/merchant-tokens`). This is an RS256 JWT, issuer `gateway`,
+   audience `ops-ai`, lifetime 15 minutes. ops-ai accepts only RS256 and takes the merchant scope from the token alone.
+4. Waits until both payments are on the stream and the consumer group has lag 0 and pending 0.
+5. Asks the assistant "declined payments" and checks that the evidence cites the declined payment and not the approved
+   one.
+
+Only the first 8 characters of the API key are printed, and the token is never printed.
+
+## End-to-end test
+
+The same thin slice also runs inside one test process against the real Postgres and Redis containers:
 
 ```bash
 make up sync migrate
@@ -51,7 +85,7 @@ What `test_thin_slice_declined_payment_flows_from_charge_to_a_fallback_answer` d
    It calls the acquirer simulator outside the transaction. It then writes the payment state, ledger journal, outbox row
    and audit row in one transaction. The HTTP route `POST /v1/payments` (`Idempotency-Key` header) is covered in
    `services/gateway/src/gateway/__tests__/test_app.py`.
-3. The outbox relay publishes the events to the Redis stream `payments.v1`.
+3. The outbox relay publishes the events to the Redis stream `gw.payments.v1`.
 4. ops-ai consumes the stream into its own projection and search index.
 5. With the LLM down, the assistant answers "declined payments" in fallback mode. The answer has no generated text but
    carries the evidence: the declined payment and the decline-code aggregate, and not the approved payment.
@@ -86,7 +120,10 @@ Settings come from environment variables. Copy `.env.example` to `.env` and fill
 | `REDIS_PORT` | Local Redis |
 | `GATEWAY_API_KEY_PEPPER` | HMAC key for stored API key hashes (at least 32 characters) |
 | `GATEWAY_CARD_FINGERPRINT_KEY` | HMAC key for card fingerprints (at least 32 characters) |
-| `GATEWAY_JWT_PRIVATE_KEY_PEM`, `GATEWAY_TOTP_ENCRYPTION_KEY` | Reserved for staff login with TOTP (not in the thin slice yet) |
+| `GATEWAY_JWT_PRIVATE_KEY_PEM` | RS256 key that signs merchant tokens for ops-ai. The gateway API refuses to start without it |
+| `OPS_AI_JWT_PUBLIC_KEY_PEM` | Matching public key. ops-ai refuses to start without it |
+| `GATEWAY_SECRETS_DIR`, `OPS_AI_SECRETS_DIR` | Optional directory with one file per setting (used by compose with the `demo-secrets` volume) |
+| `GATEWAY_TOTP_ENCRYPTION_KEY` | Reserved for staff login with TOTP (not in the thin slice yet) |
 | `OPENAI_API_KEY` | Empty means the mock LLM is used |
 | `OPENAI_CHAT_MODEL`, `OPENAI_FALLBACK_MODEL`, `OPENAI_EMBEDDING_MODEL` | Model names when a key is set (`text-embedding-3-small` for embeddings) |
 
@@ -110,8 +147,22 @@ These were found by the Day 1 audit and are planned:
   TRUNCATE is not blocked.
 - DB-level ledger invariants (unique journal per reference, balanced postings per currency).
 - Rate limiting, API key revocation, `maxlen` on the stream, and structured logging.
+- No dead-letter queue on the consumer. A stream entry that fails validation is retried on every loop and blocks the
+  entries behind it in this consumer's pending list.
+- Merchant tokens cannot be revoked before they expire (15 minutes), and there is no key rotation (`kid`) yet.
+- `demo-secrets` recreates only missing files. If only the private key is deleted, the old public key stays and tokens
+  stop verifying; delete the volume (`make demo-down` then `docker volume rm payplat_demo-secrets`) to start over.
+- The ops-ai engine does not set `hide_parameters` yet.
+- Redis has no ACL and every process uses the same Postgres superuser. Anyone who can reach Redis can append forged
+  payment events. The consumer refuses to move a payment to another merchant, but it can still record payments that
+  never happened. Fix: per-service Redis ACL users and DB roles with schema grants.
+- No request body size limit in front of the APIs (oversized bodies are rejected only after they are read).
+- The token verifier checks `iss`/`aud`/`exp`/`merchant_id` but does not require `iat`/`sub` or check `roles` yet.
+- Base images are pinned by tag, not by digest, and CI does not run osv-scanner yet.
 
 ## Development notes
 
 - On the host, `uv` fails on paths that contain a directory named `private`. That is why everything runs in the container.
 - Tests sit next to the code in `__tests__/` directories, per vertical slice.
+- Run `make demo-down` before `make ci`. The demo relay and consumer share Postgres and Redis with the tests and will
+  take the events the tests wait for.

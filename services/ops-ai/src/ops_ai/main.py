@@ -1,0 +1,38 @@
+from fastapi import FastAPI
+from redis import Redis
+
+from ops_ai.app import OpsAiAppDeps, create_app
+from ops_ai.assistant.llm_port import LlmPort, MockLlm
+from ops_ai.clock import system_clock
+from ops_ai.config import load_ops_ai_settings
+from ops_ai.db import make_engine, make_session_factory
+from ops_ai.health import check_ready
+
+REDIS_CONNECT_TIMEOUT_SECONDS = 1.0
+REDIS_SOCKET_TIMEOUT_SECONDS = 2.0
+
+
+def build_app_from_env() -> FastAPI:
+    """uvicorn factory (`--factory ops_ai.main:build_app_from_env`). Refuses to start without the public key.
+
+    Without OPENAI_API_KEY the assistant runs on MockLlm (evidence-led narration, labeled model "mock").
+    """
+    settings = load_ops_ai_settings()
+    if settings.jwt_public_key_pem is None:
+        raise RuntimeError("OPS_AI_JWT_PUBLIC_KEY_PEM is required")
+    session_factory = make_session_factory(make_engine(settings.database_url))
+    redis = Redis.from_url(
+        settings.redis_url,
+        socket_connect_timeout=REDIS_CONNECT_TIMEOUT_SECONDS,
+        socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
+    )
+    llm: LlmPort = MockLlm()
+    return create_app(
+        OpsAiAppDeps(
+            session_factory=session_factory,
+            llm=llm,
+            jwt_public_key_pem=settings.jwt_public_key_pem,
+            clock=system_clock,
+            readiness=lambda: check_ready(session_factory, redis),
+        )
+    )

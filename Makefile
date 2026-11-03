@@ -1,7 +1,7 @@
 DC := docker compose
 RUN := $(DC) run --rm dev
 
-.PHONY: up down build sync lint fmt type test migrate migrate-check ci
+.PHONY: up down build sync lint fmt type test migrate migrate-check ci demo demo-down
 
 up:
 	$(DC) up -d --wait postgres redis
@@ -44,3 +44,12 @@ test:
 	$(RUN) uv run --frozen pytest
 
 ci: up sync lint type migrate-check test
+
+# runs every service from the app image, then the end-to-end walkthrough (no .env, no OPENAI_API_KEY needed)
+demo:
+	$(DC) build demo-secrets
+	$(DC) up -d --wait gateway-api relay ops-ai-api ops-ai-consumer
+	$(DC) --profile demo run --rm demo
+
+demo-down:
+	$(DC) --profile demo down

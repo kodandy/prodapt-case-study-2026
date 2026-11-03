@@ -1,0 +1,14 @@
+.git
+.github
+.claude
+.env
+.env.*
+**/__pycache__
+**/.pytest_cache
+.mypy_cache
+.ruff_cache
+.hypothesis
+data/generated
+docs
+state
+node_modules
