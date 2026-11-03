@@ -1,7 +1,9 @@
+import unicodedata
 import uuid
+from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictInt, field_validator, model_validator
 
 from gateway.payments.state import PaymentState
 from gateway.payments.tokenization.cards import TEST_PANS, luhn_valid
@@ -53,3 +55,71 @@ class ChargeResponse(BaseModel):
     method: Literal["card"]
     card: CardSummary
     decline_code: str | None
+
+
+class PaymentSummary(BaseModel):
+    """A history row. `card` carries BIN + last4 only."""
+
+    payment_id: uuid.UUID
+    state: PaymentState
+    amount_minor: int
+    currency: str
+    method: str
+    card: CardSummary | None
+    decline_code: str | None
+    refunded_minor: int
+    disputed_minor: int
+    chargeback_minor: int
+    created_at: datetime
+
+
+class RefundRequest(BaseModel):
+    """`amount_minor` omitted → refund the full refundable amount; an explicit null is rejected."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    amount_minor: StrictInt | None = Field(default=None, gt=0, le=MAX_AMOUNT_MINOR)
+
+    @model_validator(mode="after")
+    def _null_only_by_omission(self) -> "RefundRequest":
+        if self.amount_minor is None and "amount_minor" in self.model_fields_set:
+            raise ValueError("amount_minor must be omitted, not null, to refund the full amount")
+        return self
+
+
+DisputeState = Literal["opened", "under_review", "won", "lost"]
+
+
+class DisputeView(BaseModel):
+    dispute_id: uuid.UUID
+    payment_id: uuid.UUID
+    state: DisputeState
+    amount_minor: int
+    currency: str
+    reason: str
+    chargeback_fee_minor: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class EvidenceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("text")
+    @classmethod
+    def _printable_and_not_blank(cls, value: str) -> str:
+        if any(char not in _EVIDENCE_ALLOWED_CONTROLS and _is_control_or_format(char) for char in value):
+            raise ValueError("text must not contain control or format characters")
+        if not value.strip():
+            raise ValueError("text must not be blank")
+        return value
+
+
+_EVIDENCE_ALLOWED_CONTROLS = frozenset("\n\r\t")
+
+
+def _is_control_or_format(char: str) -> bool:
+    """Unicode Cc (controls such as NUL) and Cf (zero-width spaces, bidi overrides)."""
+    return unicodedata.category(char) in ("Cc", "Cf")

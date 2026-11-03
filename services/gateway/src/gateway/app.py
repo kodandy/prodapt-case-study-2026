@@ -1,10 +1,11 @@
+import re
 import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -24,10 +25,26 @@ from gateway.accounts.tokens import (
     issue_user_token,
 )
 from gateway.payments.charge import ChargeDeps, charge_card
-from gateway.payments.schemas import ChargeRequest
+from gateway.payments.disputes import (
+    DisputeNotFoundError,
+    InvalidDisputeTransitionError,
+    get_dispute,
+    submit_evidence,
+)
+from gateway.payments.history import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, InvalidCursorError, list_payments
+from gateway.payments.refunds import refund_payment
+from gateway.payments.schemas import (
+    ChargeRequest,
+    DisputeView,
+    EvidenceRequest,
+    PaymentSummary,
+    RefundRequest,
+)
+from gateway.payments.state import PaymentState
 
 LOGIN_CONCURRENCY = 4
 LOGIN_SLOT_WAIT_SECONDS = 2.0
+IDEMPOTENCY_KEY_PATTERN = re.compile(r"[\x21-\x7e]{1,255}")
 
 
 @dataclass(frozen=True)
@@ -66,6 +83,11 @@ class UserTokenResponse(MerchantTokenResponse):
     pass
 
 
+class PaymentListResponse(BaseModel):
+    items: list[PaymentSummary]
+    next_cursor: str | None
+
+
 def create_app(deps: GatewayAppDeps) -> FastAPI:
     """Routes:
     - POST /v1/signup {email, password} → 201 {user_id, wallet_account_id}; duplicate email → 409.
@@ -78,6 +100,12 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
       for ops-ai. Unknown email and wrong password → the identical 401; no private key configured → 503.
       At most LOGIN_CONCURRENCY password checks run at once; no slot within LOGIN_SLOT_WAIT_SECONDS → 503
       {"detail": "try again later"} with Retry-After: 1.
+    - GET /v1/payments?limit&cursor&state (Bearer API key) → 200 {items, next_cursor}: the merchant's
+      payments, newest first. Invalid cursor → 400.
+    - POST /v1/payments/{payment_id}/refunds (Bearer API key, Idempotency-Key required) body RefundRequest →
+      RefundOutcome status/body. Idempotency-Key outside visible ASCII → 400; explicit null amount → 422.
+    - GET /v1/disputes/{dispute_id}, POST /v1/disputes/{dispute_id}/evidence (Bearer API key) → DisputeView;
+      unknown or another merchant's → 404; not `opened` for evidence → 409.
     - GET /healthz → 200 (liveness). GET /readyz → 200 ready, or 503 with the failed components.
     """
     app = FastAPI(title="gateway")
@@ -158,12 +186,84 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         merchant_id: Annotated[uuid.UUID, Depends(merchant_from_api_key)],
         idempotency_key: Annotated[str | None, Header(max_length=255)] = None,
     ) -> JSONResponse:
-        if not idempotency_key:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Idempotency-Key header is required")
-        outcome = charge_card(deps.charge, merchant_id, idempotency_key, body)
+        key = _require_idempotency_key(idempotency_key)
+        outcome = charge_card(deps.charge, merchant_id, key, body)
         return JSONResponse(outcome.body, status_code=outcome.status_code)
 
+    @app.get("/v1/payments")
+    def payment_history(
+        merchant_id: Annotated[uuid.UUID, Depends(merchant_from_api_key)],
+        limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+        cursor: Annotated[str | None, Query(max_length=512)] = None,
+        state: PaymentState | None = None,
+    ) -> PaymentListResponse:
+        try:
+            with session_factory() as session:
+                page = list_payments(session, merchant_id, limit, cursor, state)
+        except InvalidCursorError:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid cursor") from None
+        return PaymentListResponse(items=page.items, next_cursor=page.next_cursor)
+
+    @app.post("/v1/payments/{payment_id}/refunds")
+    def create_refund(
+        payment_id: uuid.UUID,
+        merchant_id: Annotated[uuid.UUID, Depends(merchant_from_api_key)],
+        _no_null_body: Annotated[None, Depends(_reject_null_body)],
+        body: RefundRequest | None = None,
+        idempotency_key: Annotated[str | None, Header(max_length=255)] = None,
+    ) -> JSONResponse:
+        key = _require_idempotency_key(idempotency_key)
+        outcome = refund_payment(
+            session_factory,
+            deps.charge.clock,
+            merchant_id,
+            payment_id,
+            key,
+            None if body is None else body.amount_minor,
+        )
+        return JSONResponse(outcome.body, status_code=outcome.status_code)
+
+    @app.get("/v1/disputes/{dispute_id}")
+    def read_dispute(
+        dispute_id: uuid.UUID, merchant_id: Annotated[uuid.UUID, Depends(merchant_from_api_key)]
+    ) -> DisputeView:
+        try:
+            with session_factory() as session:
+                return get_dispute(session, merchant_id, dispute_id)
+        except DisputeNotFoundError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "dispute not found") from None
+
+    @app.post("/v1/disputes/{dispute_id}/evidence")
+    def dispute_evidence(
+        dispute_id: uuid.UUID,
+        body: EvidenceRequest,
+        merchant_id: Annotated[uuid.UUID, Depends(merchant_from_api_key)],
+    ) -> DisputeView:
+        try:
+            return submit_evidence(session_factory, deps.charge.clock, merchant_id, dispute_id, body.text)
+        except DisputeNotFoundError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "dispute not found") from None
+        except InvalidDisputeTransitionError:
+            raise HTTPException(status.HTTP_409_CONFLICT, "invalid dispute transition") from None
+
     return app
+
+
+def _require_idempotency_key(idempotency_key: str | None) -> str:
+    """Visible ASCII only: a NUL would otherwise reach Postgres and fail as a 500."""
+    if not idempotency_key:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Idempotency-Key header is required")
+    if IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key) is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid Idempotency-Key header")
+    return idempotency_key
+
+
+async def _reject_null_body(request: Request) -> None:
+    """A JSON `null` body parses as an omitted body; for a refund that would mean "refund everything"."""
+    if (await request.body()).strip() == b"null":
+        raise RequestValidationError(
+            [{"loc": ("body",), "msg": "body must be omitted, not null", "type": "null_body"}]
+        )
 
 
 async def _validation_error_without_input(_request: Request, exc: Exception) -> JSONResponse:
