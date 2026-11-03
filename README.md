@@ -80,6 +80,19 @@ the JWT private key, and ops-ai gets only the public key.
    amount, an amount above the KYC tier 1 limit, the one fix (upgrade to KYC tier 2), the evidence refs
    `transfer:` / `balance:` / `limit:`, and that the merchant token gets 403 on this route and the user token gets 403
    on `/investigate`. See `docs/specs/sq2.md`.
+8. SQ3 for the seeded merchant `mch_0002`: gets an API key and a merchant token for it, then runs a live burst of 12
+   charges of 50 USD (minor units) round-robin over 4 test cards, 6 of them declined. The consumer runs the card-testing
+   watch on every live micro payment (≤ 1.00 of the currency) in the same transaction as the projection: episodes split
+   on a gap over 120 s, flagged at ≥ 10 micro payments, a micro share ≥ 80% and ≥ 3 distinct cards (or unknown card
+   identity). A flagged episode upserts one `fraud_alerts` row and, on the first insert only, one ticket routed to the
+   `fraud` queue with priority `high`. The demo then asks "We're seeing a series of tiny card payments — is this card
+   testing, and what should we do?" on `POST /v1/assistant/investigate-fraud` (merchant token, `Cache-Control:
+   no-store`). The tool `analyze_fraud` reads the last 24 hours of the merchant's card payments. The demo checks the
+   label `card_testing`, a flagged episode holding exactly the seeded SQ3 burst (card identity unknown), a flagged
+   episode holding the 12 live payments with 4 distinct cards and a decline ratio of 0.5, its alert with a ticket in
+   the `fraud` queue, both cited in the evidence, and that the SQ2 user token gets 403 on this route. Card identity is
+   `card_ref`: an HMAC of the merchant id and the gateway card fingerprint under a subkey of the fingerprint key, so
+   it counts distinct cards at one merchant without linking a card across merchants. See `docs/specs/sq3.md`.
 
 Only the first 8 characters of the API key are printed. Passwords and tokens are never printed.
 
@@ -196,11 +209,26 @@ These were found by the Day 1 audit and are planned:
   Fix: an explicit `visibility` column with a CHECK constraint.
 - `card_bin` on the event has no format check and goes into the incident search query (bound parameter, so no SQL
   injection, but it can change which incidents match).
-- `/v1/assistant/investigate` runs five queries per request with no rate limit, and `payment_facts` has no
-  `(merchant_id, occurred_at)` index.
+- `/v1/assistant/investigate` and `/v1/assistant/investigate-fraud` have no rate limit (`payment_facts` has a
+  `(merchant_id, method, occurred_at)` index since SQ3).
 - API keys have no `revoked_at`; every `make demo` adds one more key to the demo merchant.
 - The seed is not re-anchored: run more than 6 hours after the first seed, SQ1 answers `no_anomaly`. Start over with
-  `make demo-down` and `docker volume rm payplat_pgdata` (or truncate `ops_ai`).
+  `make demo-down` and `docker volume rm payplat_pgdata` (or truncate `ops_ai`). The seeded SQ3 burst leaves the
+  24-hour window about 9 hours after the first seed.
+- Card testing (SQ3): no gateway-side risk score or real-time block yet (B7.1, B7.3 gateway half); the watch only
+  raises an alert and a ticket after the payment.
+- Card testing: an earlier payment arriving after the alert (out-of-order delivery) can start a second alert for one
+  burst.
+- Card testing: seeded payments carry no card identity, so seeded episodes report distinct cards as unknown.
+- Card testing: the thresholds are fixed constants; tuning them from human verdicts is Design.
+- Tickets: the lifecycle (`assigned`, `resolved`) and ops-staff routes are not in this slice (B12 Thin).
+- Card testing: the rule is easy to evade once known (amounts just above 1.00, gaps over 120 s, or diluting with
+  larger card payments). A burst of more than 5000 micro payments in the window is analysed on its newest 5000 only.
+- Card testing: alerts and tickets are not capped per merchant, and an alert refresh from an older event can move
+  `last_seen_at` back (one consumer today, so latent). A failure in the watch rolls back the projection of that event.
+- Card testing: `origin == "live"` is self-declared by the event, so anyone who can write to the stream (no Redis ACL
+  yet) can raise alerts.
+- Stream: a malformed entry goes to `gw.payments.v1.dead` and is acked; nothing replays or alerts on that stream yet.
 
 ## Development notes
 

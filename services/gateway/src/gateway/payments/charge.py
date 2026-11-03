@@ -24,7 +24,7 @@ from gateway.payments.models import Payment, PaymentAttempt
 from gateway.payments.providers.port import CardRef, ProviderPort, ProviderResult, ProviderTimeoutError
 from gateway.payments.schemas import CardSummary, ChargeRequest, ChargeResponse
 from gateway.payments.state import FINALIZABLE_STATES, PaymentState
-from gateway.payments.tokenization.cards import card_fingerprint
+from gateway.payments.tokenization.cards import card_fingerprint, derive_card_ref
 from gateway.payments.tokenization.vault import tokenize_card
 
 IDEMPOTENCY_WAIT_SECONDS = 5.0
@@ -69,6 +69,7 @@ class _Claim:
     payment_id: uuid.UUID
     attempt_id: uuid.UUID
     card: CardRef
+    card_fingerprint: str
 
 
 KEY_REUSED = ChargeOutcome(422, {"error": "idempotency_key_reused"})
@@ -205,6 +206,7 @@ def _claim(
             payment_id=payment.id,
             attempt_id=attempt.id,
             card=CardRef(token=card.token, bin=card.bin, last4=card.last4),
+            card_fingerprint=card.fingerprint,
         )
 
 
@@ -271,7 +273,16 @@ def _finalize(
         if state == "succeeded":
             _post_charge_journal(session, deps.clock, merchant_id, claim.payment_id, request)
         _write_outbox(
-            session, now, merchant_id, claim, request, state, entity_version, deps.provider.name, decline_code
+            session,
+            now,
+            merchant_id,
+            claim,
+            request,
+            state,
+            entity_version,
+            deps.provider.name,
+            decline_code,
+            derive_card_ref(claim.card_fingerprint, merchant_id, deps.card_fingerprint_key),
         )
         session.add(
             AuditLog(
@@ -319,6 +330,7 @@ def _write_outbox(
     entity_version: int,
     provider: str,
     decline_code: str | None,
+    card_ref: str,
 ) -> None:
     event = PaymentEventV1(
         event_id=uuid.uuid4(),
@@ -335,6 +347,7 @@ def _write_outbox(
         decline_code=decline_code,
         card_bin=claim.card.bin,
         card_last4=claim.card.last4,
+        card_ref=card_ref,
     )
     session.add(
         OutboxEvent(

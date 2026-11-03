@@ -10,6 +10,7 @@ PAYMENTS_TOPIC = "gw.payments.v1"
 
 PaymentState = Literal["created", "succeeded", "declined", "failed", "unknown"]
 EventOrigin = Literal["live", "backfill"]
+CARD_REF_PATTERN = r"^[0-9a-f]{32}$"
 
 
 class PaymentEventV1(BaseModel):
@@ -32,3 +33,5 @@ class PaymentEventV1(BaseModel):
     decline_code: str | None
     card_bin: str | None
     card_last4: str | None
+    card_ref: str | None = Field(default=None, pattern=CARD_REF_PATTERN)
+    """Keyed derivation of the card fingerprint: counts distinct cards, cannot be looked up elsewhere."""

@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import uuid
 
 TEST_PANS: frozenset[str] = frozenset(
     {
@@ -30,3 +31,18 @@ def luhn_valid(pan: str) -> bool:
 def card_fingerprint(pan: str, key: str) -> str:
     """HMAC-SHA256(key, pan) hex. Keyed so the fingerprint cannot be brute-forced back to a PAN."""
     return hmac.new(key.encode(), pan.encode(), hashlib.sha256).hexdigest()
+
+
+CARD_REF_SUBKEY_LABEL = b"card_ref-key:v1"
+
+
+def derive_card_ref(fingerprint: str, merchant_id: uuid.UUID, key: str) -> str:
+    """HMAC-SHA256(subkey, f"{merchant_id}:{fingerprint}") hex, first 32 characters, where
+    subkey = HMAC-SHA256(key, "card_ref-key:v1").
+
+    The card identity on the ops port: ops-ai can count distinct cards without holding the fingerprint.
+    The subkey keeps card_ref apart from the fingerprint HMAC; the merchant id keeps it from linking a card
+    across merchants.
+    """
+    subkey = hmac.new(key.encode(), CARD_REF_SUBKEY_LABEL, hashlib.sha256).digest()
+    return hmac.new(subkey, f"{merchant_id}:{fingerprint}".encode(), hashlib.sha256).hexdigest()[:32]

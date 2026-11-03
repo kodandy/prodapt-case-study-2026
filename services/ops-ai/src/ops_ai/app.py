@@ -15,6 +15,8 @@ from ops_ai.assistant.llm_port import LlmPort
 from ops_ai.assistant.service import AnswerMode, ask
 from ops_ai.auth import InvalidTokenError, verify_token
 from ops_ai.clock import Clock
+from ops_ai.fraud_watch import FraudAnalysis
+from ops_ai.fraud_watch.service import FraudCause, FraudIntent, investigate_fraud
 from ops_ai.investigation.service import CauseLabel, Intent, investigate
 from ops_ai.investigation.tools import FailureAggregate
 from ops_ai.scope import Principal, Scope, UserScope
@@ -174,6 +176,84 @@ class InvestigateResponse(BaseModel):
     evidence: list[EvidenceOut]
 
 
+EPISODE_PAYMENT_IDS_LIMIT = 100
+
+
+class EpisodeOut(BaseModel):
+    first_payment_id: uuid.UUID
+    start: datetime
+    end: datetime
+    payment_ids: list[uuid.UUID]
+    """The first EPISODE_PAYMENT_IDS_LIMIT ids in (occurred_at, payment_id) order; micro_payments is the full
+    count."""
+    micro_payments: int
+    card_payments: int
+    micro_share: float
+    distinct_cards: int | None
+    declined: int
+    decline_ratio: float
+    card_bins: list[str]
+    currencies: list[str]
+    flagged: bool
+    reasons: list[str]
+
+
+class FraudAnalysisOut(BaseModel):
+    start: datetime
+    end: datetime
+    micro_payments: int
+    episodes: list[EpisodeOut]
+
+    @classmethod
+    def of(cls, analysis: FraudAnalysis | None) -> "FraudAnalysisOut | None":
+        if analysis is None:
+            return None
+        return cls(
+            start=analysis.start,
+            end=analysis.end,
+            micro_payments=analysis.micro_payments,
+            episodes=[
+                EpisodeOut(
+                    first_payment_id=e.first_payment_id,
+                    start=e.start,
+                    end=e.end,
+                    payment_ids=list(e.payment_ids[:EPISODE_PAYMENT_IDS_LIMIT]),
+                    micro_payments=e.micro_payments,
+                    card_payments=e.card_payments,
+                    micro_share=e.micro_share,
+                    distinct_cards=e.distinct_cards,
+                    declined=e.declined,
+                    decline_ratio=e.decline_ratio,
+                    card_bins=list(e.card_bins),
+                    currencies=list(e.currencies),
+                    flagged=e.flagged,
+                    reasons=list(e.reasons),
+                )
+                for e in analysis.episodes
+            ],
+        )
+
+
+class AlertRefOut(BaseModel):
+    alert_id: uuid.UUID
+    ticket_id: uuid.UUID | None
+    queue: str | None
+    first_payment_id: uuid.UUID
+
+
+class InvestigateFraudResponse(BaseModel):
+    intent: FraudIntent
+    cause_label: FraudCause
+    mode: AnswerMode
+    text: str | None
+    model: str | None
+    analysis: FraudAnalysisOut | None
+    alerts: list[AlertRefOut]
+    suggested_fixes: list[str]
+    tool_calls: list[ToolCallOut]
+    evidence: list[EvidenceOut]
+
+
 def create_app(deps: OpsAiAppDeps) -> FastAPI:
     """Routes:
     - GET /healthz → 200 (liveness). GET /readyz → 200 ready, or 503 with the failed components.
@@ -182,6 +262,8 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
     - POST /v1/assistant/investigate-transfer (Authorization: Bearer <user token>) {question, transfer_id?}
       → InvestigateTransferResponse with Cache-Control: no-store. Another sender's transfer and a missing one
       → the identical 404.
+    - POST /v1/assistant/investigate-fraud (merchant token, same body as /ask) → InvestigateFraudResponse with
+      Cache-Control: no-store; now = deps.clock().
     Missing/invalid/expired token → 401 {"detail": "invalid token"}. A valid token of the other kind
     (user token on the merchant routes, merchant token on the transfer route) → 403 {"detail": "forbidden"}.
     """
@@ -269,6 +351,34 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
             model=result.model,
             transfer=TransferOut.of(result.transfer),
             balance_covered_amount=result.balance_covered_amount,
+            suggested_fixes=list(result.suggested_fixes),
+            tool_calls=[ToolCallOut(name=call.name, args=call.args) for call in result.tool_calls],
+            evidence=[EvidenceOut(ref=item.ref, summary=item.summary) for item in result.evidence],
+        )
+
+    @app.post("/v1/assistant/investigate-fraud")
+    def assistant_investigate_fraud(
+        body: AskRequest, scope: Annotated[Scope, Depends(merchant_scope)], response: Response
+    ) -> InvestigateFraudResponse:
+        with deps.session_factory() as session:
+            result = investigate_fraud(session, scope, body.question, deps.clock(), deps.llm)
+        response.headers["Cache-Control"] = "no-store"
+        return InvestigateFraudResponse(
+            intent=result.intent,
+            cause_label=result.cause_label,
+            mode=result.mode,
+            text=result.text,
+            model=result.model,
+            analysis=FraudAnalysisOut.of(result.analysis),
+            alerts=[
+                AlertRefOut(
+                    alert_id=a.alert_id,
+                    ticket_id=a.ticket_id,
+                    queue=a.queue,
+                    first_payment_id=a.first_payment_id,
+                )
+                for a in result.alerts
+            ],
             suggested_fixes=list(result.suggested_fixes),
             tool_calls=[ToolCallOut(name=call.name, args=call.args) for call in result.tool_calls],
             evidence=[EvidenceOut(ref=item.ref, summary=item.summary) for item in result.evidence],

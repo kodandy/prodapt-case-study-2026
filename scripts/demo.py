@@ -1,6 +1,7 @@
 """End-to-end walkthrough for `make demo`: charges over HTTP, wait for the consumer, ask the assistant,
 investigate SQ1 over the seeded history (docs/specs/sq1.md section 9), then log in as the seeded SQ2 sender
-and investigate the declined transfer (docs/specs/sq2.md section 8).
+and investigate the declined transfer (docs/specs/sq2.md section 8), then run a live card-testing burst for
+the SQ3 merchant and investigate it next to the seeded one (docs/specs/sq3.md section 7).
 
 Prints one ✓/✗ line per check and exits 0 only if every check passed. Never prints the API key in full, a
 password or a token.
@@ -39,6 +40,11 @@ SQ1_QUESTION = (
 INVESTIGATION_TOOLS = ["aggregate_failures", "compare_baseline", "search_incidents"]
 SQ2_SENDER_EMAIL = "sq2-sender@example.com"
 SQ2_QUESTION = "My international transfer was declined even though I had enough money — what triggered it?"
+SQ3_MERCHANT = "mch_0002"
+SQ3_QUESTION = "We're seeing a series of tiny card payments — is this card testing, and what should we do?"
+SQ3_MICRO_AMOUNT_MINOR = 50
+SQ3_BURST_SIZE = 12
+SQ3_PANS = ("4242424242424242", "5555555555554444", "4000000000009995", "4000000000000002")
 
 
 class Demo:
@@ -57,11 +63,13 @@ def _card(pan: str) -> dict[str, object]:
     return {"number": pan, "exp_month": 12, "exp_year": 2030, "cvc": "123"}
 
 
-def _charge(client: httpx.Client, api_key: str, idempotency_key: str, pan: str) -> httpx.Response:
+def _charge(
+    client: httpx.Client, api_key: str, idempotency_key: str, pan: str, amount_minor: int = 1250
+) -> httpx.Response:
     return client.post(
         "/v1/payments",
         headers={"Authorization": f"Bearer {api_key}", "Idempotency-Key": idempotency_key},
-        json={"amount_minor": 1250, "currency": "USD", "card": _card(pan)},
+        json={"amount_minor": amount_minor, "currency": "USD", "card": _card(pan)},
     )
 
 
@@ -149,7 +157,8 @@ def _investigate_sq2(
     ops_ai: httpx.Client,
     merchant_token: str,
     session_factory: sessionmaker[Session],
-) -> None:
+) -> str:
+    """Returns the SQ2 sender's user token, reused for the SQ3 403 check."""
     print("\nSQ2: " + SQ2_QUESTION, flush=True)
     password = secrets.token_urlsafe(18)
     sender_id = bootstrap_user(session_factory, system_clock, SQ2_SENDER_EMAIL, password, _sq2_sender_id())
@@ -220,6 +229,120 @@ def _investigate_sq2(
         json={"question": SQ1_QUESTION},
     )
     demo.check("user token gets 403 on /investigate", as_user.status_code == 403)
+    return str(user_token)
+
+
+def _investigate_sq3(
+    demo: Demo,
+    gateway: httpx.Client,
+    ops_ai: httpx.Client,
+    redis: Redis,
+    session_factory: sessionmaker[Session],
+    pepper: str,
+    user_token: str,
+) -> None:
+    print("\nSQ3: " + SQ3_QUESTION, flush=True)
+    credentials = bootstrap_merchant(
+        session_factory, system_clock, "demo-sq3", pepper, merchant_id=merchant_uuid(SQ3_MERCHANT)
+    )
+    demo.check("SQ3 merchant ready", True, f"merchant {credentials.merchant_id}")
+    issued = gateway.post("/v1/merchant-tokens", headers={"Authorization": f"Bearer {credentials.api_key}"})
+    demo.check("SQ3 merchant token issued", issued.status_code == 201, f"{issued.status_code}")
+    token = issued.json().get("access_token", "") if issued.status_code == 201 else ""
+
+    states: list[str] = []
+    live_ids: list[str] = []
+    for index in range(SQ3_BURST_SIZE):
+        charge = _charge(
+            gateway,
+            credentials.api_key,
+            str(uuid.uuid4()),
+            SQ3_PANS[index % len(SQ3_PANS)],
+            amount_minor=SQ3_MICRO_AMOUNT_MINOR,
+        )
+        charge_body = charge.json()
+        states.append(str(charge_body.get("state")))
+        live_ids.append(str(charge_body.get("payment_id")))
+    declined = states.count("declined")
+    demo.check(
+        f"live burst: {SQ3_BURST_SIZE} charges of {SQ3_MICRO_AMOUNT_MINOR} USD (minor) "
+        f"on {len(SQ3_PANS)} cards",
+        len(states) == SQ3_BURST_SIZE and declined == SQ3_BURST_SIZE // 2,
+        f"{declined} declined",
+    )
+    caught_up = _wait_until(lambda: _consumer_caught_up(redis, set(live_ids)), CATCH_UP_TIMEOUT_SECONDS)
+    demo.check("burst events published and consumer caught up", caught_up)
+
+    response = ops_ai.post(
+        "/v1/assistant/investigate-fraud",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"question": SQ3_QUESTION},
+    )
+    body = response.json() if response.status_code == 200 else {}
+    demo.check(
+        "fraud investigation answered",
+        response.status_code == 200,
+        f"{response.status_code} mode={body.get('mode')}",
+    )
+    demo.check(
+        "cause label is card_testing", body.get("cause_label") == "card_testing", str(body.get("cause_label"))
+    )
+    tools = [call["name"] for call in body.get("tool_calls", [])]
+    demo.check("tool called", tools == ["analyze_fraud"], ", ".join(tools))
+
+    episodes = [e for e in (body.get("analysis") or {}).get("episodes", []) if e.get("flagged")]
+    for episode in episodes:
+        print(
+            f"    episode {episode['first_payment_id']}: {episode['micro_payments']} micro of "
+            f"{episode['card_payments']} card payments, {episode['start']} to {episode['end']}, "
+            f"distinct cards {episode['distinct_cards']}, declined {episode['declined']} "
+            f"(ratio {episode['decline_ratio']}), BINs {', '.join(episode['card_bins'])}, "
+            f"reasons {', '.join(episode['reasons'])}",
+            flush=True,
+        )
+    planted = {str(i) for i in generate(seed=42).planted.sq3_transaction_ids}
+    seeded = next((e for e in episodes if set(e["payment_ids"]) == planted), None)
+    demo.check(
+        "a flagged episode holds exactly the seeded SQ3 burst, card identity unknown",
+        seeded is not None and seeded["distinct_cards"] is None,
+        f"{len(planted)} planted payments",
+    )
+    live = next((e for e in episodes if set(live_ids) <= set(e["payment_ids"])), None)
+    demo.check(
+        "a flagged episode holds the live burst on 4 distinct cards, half declined",
+        live is not None and live["distinct_cards"] == len(SQ3_PANS) and live["decline_ratio"] == 0.5,
+        "" if live is None else f"{live['micro_payments']} micro payments",
+    )
+    alerts = body.get("alerts", [])
+    for alert in alerts:
+        print(
+            f"    alert {alert['alert_id']}: ticket {alert['ticket_id']} in queue {alert['queue']}, "
+            f"episode {alert['first_payment_id']}",
+            flush=True,
+        )
+    live_alert = next(
+        (a for a in alerts if live is not None and a["first_payment_id"] == live["first_payment_id"]), None
+    )
+    demo.check(
+        "the live episode raised an alert with a ticket in the fraud queue",
+        live_alert is not None and live_alert["ticket_id"] is not None and live_alert["queue"] == "fraud",
+    )
+    refs = [item["ref"] for item in body.get("evidence", [])]
+    demo.check(
+        "evidence cites the live episode and its alert",
+        live is not None
+        and live_alert is not None
+        and f"episode:{live['first_payment_id']}" in refs
+        and f"alert:{live_alert['alert_id']}" in refs,
+    )
+    print(f"    evidence refs: {', '.join(refs)}", flush=True)
+
+    as_user = ops_ai.post(
+        "/v1/assistant/investigate-fraud",
+        headers={"Authorization": f"Bearer {user_token}"},
+        json={"question": SQ3_QUESTION},
+    )
+    demo.check("user token gets 403 on /investigate-fraud", as_user.status_code == 403)
 
 
 def run() -> int:
@@ -293,7 +416,8 @@ def run() -> int:
     demo.check("evidence leaves out the approved charge", approved_ref not in refs)
 
     _investigate_sq1(demo, ops_ai, token, declined_ref)
-    _investigate_sq2(demo, gateway, ops_ai, token, session_factory)
+    user_token = _investigate_sq2(demo, gateway, ops_ai, token, session_factory)
+    _investigate_sq3(demo, gateway, ops_ai, redis, session_factory, pepper, user_token)
 
     summary = "all checks passed" if demo.failures == 0 else f"{demo.failures} check(s) failed"
     print(f"\n{summary}", flush=True)

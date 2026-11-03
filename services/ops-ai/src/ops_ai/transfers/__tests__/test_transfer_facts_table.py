@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from conftest import ALEMBIC_CONFIGS
 
 INCIDENTS_REVISION = "318aeacd647d"
+TRANSFER_FACTS_REVISION = "7c2e9a4b1d05"
 DECIDED_AT = datetime(2026, 11, 3, 9, 0, tzinfo=UTC)
 
 INSERT_MINIMAL = text(
@@ -138,15 +139,15 @@ def test_a_row_without_the_optional_columns_is_accepted_and_they_read_back_as_nu
     assert tuple(row) == (None, None, None, None, None, None, None)
 
 
-def test_the_latest_migration_is_a_single_step_after_the_incidents_migration() -> None:
+def test_the_transfer_facts_migration_is_a_single_step_after_the_incidents_migration() -> None:
     # Arrange
     script = ScriptDirectory.from_config(_ops_ai_config())
 
     # Act
-    head = script.get_revision(script.get_current_head() or "")
+    transfer_facts = script.get_revision(TRANSFER_FACTS_REVISION)
 
     # Assert
-    assert head.down_revision == INCIDENTS_REVISION
+    assert transfer_facts.down_revision == INCIDENTS_REVISION
 
 
 def test_migration_downgrade_removes_transfer_facts_and_upgrade_restores_it(engine: Engine) -> None:

@@ -1,6 +1,8 @@
 import json
+import logging
 
 from contracts.events import PAYMENTS_TOPIC, PaymentEventV1
+from pydantic import ValidationError
 from redis import Redis
 from redis.exceptions import ResponseError
 from sqlalchemy import select
@@ -8,10 +10,15 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from ops_ai.clock import Clock
+from ops_ai.fraud_watch.watch import watch_payment
 from ops_ai.ingest.models import PaymentFact, ProcessedEvent
 from ops_ai.search.models import SearchDocument
 
+logger = logging.getLogger(__name__)
+
 PAYMENT_FACTS_GROUP = "ops-ai.payment-facts"
+PAYMENTS_DEAD_LETTER_TOPIC = "gw.payments.v1.dead"
+DEAD_LETTER_MAXLEN = 10_000
 
 
 def ensure_group(redis: Redis, stream: str, group: str) -> None:
@@ -24,7 +31,8 @@ def ensure_group(redis: Redis, stream: str, group: str) -> None:
 
 
 def apply_payment_event(session: Session, clock: Clock, event: PaymentEventV1) -> bool:
-    """Upserts payment_facts (highest entity_version wins) and the payment search document.
+    """Upserts payment_facts (highest entity_version wins) and the payment search document, then runs
+    the card-testing watch on the projected payment.
 
     Dedupes on processed_events(consumer, event_id) in the same transaction. Returns False for a duplicate.
     Does not commit.
@@ -57,6 +65,7 @@ def apply_payment_event(session: Session, clock: Clock, event: PaymentEventV1) -
         "provider": event.provider,
         "decline_code": event.decline_code,
         "card_bin": event.card_bin,
+        "card_ref": event.card_ref,
         "entity_version": event.entity_version,
         "occurred_at": event.occurred_at,
     }
@@ -76,6 +85,7 @@ def apply_payment_event(session: Session, clock: Clock, event: PaymentEventV1) -
         .values(**document)
         .on_conflict_do_update(index_elements=["kind", "ref_id"], set_=document)
     )
+    watch_payment(session, clock, event)
     return True
 
 
@@ -103,7 +113,9 @@ def consume_payments(
     """Reads gw.payments.v1 via PAYMENT_FACTS_GROUP, applies each event, commits, then XACKs.
 
     `start_id` ">" reads new entries; "0" re-reads this consumer's unacked entries (after a failed apply).
-    Returns the number of entries read (duplicates included).
+    Returns the number of entries read (duplicates and dead-lettered entries included).
+    A malformed entry (no payload, not JSON, or rejected by PaymentEventV1) is copied to
+    PAYMENTS_DEAD_LETTER_TOPIC and XACKed; errors applying a valid event propagate so the worker retries.
     """
     ensure_group(redis, PAYMENTS_TOPIC, PAYMENT_FACTS_GROUP)
     response = redis.xreadgroup(
@@ -111,11 +123,27 @@ def consume_payments(
     )
     entries = _stream_entries(response)
     for entry_id, fields in entries:
-        event = PaymentEventV1.model_validate(json.loads(fields["payload"]))
+        try:
+            event = PaymentEventV1.model_validate(json.loads(fields["payload"]))
+        except (KeyError, ValueError, ValidationError) as error:
+            _dead_letter(redis, entry_id, fields.get("payload", ""), error)
+            continue
         with session_factory.begin() as session:
             apply_payment_event(session, clock, event)
         redis.xack(PAYMENTS_TOPIC, PAYMENT_FACTS_GROUP, entry_id)
     return len(entries)
+
+
+def _dead_letter(redis: Redis, entry_id: str, payload: str, error: Exception) -> None:
+    """Logs the entry id and error class only: the payload and the validation message can carry card data."""
+    error_name = type(error).__name__
+    redis.xadd(
+        PAYMENTS_DEAD_LETTER_TOPIC,
+        {"source_entry_id": entry_id, "error": error_name, "payload": payload},
+        maxlen=DEAD_LETTER_MAXLEN,
+    )
+    redis.xack(PAYMENTS_TOPIC, PAYMENT_FACTS_GROUP, entry_id)
+    logger.warning("dead-lettered event entry_id=%s error=%s", entry_id, error_name)
 
 
 StreamEntry = tuple[str, dict[str, str]]

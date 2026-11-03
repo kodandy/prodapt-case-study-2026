@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Integer, String
+from sqlalchemy import BigInteger, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ops_ai.db import OpsAiBase
@@ -19,6 +19,9 @@ class ProcessedEvent(OpsAiBase):
 
 class PaymentFact(OpsAiBase):
     __tablename__ = "payment_facts"
+    __table_args__ = (
+        Index("ix_ops_ai_payment_facts_merchant_method_occurred_at", "merchant_id", "method", "occurred_at"),
+    )
 
     payment_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
     merchant_id: Mapped[uuid.UUID] = mapped_column(index=True)
@@ -29,5 +32,6 @@ class PaymentFact(OpsAiBase):
     provider: Mapped[str | None] = mapped_column(String(32))
     decline_code: Mapped[str | None] = mapped_column(String(64))
     card_bin: Mapped[str | None] = mapped_column(String(8))
+    card_ref: Mapped[str | None] = mapped_column(String(32))
     entity_version: Mapped[int] = mapped_column(Integer)
     occurred_at: Mapped[datetime]
