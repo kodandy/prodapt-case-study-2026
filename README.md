@@ -229,6 +229,20 @@ These were found by the Day 1 audit and are planned:
 - Card testing: `origin == "live"` is self-declared by the event, so anyone who can write to the stream (no Redis ACL
   yet) can raise alerts.
 - Stream: a malformed entry goes to `gw.payments.v1.dead` and is acked; nothing replays or alerts on that stream yet.
+- Settlement (SQ4): the gateway settlement batch, `gw.settlement.v1` and payouts are Design; settlement entries are
+  seeded as the acquirer's report.
+- Settlement: one contract and one FX snapshot for every merchant; per-merchant terms and live rates are Design.
+- Settlement: a chargeback is debited when the dispute opens, whatever its outcome; reversal on a won dispute is Design.
+- Settlement: the reserve is held only; its release in a later payout is Design.
+- Settlement: the cross-check against the payment projection proves the two sources agree, not that both are right.
+  It covers amount, currency, card method and the succeeded state. Refund and chargeback flags come from the
+  settlement report only, because the projection has no refund or dispute state until B3.
+- Settlement: the fee lines are recomputed per payment from the same contract constants that built them, so a wrong
+  contract term is not caught.
+- Settlement: a period with more than 5000 entries is always reported unverified (`too_many_entries`); streaming
+  aggregation is Design.
+- Settlement: the DB session stays open during the LLM call, and the contract and FX snapshot ignore the period.
+- Settlement: a negative net is shown as a balance the merchant owes; collecting it is Design.
 
 ## Development notes
 

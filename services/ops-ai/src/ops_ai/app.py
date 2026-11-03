@@ -8,7 +8,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy.orm import Session, sessionmaker
 
 from ops_ai.assistant.llm_port import LlmPort
@@ -20,6 +20,8 @@ from ops_ai.fraud_watch.service import FraudCause, FraudIntent, investigate_frau
 from ops_ai.investigation.service import CauseLabel, Intent, investigate
 from ops_ai.investigation.tools import FailureAggregate
 from ops_ai.scope import Principal, Scope, UserScope
+from ops_ai.settlement.service import explain_payout
+from ops_ai.settlement.statement import LineKind
 from ops_ai.transfers import (
     CauseCode,
     RemediationOwner,
@@ -254,6 +256,46 @@ class InvestigateFraudResponse(BaseModel):
     evidence: list[EvidenceOut]
 
 
+# ASCII digits only: `\d` would also accept other scripts' digits.
+StatementPeriod = Annotated[str, StringConstraints(pattern=r"^[0-9]{4}-(0[1-9]|1[0-2])$")]
+
+
+class ExplainSettlementRequest(BaseModel):
+    """No tenant field: the merchant comes from the token only, so `merchant_id` here is a 422."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(min_length=1, max_length=2000)
+    period: StatementPeriod | None = None
+
+
+class SettlementLineOut(BaseModel):
+    kind: LineKind
+    amount_minor: int
+    count: int
+
+
+class ExplainSettlementResponse(BaseModel):
+    period: str
+    currency: str
+    contract_version: str
+    fx_rate_id: str
+    lines: list[SettlementLineOut]
+    gross_minor: int
+    expected_minor: int
+    net_minor: int
+    gap_minor: int
+    verified: bool
+    mismatches: list[str]
+    projection_checked: int
+    summary: str
+    mode: AnswerMode
+    text: str | None
+    model: str | None
+    tool_calls: list[ToolCallOut]
+    evidence: list[EvidenceOut]
+
+
 def create_app(deps: OpsAiAppDeps) -> FastAPI:
     """Routes:
     - GET /healthz → 200 (liveness). GET /readyz → 200 ready, or 503 with the failed components.
@@ -264,6 +306,8 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
       → the identical 404.
     - POST /v1/assistant/investigate-fraud (merchant token, same body as /ask) → InvestigateFraudResponse with
       Cache-Control: no-store; now = deps.clock().
+    - POST /v1/assistant/explain-settlement (merchant token) {question, period?: YYYY-MM}
+      → ExplainSettlementResponse with Cache-Control: no-store. No statement for the period → 404.
     Missing/invalid/expired token → 401 {"detail": "invalid token"}. A valid token of the other kind
     (user token on the merchant routes, merchant token on the transfer route) → 403 {"detail": "forbidden"}.
     """
@@ -380,6 +424,40 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
                 for a in result.alerts
             ],
             suggested_fixes=list(result.suggested_fixes),
+            tool_calls=[ToolCallOut(name=call.name, args=call.args) for call in result.tool_calls],
+            evidence=[EvidenceOut(ref=item.ref, summary=item.summary) for item in result.evidence],
+        )
+
+    @app.post("/v1/assistant/explain-settlement")
+    def assistant_explain_settlement(
+        body: ExplainSettlementRequest, scope: Annotated[Scope, Depends(merchant_scope)], response: Response
+    ) -> ExplainSettlementResponse:
+        with deps.session_factory() as session:
+            result = explain_payout(session, scope, body.question, body.period, deps.llm)
+        if result is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "settlement not found")
+        response.headers["Cache-Control"] = "no-store"
+        statement = result.statement
+        return ExplainSettlementResponse(
+            period=statement.period,
+            currency=statement.currency,
+            contract_version=statement.contract_version,
+            fx_rate_id=statement.fx_rate_id,
+            lines=[
+                SettlementLineOut(kind=line.kind, amount_minor=line.amount_minor, count=line.count)
+                for line in statement.lines
+            ],
+            gross_minor=statement.gross_minor,
+            expected_minor=statement.expected_minor,
+            net_minor=statement.net_minor,
+            gap_minor=statement.gap_minor,
+            verified=statement.verified,
+            mismatches=list(statement.mismatches),
+            projection_checked=statement.projection_checked,
+            summary=result.summary,
+            mode=result.mode,
+            text=result.text,
+            model=result.model,
             tool_calls=[ToolCallOut(name=call.name, args=call.args) for call in result.tool_calls],
             evidence=[EvidenceOut(ref=item.ref, summary=item.summary) for item in result.evidence],
         )

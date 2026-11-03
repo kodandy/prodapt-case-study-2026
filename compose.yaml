@@ -87,7 +87,7 @@ services:
       <<: *app-env
       # ops_ai.seed and scripts/demo.py import scripts.generate_dataset from the repo root
       PYTHONPATH: /app
-    command: ["sh", "-c", "python -m ops_ai.seed && python -m ops_ai.transfers"]
+    command: ["sh", "-c", "python -m ops_ai.seed && python -m ops_ai.transfers && python -m ops_ai.settlement"]
     depends_on:
       migrate: { condition: service_completed_successfully }
 

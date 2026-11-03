@@ -1,7 +1,8 @@
 """End-to-end walkthrough for `make demo`: charges over HTTP, wait for the consumer, ask the assistant,
 investigate SQ1 over the seeded history (docs/specs/sq1.md section 9), then log in as the seeded SQ2 sender
 and investigate the declined transfer (docs/specs/sq2.md section 8), then run a live card-testing burst for
-the SQ3 merchant and investigate it next to the seeded one (docs/specs/sq3.md section 7).
+the SQ3 merchant and investigate it next to the seeded one (docs/specs/sq3.md section 7), then explain the
+SQ4 merchant's October payout from its verified settlement statement (docs/specs/sq4.md section 7).
 
 Prints one ✓/✗ line per check and exits 0 only if every check passed. Never prints the API key in full, a
 password or a token.
@@ -45,6 +46,9 @@ SQ3_QUESTION = "We're seeing a series of tiny card payments — is this card tes
 SQ3_MICRO_AMOUNT_MINOR = 50
 SQ3_BURST_SIZE = 12
 SQ3_PANS = ("4242424242424242", "5555555555554444", "4000000000009995", "4000000000000002")
+SQ4_MERCHANT = "mch_0003"
+SQ4_QUESTION = "Why is my October payout lower than expected?"
+SQ4_LINE_KINDS = ["gross", "mdr", "fixed_fees", "fx", "refunds", "chargebacks", "chargeback_fees", "reserve"]
 
 
 class Demo:
@@ -345,6 +349,98 @@ def _investigate_sq3(
     demo.check("user token gets 403 on /investigate-fraud", as_user.status_code == 403)
 
 
+def _money(minor: int, currency: str) -> str:
+    sign = "-" if minor < 0 else ""
+    units, cents = divmod(abs(minor), 100)
+    return f"{sign}{units}.{cents:02d} {currency}"
+
+
+def _explain_sq4(
+    demo: Demo,
+    gateway: httpx.Client,
+    ops_ai: httpx.Client,
+    session_factory: sessionmaker[Session],
+    pepper: str,
+    user_token: str,
+) -> None:
+    print("\nSQ4: " + SQ4_QUESTION, flush=True)
+    credentials = bootstrap_merchant(
+        session_factory, system_clock, "demo-sq4", pepper, merchant_id=merchant_uuid(SQ4_MERCHANT)
+    )
+    demo.check("SQ4 merchant ready", True, f"merchant {credentials.merchant_id}")
+    issued = gateway.post("/v1/merchant-tokens", headers={"Authorization": f"Bearer {credentials.api_key}"})
+    demo.check("SQ4 merchant token issued", issued.status_code == 201, f"{issued.status_code}")
+    token = issued.json().get("access_token", "") if issued.status_code == 201 else ""
+
+    response = ops_ai.post(
+        "/v1/assistant/explain-settlement",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"question": SQ4_QUESTION},
+    )
+    body = response.json() if response.status_code == 200 else {}
+    currency = str(body.get("currency", ""))
+    lines = body.get("lines", [])
+    amounts = {line["kind"]: line["amount_minor"] for line in lines}
+    net, expected = body.get("net_minor", 0), body.get("expected_minor", 0)
+    demo.check(
+        "settlement explained",
+        response.status_code == 200,
+        f"{response.status_code} period={body.get('period')} mode={body.get('mode')}",
+    )
+    demo.check(
+        "statement verified, no mismatches",
+        body.get("verified") is True and body.get("mismatches") == [],
+        f"{body.get('projection_checked')} payments matched the payment projection",
+    )
+    demo.check("the eight lines in order", [line["kind"] for line in lines] == SQ4_LINE_KINDS)
+    demo.check("the lines sum to the net payout", sum(amounts.values()) == net, _money(net, currency))
+    demo.check(
+        "net payout below the expected payout",
+        net < expected,
+        f"{_money(net, currency)} < {_money(expected, currency)}",
+    )
+    demo.check(
+        "refunds, chargebacks and FX lines are non-zero",
+        all(amounts.get(kind, 0) != 0 for kind in ("refunds", "chargebacks", "fx")),
+    )
+    for line in lines:
+        print(
+            f"    line {line['kind']}: {_money(line['amount_minor'], currency)} ({line['count']} payments)",
+            flush=True,
+        )
+    print(
+        f"    gap: {_money(body.get('gap_minor', 0), currency)} "
+        f"(expected {_money(expected, currency)} - net {_money(net, currency)})",
+        flush=True,
+    )
+    print(f"    summary: {body.get('summary')}", flush=True)
+    tools = [call["name"] for call in body.get("tool_calls", [])]
+    demo.check("tool called", tools == ["explain_settlement"], ", ".join(tools))
+    refs = [item["ref"] for item in body.get("evidence", [])]
+    period = body.get("period")
+    demo.check(
+        "evidence cites the statement, refunds, chargebacks, FX and the cross-check",
+        all(
+            ref in refs
+            for ref in (
+                f"statement:{period}",
+                "line:refunds",
+                "line:chargebacks",
+                "line:fx",
+                f"crosscheck:{period}",
+            )
+        ),
+    )
+    print(f"    evidence refs: {', '.join(refs)}", flush=True)
+
+    as_user = ops_ai.post(
+        "/v1/assistant/explain-settlement",
+        headers={"Authorization": f"Bearer {user_token}"},
+        json={"question": SQ4_QUESTION},
+    )
+    demo.check("user token gets 403 on /explain-settlement", as_user.status_code == 403)
+
+
 def run() -> int:
     demo = Demo()
     settings = load_gateway_settings()
@@ -418,6 +514,7 @@ def run() -> int:
     _investigate_sq1(demo, ops_ai, token, declined_ref)
     user_token = _investigate_sq2(demo, gateway, ops_ai, token, session_factory)
     _investigate_sq3(demo, gateway, ops_ai, redis, session_factory, pepper, user_token)
+    _explain_sq4(demo, gateway, ops_ai, session_factory, pepper, user_token)
 
     summary = "all checks passed" if demo.failures == 0 else f"{demo.failures} check(s) failed"
     print(f"\n{summary}", flush=True)

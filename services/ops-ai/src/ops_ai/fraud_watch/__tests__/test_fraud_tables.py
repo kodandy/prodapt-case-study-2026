@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from conftest import ALEMBIC_CONFIGS
 
 TRANSFER_FACTS_REVISION = "7c2e9a4b1d05"
+FRAUD_ALERTS_REVISION = "9d4f1b7e2c63"
 CREATED_AT = datetime(2026, 11, 3, 12, 0, tzinfo=UTC)
 STARTED_AT = datetime(2026, 11, 3, 11, 0, tzinfo=UTC)
 MERCHANT = uuid.UUID("aaaaaaaa-0000-4000-8000-000000000001")
@@ -388,16 +389,15 @@ def test_alert_features_round_trip_as_jsonb(session_factory: sessionmaker[Sessio
 # --- migration -------------------------------------------------------------------------------------------
 
 
-def test_the_latest_migration_is_a_single_step_after_the_transfer_facts_migration() -> None:
+def test_the_fraud_alerts_migration_is_a_single_step_after_the_transfer_facts_migration() -> None:
     # Arrange
     script = ScriptDirectory.from_config(_ops_ai_config())
 
     # Act
-    head = script.get_revision(script.get_current_head() or "")
+    revision = script.get_revision(FRAUD_ALERTS_REVISION)
 
     # Assert
-    assert head.revision != TRANSFER_FACTS_REVISION
-    assert head.down_revision == TRANSFER_FACTS_REVISION
+    assert revision.down_revision == TRANSFER_FACTS_REVISION
 
 
 def test_migration_downgrade_removes_the_new_tables_and_column_and_upgrade_restores_them(
