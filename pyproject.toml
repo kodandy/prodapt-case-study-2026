@@ -1,0 +1,55 @@
+[project]
+name = "payment-platform"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = ["contracts", "gateway", "ops-ai"]
+
+[tool.uv.workspace]
+members = ["contracts", "services/gateway", "services/ops-ai"]
+
+[tool.uv.sources]
+contracts = { workspace = true }
+gateway = { workspace = true }
+ops-ai = { workspace = true }
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "hypothesis>=6.112",
+  "mypy>=1.13",
+  "ruff>=0.8",
+]
+
+[tool.pytest.ini_options]
+python_files = ["test_*.py"]
+testpaths = ["contracts", "services", "tests"]
+addopts = "-q --strict-markers --import-mode=importlib"
+markers = ["integration: needs Postgres and Redis from docker compose"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "ANN", "RUF"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__tests__/**" = ["S105", "S106", "ANN"]
+"**/migrations/**" = ["ANN"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+explicit_package_bases = true
+mypy_path = ["contracts/src", "services/gateway/src", "services/ops-ai/src"]
+exclude = ["/migrations/"]
+
+[[tool.mypy.overrides]]
+module = ["*.__tests__.*"]
+disallow_untyped_defs = false
+
+[tool.uv]
+# supply-chain cooldown: ignore releases newer than 7 days before the lock date
+exclude-newer = "2026-10-27T00:00:00Z"

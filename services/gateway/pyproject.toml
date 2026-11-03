@@ -1,0 +1,30 @@
+[project]
+name = "gateway"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "contracts",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "pydantic>=2.9",
+  "pydantic-settings>=2.6",
+  "sqlalchemy>=2.0.36",
+  "psycopg[binary]>=3.2",
+  "alembic>=1.14",
+  "redis>=5.2",
+  "httpx>=0.28",
+  "argon2-cffi>=23.1",
+  "pyotp>=2.9",
+  "pyjwt[crypto]>=2.10",
+  "cryptography>=43",
+]
+
+[tool.uv.sources]
+contracts = { workspace = true }
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gateway"]

@@ -1,0 +1,44 @@
+name: payplat
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-payplat}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payplat-local-only}
+      POSTGRES_DB: ${POSTGRES_DB:-payplat}
+    ports: ["${POSTGRES_PORT:-55432}:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-payplat}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7.4-alpine
+    ports: ["${REDIS_PORT:-56379}:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  dev:
+    profiles: ["dev"]
+    build: { context: ., dockerfile: docker/dev.Dockerfile }
+    volumes:
+      - .:/workspace
+      - venv:/opt/venv
+      - uvcache:/root/.cache/uv
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-payplat}:${POSTGRES_PASSWORD:-payplat-local-only}@postgres:5432/${POSTGRES_DB:-payplat}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+volumes:
+  pgdata:
+  venv:
+  uvcache:
