@@ -352,6 +352,16 @@
       "file": "docs/requirements-traceability.md",
       "why": "The full production-readiness instruction answered Q-011.",
       "gave_up": "A hand-built metrics UI (Grafana instead); Alembic as a later P1 item (moved to Day 1); implementing any P2 item; listing outbox under P1."
+    },
+    {
+      "id": "D-022",
+      "status": "confirmed",
+      "confirmed_at": "2026-11-03",
+      "topic": "Implementation routing, Day 1 exit criteria, submission repo",
+      "decision": "No contracts-first phase. Claude builds the thin slice inline (signup -> wallet -> card charge -> ledger + outbox same tx -> relay -> ops-ai projection -> search -> mock answer, minimal success path only), fixing only the event schema, dedupe and port it needs. Then at most two lanes (G: gateway, A: ops-ai + UI), slices <= half a day with their own acceptance commands; Codex authors in worktrees, Claude reviews; auth/payment slices go through security-auditor + red-team. Owner and merge order fixed for shared deps, contracts and migrations. A wrong test is never satisfied by bending the spec: park it, ask the user at once only if it blocks, batch the rest. Day 1 exit: clean checkout -> make up + make ci green; automated proofs: concurrent same key -> provider-side call count 1, same success body for all, no duplicate ledger postings; C2 retry returns stored response; LlmPort down -> charge succeeds + assistant T2. Toolchain recovery time-boxed to 60 min (Nix devShell for python312/uv/node). Submission repo: private GitHub repository with reviewer invite.",
+      "why": "Sol consult 2026-11-03: contracts-first adds coordination cost before conventions exist; integration left to the last day is the main schedule trap.",
+      "gave_up": "Up-front full OpenAPI/proto and parallel workers from hour one; public repository.",
+      "consult_log": "~/.claude/logs/consults/20261103-132152-consult.md"
     }
   ],
   "open_questions": [
@@ -373,13 +383,17 @@
       "id": "Q-003",
       "question": "Deadline and time budget? This decides how far Phase 4 (Advanced) goes.",
       "default_if_no_answer": "Advanced 1-2 only.",
-      "answer_2026-11-01": "Submit by Fri 2026-11-06 if possible (recruiter). Advanced is optional bonus. Presentation date still being confirmed."
+      "answer_2026-11-01": "Submit by Fri 2026-11-06 if possible (recruiter). Advanced is optional bonus. Presentation date still being confirmed.",
+      "status": "resolved",
+      "answer": "Recruiter confirmation 2026-11-01: deadline 2026-11-06 'if possible'; Advanced is optional."
     },
     {
       "id": "Q-004",
       "question": "Presentation language (English / Japanese)?",
       "default_if_no_answer": "English slides and script.",
-      "answer_2026-11-01": "Japanese is fine; an English translation is welcome (AI translation OK)."
+      "answer_2026-11-01": "Japanese is fine; an English translation is welcome (AI translation OK).",
+      "status": "resolved",
+      "answer": "Recruiter confirmation 2026-11-01: Japanese OK, English translation welcome."
     },
     {
       "id": "Q-005",
@@ -413,7 +427,9 @@
     {
       "id": "Q-009",
       "question": "OpenAI default model names for .env.example (chat, embedding, judge)? Will you provide an OPENAI_API_KEY for the demo and DeepEval runs (cost)?",
-      "default_if_no_answer": "Placeholders in .env.example; mock everywhere until a key is provided."
+      "default_if_no_answer": "Placeholders in .env.example; mock everywhere until a key is provided.",
+      "status": "resolved",
+      "answer": "User will provide an OPENAI_API_KEY later (2026-11-03). Start in mock mode; model names pinned in .env.example (P1-8)."
     },
     {
       "id": "Q-010",
@@ -466,5 +482,25 @@
       "~/.claude/logs/consults/20261103-124449-consult.md"
     ]
   },
-  "priority_order": "Basic 13 items > P0 (implemented + tested) > P1 (if time) > P2 (design doc only); P0/P1 never displace Basic (D-020)"
+  "priority_order": "Basic 13 items > P0 (implemented + tested) > P1 (if time) > P2 (design doc only); P0/P1 never displace Basic (D-020)",
+  "day1_progress": {
+    "updated_at": "2026-11-03",
+    "done": [
+      "Alembic schemas for gateway/simulator/ops_ai (round-trip + check in make migrate-check)",
+      "thin slice implemented: signup, wallet, tokenized card charge with idempotency (Redis lock + DB row), ledger + outbox + audit in tx2, relay, ops-ai consumer, FTS search, assistant with mock LLM and T2 fallback",
+      "113 tests green (E1 with/without Redis, E2 C2, E3 LLM down, e2e, import rule)",
+      "removed types-redis (redis 8 ships py.typed; stale stubs broke typing)",
+      ".github/workflows/ci.yml added (not yet run on GitHub)"
+    ],
+    "blocked": [
+      "make type fails on 8 mypy errors inside test files (test_relay.py xrange typing, test_charge.py unused type: ignore); needs user approval to edit tests"
+    ],
+    "todo": [
+      "security-auditor + red-team on auth/payment slice",
+      "dataset script",
+      "GitHub private repo + first Actions run (ask user)",
+      ".env.example (user must create; .env* writes are denied)",
+      "README note on host uv path bug"
+    ]
+  }
 }

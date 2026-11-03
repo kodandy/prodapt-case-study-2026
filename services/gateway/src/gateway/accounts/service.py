@@ -1,0 +1,99 @@
+import hashlib
+import hmac
+import secrets
+import uuid
+from dataclasses import dataclass
+
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from gateway.accounts.models import ApiKey, Merchant, User
+from gateway.clock import Clock
+from gateway.payments.ledger.service import ensure_account
+from gateway.wallets.models import AccountBalance
+
+WALLET_KIND = "wallet"
+API_KEY_PREFIX = "sk_test_"
+
+_password_hasher = PasswordHasher()
+
+
+@dataclass(frozen=True)
+class SignUpResult:
+    user_id: uuid.UUID
+    wallet_account_id: uuid.UUID
+
+
+@dataclass(frozen=True)
+class MerchantCredentials:
+    merchant_id: uuid.UUID
+    api_key: str
+    """Plaintext API key: returned once, stored only as a keyed hash."""
+
+
+class EmailAlreadyRegisteredError(Exception):
+    pass
+
+
+def hash_password(password: str) -> str:
+    """argon2id hash."""
+    return _password_hasher.hash(password)
+
+
+def verify_password(password_hash: str, password: str) -> bool:
+    try:
+        return _password_hasher.verify(password_hash, password)
+    except (VerificationError, InvalidHashError):
+        return False
+
+
+def sign_up(session: Session, clock: Clock, email: str, password: str, currency: str = "USD") -> SignUpResult:
+    """Creates the user and one wallet ledger account (with a zero balance row) in `currency`.
+
+    Raises EmailAlreadyRegisteredError for a duplicate email (case-insensitive). Does not commit.
+    """
+    normalized = email.strip().lower()
+    existing = session.scalar(select(User.id).where(func.lower(User.email) == normalized))
+    if existing is not None:
+        raise EmailAlreadyRegisteredError
+    user = User(id=uuid.uuid4(), email=normalized, password_hash=hash_password(password), created_at=clock())
+    session.add(user)
+    session.flush()
+    wallet_id = ensure_account(session, "user", user.id, WALLET_KIND, currency)
+    session.add(AccountBalance(account_id=wallet_id, available_minor=0, held_minor=0))
+    session.flush()
+    return SignUpResult(user_id=user.id, wallet_account_id=wallet_id)
+
+
+def _hash_api_key(api_key: str, pepper: str) -> str:
+    return hmac.new(pepper.encode(), api_key.encode(), hashlib.sha256).hexdigest()
+
+
+def create_merchant(session: Session, clock: Clock, name: str, api_key_pepper: str) -> MerchantCredentials:
+    """Creates the merchant and an API key `sk_test_...`. Does not commit."""
+    merchant = Merchant(id=uuid.uuid4(), name=name, created_at=clock())
+    session.add(merchant)
+    session.flush()
+    api_key = f"{API_KEY_PREFIX}{secrets.token_urlsafe(32)}"
+    session.add(
+        ApiKey(
+            id=uuid.uuid4(),
+            merchant_id=merchant.id,
+            key_hash=_hash_api_key(api_key, api_key_pepper),
+            prefix=api_key[: len(API_KEY_PREFIX) + 4],
+            created_at=clock(),
+        )
+    )
+    session.flush()
+    return MerchantCredentials(merchant_id=merchant.id, api_key=api_key)
+
+
+def authenticate_api_key(session: Session, api_key: str, api_key_pepper: str) -> uuid.UUID | None:
+    """Returns the merchant id for a valid key, else None."""
+    if not api_key.startswith(API_KEY_PREFIX):
+        return None
+    return session.scalar(
+        select(ApiKey.merchant_id).where(ApiKey.key_hash == _hash_api_key(api_key, api_key_pepper))
+    )
