@@ -1,13 +1,16 @@
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -32,6 +35,7 @@ class Payment(GatewayBase):
             "refunded_minor + disputed_minor + chargeback_minor <= amount_minor", name="totals_within_amount"
         ),
         Index("ix_payments_merchant_history", "merchant_id", "created_at", "id"),
+        Index("ix_payments_card_fingerprint_created", "card_fingerprint", "created_at"),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
@@ -41,12 +45,19 @@ class Payment(GatewayBase):
     method: Mapped[str] = mapped_column(String(16))
     state: Mapped[str] = mapped_column(String(16))
     card_token: Mapped[str | None] = mapped_column(ForeignKey("card_tokens.token"))
+    card_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    """Null only for payments created before risk scoring."""
     decline_code: Mapped[str | None] = mapped_column(String(64))
     entity_version: Mapped[int] = mapped_column(Integer, default=1)
     refunded_minor: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"))
     disputed_minor: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"))
     """Reserved by a dispute in opened | under_review."""
     chargeback_minor: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"))
+    risk_score: Mapped[Decimal | None] = mapped_column(Numeric(3, 2))
+    """Null only for payments created before risk scoring."""
+    risk_reasons: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    risk_flagged: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    risk_blocked: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
 

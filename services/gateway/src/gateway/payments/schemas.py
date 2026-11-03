@@ -73,6 +73,14 @@ class PaymentSummary(BaseModel):
     created_at: datetime
 
 
+class PaymentRiskView(BaseModel):
+    """`blocked`: declined by the risk rules before reaching the provider."""
+
+    payment_id: uuid.UUID
+    risk_flagged: bool
+    blocked: bool
+
+
 class RefundRequest(BaseModel):
     """`amount_minor` omitted → refund the full refundable amount; an explicit null is rejected."""
 

@@ -28,15 +28,18 @@ from gateway.payments.charge import ChargeDeps, charge_card
 from gateway.payments.disputes import (
     DisputeNotFoundError,
     InvalidDisputeTransitionError,
+    PaymentNotFoundError,
     get_dispute,
     submit_evidence,
 )
 from gateway.payments.history import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, InvalidCursorError, list_payments
 from gateway.payments.refunds import refund_payment
+from gateway.payments.risk import get_payment_risk
 from gateway.payments.schemas import (
     ChargeRequest,
     DisputeView,
     EvidenceRequest,
+    PaymentRiskView,
     PaymentSummary,
     RefundRequest,
 )
@@ -102,6 +105,8 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
       {"detail": "try again later"} with Retry-After: 1.
     - GET /v1/payments?limit&cursor&state (Bearer API key) → 200 {items, next_cursor}: the merchant's
       payments, newest first. Invalid cursor → 400.
+    - GET /v1/payments/{payment_id}/risk (Bearer API key) → 200 PaymentRiskView (flags only); unknown or
+      another merchant's → 404.
     - POST /v1/payments/{payment_id}/refunds (Bearer API key, Idempotency-Key required) body RefundRequest →
       RefundOutcome status/body. Idempotency-Key outside visible ASCII → 400; explicit null amount → 422.
     - GET /v1/disputes/{dispute_id}, POST /v1/disputes/{dispute_id}/evidence (Bearer API key) → DisputeView;
@@ -203,6 +208,16 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         except InvalidCursorError:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid cursor") from None
         return PaymentListResponse(items=page.items, next_cursor=page.next_cursor)
+
+    @app.get("/v1/payments/{payment_id}/risk")
+    def payment_risk(
+        payment_id: uuid.UUID, merchant_id: Annotated[uuid.UUID, Depends(merchant_from_api_key)]
+    ) -> PaymentRiskView:
+        try:
+            with session_factory() as session:
+                return get_payment_risk(session, merchant_id, payment_id)
+        except PaymentNotFoundError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "payment not found") from None
 
     @app.post("/v1/payments/{payment_id}/refunds")
     def create_refund(

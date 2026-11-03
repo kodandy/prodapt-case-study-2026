@@ -123,10 +123,19 @@ Routes (Bearer API key): `GET /v1/disputes/{dispute_id}` → 200 `DisputeView` o
    over the card fingerprint, in the same transaction as the claim (tx1).
 2. **Stored on the payment, read through its own view.** `ChargeResponse`, the stored idempotent body and
    `PaymentSummary` (B3 history) stay as they are; the score is read through `GET /v1/payments/{payment_id}/risk`.
-3. **Block = decline before the provider.** A blocked charge never reaches the provider. It finalizes as `declined`
-   with `decline_code "risk_blocked"` through the normal tx2 (outbox `payment.declined`, audit, stored 201 response),
-   so retries with the same key behave as for any decline.
-4. The degraded-scoring policy (velocity lookup down → `risk_unavailable` / `degraded_scoring`) is Design: velocity
+3. **Block = decline before the provider, settled in tx1.** A blocked charge never reaches the provider and has no
+   tx2: tx1 itself writes the payment as `declined` with `decline_code "risk_blocked"` and `risk_blocked = true`, the
+   outbox `payment.declined` (with `provider: null`), the audit row (summary adds `"decline_code": "risk_blocked"`)
+   and the stored 201 response. No `payment_attempts` row is created. Retries with the same key replay the stored
+   body. (Security audit LOW-3: no crash window between the decision and its record, no provider attribution.)
+4. **One card at a time** (red-team RT-001, audit MEDIUM-1). tx1 takes `pg_advisory_xact_lock` on the card
+   fingerprint (`hashtextextended(fingerprint, 0)`) before counting, so concurrent charges on one card are scored
+   one after another and each sees the earlier ones. Known limit: a sibling still waiting on the provider is
+   counted for `card_velocity` but cannot yet count as a decline.
+5. **Velocity reads the payment's own fingerprint** (audit MEDIUM-2). `payments.card_fingerprint` (the HMAC already
+   stored on `card_tokens`) with index `(card_fingerprint, created_at)`; both counts come from one query bounded by
+   the 60-minute window.
+6. The degraded-scoring policy (velocity lookup down → `risk_unavailable` / `degraded_scoring`) is Design: velocity
    and persistence share one database here, so a velocity failure fails the charge.
 
 ### `gateway/payments/risk.py`
@@ -139,23 +148,109 @@ Routes (Bearer API key): `GET /v1/disputes/{dispute_id}` → 200 `DisputeView` o
   - `card_velocity` +0.40: at least `VELOCITY_LIMIT = 3` earlier payments with the same card fingerprint (any
     merchant) created in the last `VELOCITY_WINDOW = 10 minutes` (inclusive of the window start).
   - `recent_declines` +0.30: at least `DECLINE_LIMIT = 2` earlier `declined` payments with the same fingerprint in the
-    last `DECLINE_WINDOW = 60 minutes`.
+    last `DECLINE_WINDOW = 60 minutes`, not counting risk-blocked ones (audit LOW-2: a block must not extend
+    itself).
 - `flagged = score >= FLAG_THRESHOLD (0.50)`; `blocked = score >= BLOCK_THRESHOLD (0.90)`. No rule hit → score
   `Decimal("0.00")`, reasons `()`.
 
 ### Charge path changes (`gateway/payments/charge.py`)
 
-- `payments` gains `risk_score` (Numeric(3,2), nullable for rows before this change), `risk_reasons` (JSONB list of
-  str, default `[]`), `risk_flagged` (bool, default false). tx1 stores the assessment on the new payment.
-- Blocked → no provider call; the payment ends `declined`, `decline_code "risk_blocked"`, no journal.
+- `payments` gains `card_fingerprint` (String(64), nullable for rows before this change), `risk_score`
+  (Numeric(3,2), nullable likewise), `risk_reasons` (JSONB list of str, default `[]`), `risk_flagged` and
+  `risk_blocked` (bool, default false). tx1 stores the fingerprint and the assessment on the new payment.
+- Blocked → no provider call, no attempt, no journal; settled in tx1 (Decision 3).
+- `ChargeDeps.card_fingerprint_key` and `_Claim.card_fingerprint` are excluded from `repr` (audit LOW-6).
 
 ### Reading the score
 
 - `get_payment_risk(session, merchant_id, payment_id) -> PaymentRiskView` (`gateway/payments/risk.py`); unknown
   payment or another merchant's → `PaymentNotFoundError` (from `gateway.payments.disputes`).
   `PaymentRiskView` (pydantic, `schemas.py`): `payment_id`, `risk_flagged: bool`, `blocked: bool`
-  (`decline_code == "risk_blocked"`). The score and reasons stay internal (ops side): `card_velocity` counts the
+  (the stored `risk_blocked` column, not the decline code: audit LOW-4). The score and reasons stay internal (ops side): `card_velocity` counts the
   card's payments at every merchant, so exposing reasons or the exact score to a merchant would leak other tenants'
   activity and give card testers an oracle for the thresholds (security audit M1).
 - Route `GET /v1/payments/{payment_id}/risk` (Bearer API key) → 200 `PaymentRiskView`, 404
   `{"detail": "payment not found"}`, 401 without a valid key, 422 for a non-UUID id.
+
+## B1 — login, TOTP enrol/verify, wallet balance read
+
+What already exists (SQ2): `POST /v1/signup` (argon2id, one USD wallet), `POST /v1/user-tokens` (an RS256 token
+for ops-ai, aud `ops-ai`, login semaphore and timing-equal failures). B1 adds a gateway-side session, TOTP as a second
+factor and a wallet read. `/v1/user-tokens` is unchanged (it does not ask for TOTP; noted as a gap).
+
+### Decisions
+
+1. **Session token = RS256 JWT with `aud "gateway"`**, signed with the existing `jwt_private_key_pem`, verified by
+   the gateway with the public key derived from it. Claims: `iss "gateway"`, `aud "gateway"`, `sub "user:<id>"`,
+   `user_id`, `amr` (`["pwd"]` or `["pwd", "otp"]`), `iat`, `exp = iat + SESSION_TOKEN_TTL_SECONDS (900)`, `jti`.
+   An ops-ai token (`aud "ops-ai"`) or a merchant token is not a session.
+2. **TOTP secret encrypted at rest** with AES-256-GCM. The key comes from `GATEWAY_TOTP_ENCRYPTION_KEY` (SecretStr,
+   optional, ≥ 32 chars); the AES key is `SHA-256(key)`, the nonce is 12 random bytes stored before the ciphertext,
+   and the AAD is the user id bytes (a ciphertext copied to another user does not decrypt). Without the key the MFA
+   routes answer 503 and login for a user with TOTP enabled answers 503.
+3. **TOTP = RFC 6238, SHA-1, 6 digits, 30 s step**, accepting steps −1, 0, +1 around now. **Replay**: a code is
+   accepted only if its step is greater than the last accepted step for that user (stored), so a code works once.
+4. **Lockout** on the second factor: `TOTP_MAX_FAILURES = 5` consecutive wrong codes (verify or login) lock TOTP
+   for `TOTP_LOCKOUT = 15 minutes`; a success resets the counter. While locked, every TOTP check fails with
+   `TotpLockedError` even for a correct code. Password-only brute force stays bounded by the existing login
+   semaphore; per-IP / per-email throttling is Design.
+5. **Audit** (append-only `audit_log`, actor `user:<id>`, role `consumer`): `auth.login` (success, summary `amr`),
+   `auth.login_failed` (known user only, summary `{"factor": "password" | "totp"}`), `mfa.totp_enrolled`,
+   `mfa.totp_enabled`, `mfa.totp_locked`. Unknown emails write nothing (no raw email in the audit log). Secrets,
+   codes and passwords are never in a summary.
+
+### Data — `gateway.user_totp` (`gateway/accounts/models.py: UserTotp`)
+
+`user_id` (PK, FK users), `secret_ciphertext` (bytea), `confirmed_at` (nullable; set = TOTP enabled),
+`last_used_step` (bigint, nullable), `failed_attempts` (int ≥ 0, default 0), `locked_until` (nullable),
+`created_at`, `updated_at`.
+
+### `gateway/accounts/mfa.py`
+
+- `encrypt_totp_secret(key, user_id, secret) -> bytes` / `decrypt_totp_secret(key, user_id, blob) -> str`;
+  a wrong key or another user's id → `TotpDecryptError`.
+- `enrol_totp(session_factory, clock, key, user_id) -> TotpEnrolment(secret: str, otpauth_uri: str)` (secret base32,
+  `pyotp.random_base32()`; URI issuer `"PayPlat"`). Re-enrolling before confirmation replaces the pending secret
+  (counter and lock reset); enrolling when already confirmed → `TotpAlreadyEnabledError`.
+- `confirm_totp(session_factory, clock, key, user_id, code) -> None`: pending enrolment + valid code → `confirmed_at` set.
+  No enrolment → `TotpNotEnrolledError`; already confirmed → `TotpAlreadyEnabledError`; wrong / replayed code →
+  `InvalidTotpCodeError`; locked → `TotpLockedError`.
+- `check_totp(session_factory, clock, key, user_id, code) -> None`: the login-time check on a confirmed enrolment, same
+  replay / lockout rules and errors.
+- `totp_enabled(session, user_id) -> bool`.
+- Codes must match `^[0-9]{6}$`; anything else is a wrong code (counts as a failure).
+- `enrol_totp` / `confirm_totp` / `check_totp` take the session factory and run their own transaction, so a failed
+  attempt (counter, lock) is committed before the error is raised.
+- All checks lock the `user_totp` row (`FOR UPDATE`) so two concurrent uses of one code cannot both pass.
+
+### `gateway/accounts/sessions.py`
+
+- `issue_session_token(private_key_pem, user_id, now, amr) -> str` and
+  `verify_session_token(private_key_pem, token, now) -> SessionClaims(user_id: UUID, amr: tuple[str, ...])`;
+  bad signature, wrong `aud` / `iss`, expired, or missing claims → `InvalidSessionError`. Algorithm pinned to RS256.
+
+### `gateway/wallets/service.py`
+
+- `list_wallets(session, user_id) -> list[WalletBalanceView]`: the user's `wallet` ledger accounts with their
+  balance rows, ordered by currency. `WalletBalanceView`: `account_id`, `currency`, `available_minor`,
+  `held_minor`.
+
+### Routes (`GatewayAppDeps.totp_encryption_key: str | None = None`)
+
+- `POST /v1/sessions` `{email, password, totp_code?}` → 201 `{access_token, token_type "Bearer", expires_in,
+  amr}` with `Cache-Control: no-store`.
+  - Unknown email or wrong password → 401 `{"detail": "invalid credentials"}` (identical, same semaphore path as
+    `/v1/user-tokens`, 503 + `Retry-After: 1` when no slot).
+  - TOTP enabled and `totp_code` absent → 401 `{"detail": "mfa required"}`; wrong / replayed code → 401
+    `{"detail": "invalid credentials"}`; locked → 423 `{"detail": "mfa locked"}`.
+  - TOTP not enabled → `amr ["pwd"]` (a supplied `totp_code` is ignored); enabled → `amr ["pwd", "otp"]`.
+  - `totp_code` (if present) is a string of 1..16 chars, else 422.
+- `POST /v1/me/mfa/totp` (Bearer session) → 201 `{secret, otpauth_uri}`, `Cache-Control: no-store`; 409 when
+  already enabled; 503 without the encryption key.
+- `POST /v1/me/mfa/totp/verify` (Bearer session) `{code}` → 200 `{"totp_enabled": true}`; 400
+  `{"detail": "invalid code"}` for a wrong / replayed code; 404 `{"detail": "totp not enrolled"}`; 409 already
+  enabled; 423 locked; 503 without the key.
+- `GET /v1/me/wallets` (Bearer session) → 200 `{items: [WalletBalanceView]}`.
+- Bearer for `/v1/me/*`: missing → 401 `{"detail": "missing session"}`; invalid / expired / wrong audience
+  (an ops-ai user token, a merchant token, an API key) → 401 `{"detail": "invalid session"}`. A user with TOTP
+  enabled must present a session with `"otp"` in `amr` for `/v1/me/*`, else 401 `{"detail": "mfa required"}`.
