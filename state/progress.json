@@ -487,20 +487,19 @@
     "updated_at": "2026-11-03",
     "done": [
       "Alembic schemas for gateway/simulator/ops_ai (round-trip + check in make migrate-check)",
-      "thin slice implemented: signup, wallet, tokenized card charge with idempotency (Redis lock + DB row), ledger + outbox + audit in tx2, relay, ops-ai consumer, FTS search, assistant with mock LLM and T2 fallback",
-      "113 tests green (E1 with/without Redis, E2 C2, E3 LLM down, e2e, import rule)",
-      "removed types-redis (redis 8 ships py.typed; stale stubs broke typing)",
-      ".github/workflows/ci.yml added (not yet run on GitHub)"
+      "thin slice implemented and committed (fbb7abd): signup, wallet, tokenized charge with idempotency, ledger + outbox + audit in tx2, relay, ops-ai consumer, FTS search, assistant with mock LLM and T2 fallback",
+      "test typing fixes approved by user; make ci green (113 tests)",
+      "dataset generator scripts/generate_dataset.py + 91 tests (cb4422e); output in data/generated (git-ignored)",
+      "security-auditor report triaged: hardening H1-H7 (docs/specs/hardening.md) implemented; compose ports bound to 127.0.0.1",
+      "README with setup, e2e example, dataset, config, known gaps"
     ],
-    "blocked": [
-      "make type fails on 8 mypy errors inside test files (test_relay.py xrange typing, test_charge.py unused type: ignore); needs user approval to edit tests"
-    ],
+    "blocked": [],
     "todo": [
-      "security-auditor + red-team on auth/payment slice",
-      "dataset script",
-      "GitHub private repo + first Actions run (ask user)",
+      "hardening tests (test-writer) green, then commit",
+      "red-team report triage",
+      "GitHub private repo + push + first Actions run; reviewer invite once username is known",
       ".env.example (user must create; .env* writes are denied)",
-      "README note on host uv path bug"
+      "Day 2: reconciler (unknown + lease reclaim), DB roles for audit_log, ledger DB invariants, stream maxlen, logging"
     ]
   }
 }

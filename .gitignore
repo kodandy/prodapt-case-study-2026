@@ -18,3 +18,6 @@ docs/caes-study.pdf
 
 # generated synthetic dataset (python scripts/generate_dataset.py)
 data/generated/
+
+# local Claude Code state and agent worktrees
+.claude/
