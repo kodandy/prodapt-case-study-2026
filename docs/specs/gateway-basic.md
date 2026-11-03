@@ -345,3 +345,81 @@ transfer system and the design doc cover those) and no outbox event (B11 adds no
   not audited.
 - `top_up_wallet` lives in the service module (only tests call it). No DB CHECK for sender ≠ recipient and no
   balance-vs-postings reconciliation job.
+
+## B11 — payment confirmation and suspicious-activity notification records
+
+Thin: records only (an in-app table plus a log line and an outbox event to the stream). No delivery channel, no
+read route, no transfer notifications (Design).
+
+### Decisions
+
+1. **Fed by the outbox, not by the charge transaction.** The charge path is unchanged: no new synchronous rows in
+   tx1/tx2. A notifier pass reads `gateway.outbox` rows on `gw.payments.v1` that it has not processed yet (id order)
+   and writes the notification records. This is the "outbox → consumer" shape of architecture-detail §3/§4.
+2. **Rules.** For a `PaymentEventV1` with `origin = "live"`:
+   - `event_type = "payment.succeeded"` → one `payment_confirmation` for the merchant;
+   - the payment row has `risk_flagged` or `risk_blocked` → one `suspicious_activity` ("was this you?") for the
+     merchant, carrying only whether it was blocked: score and reasons draw on the card's activity at every
+     merchant and stay internal (as in `get_payment_risk`). A flagged success gets both; a risk-blocked decline gets only the
+     alert; a plain decline gets nothing.
+   - `origin = "backfill"` → nothing (side-effect consumers skip backfill), but the event is still marked processed.
+   The recipient is the merchant: a card payer has no gateway account in Basic.
+3. **Exactly one record per (source event, kind).** Processing marks the source `event_id` in
+   `gateway.notification_processed_events` (PK) inside the same transaction as the records; the insert is
+   `ON CONFLICT DO NOTHING RETURNING`, so a concurrent or repeated pass skips an event another pass already took.
+   `notifications` also has `UNIQUE (source_event_id, kind)`.
+4. **Deterministic ids.** `notification_id = uuid5(NOTIFICATION_NAMESPACE, f"{source_event_id}:{kind}")`; the
+   outbox event id is `uuid5(NOTIFICATION_NAMESPACE, f"event:{notification_id}")`. Re-deriving never creates a second
+   record or event.
+5. **Out to the stream.** Each new record writes one outbox row on `gw.notifications.v1` (`NotificationEventV1`,
+   additive in `contracts/events.py`) in the same transaction, and logs one INFO line with ids and kind only.
+   Pseudonymous ids only: no e-mail, PAN, BIN or last4 in the record, the event or the log.
+6. `occurred_at` of the notification event = the source event's `occurred_at`; `created_at` = the injected clock.
+
+### Contracts (`contracts/src/contracts/events.py`, additive)
+
+- `NOTIFICATIONS_TOPIC = "gw.notifications.v1"`.
+- `NotificationKind = Literal["payment_confirmation", "suspicious_activity"]`.
+- `NotificationEventV1` (frozen, `extra="forbid"`): `event_id`, `event_type: Literal["notification.created"]`,
+  `occurred_at`, `origin: EventOrigin = "live"`, `notification_id`, `kind: NotificationKind`, `source_event_id`,
+  `recipient_type: Literal["merchant"]`, `recipient_id`, `payment_id`, `amount_minor >= 0`, `currency` (3 chars).
+
+### Data
+
+- `gateway.notifications` (`gateway/notifications/models.py: Notification`): `id` uuid PK, `kind` (32),
+  `recipient_type` (16), `recipient_id` uuid, `source_event_id` uuid, `payment_id` uuid FK `payments.id`,
+  `channel` (16, `"in_app"`), `payload` JSONB, `created_at`. `UNIQUE (source_event_id, kind)`, index
+  `(recipient_id, created_at)`. Payload: `{amount_minor, currency}` for a confirmation; `{amount_minor, currency,
+  blocked}` for an alert.
+- `gateway.notification_processed_events`: `event_id` uuid PK, `processed_at`.
+
+### `gateway/notifications/service.py`
+
+- `process_pending_notifications(session_factory, clock, batch_size=100) -> int`: one transaction; selects up to
+  `batch_size` unprocessed payment outbox rows (anti-join on the processed table, ordered by outbox id), applies the
+  rules, returns the number of notification records created. An outbox payload that does not validate as
+  `PaymentEventV1`, or whose payment row is missing, is marked processed with no record and a WARNING log (ids
+  only), so one bad row cannot stall the pass. So is an event whose `event_id` differs from its outbox row's or
+  whose `merchant_id` differs from the payment row's; recipient, amount and currency come from the payment row.
+- The notification outbox insert is `ON CONFLICT (event_id) DO NOTHING`, so a re-derived event id left over from an
+  earlier run cannot fail the pass.
+- The migration marks every existing `gw.payments.v1` outbox event processed, so the first run on an existing
+  database does not notify history.
+- `notification_id(source_event_id, kind) -> uuid.UUID` (Decision 4).
+
+### `gateway/notifications/worker.py`
+
+- `run_notifier(session_factory, clock, stop, poll_interval_seconds=0.2) -> int`: same loop contract as
+  `run_relay` (DB errors logged by class name and retried; returns the total created). `main()` wires settings.
+
+### Known residuals
+
+- Every poll re-scans the payment outbox history with an anti-join (no cursor, no `(topic, id)` index, no
+  retention for `outbox`, `notifications` or the processed table).
+- The worker sleeps when a pass creates no records rather than when it processes no events, so a long run of
+  plain declines is drained at one batch per poll interval.
+- A second, forged `gw.payments.v1` row for a payment (new event id, matching merchant) creates a second
+  confirmation: the outbox is trusted, and only the charge writes it, once per payment. No DB role separation.
+- No CHECK constraints on `kind`, `recipient_type` and `channel`; parallel notifiers repeat each other's reads.
+- The recipient of the "was this you?" alert is the merchant, not the card holder (no payer account in Basic).
+- No compose service runs `python -m gateway.notifications.worker`, and there is no read route.

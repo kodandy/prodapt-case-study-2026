@@ -3,6 +3,7 @@
 from gateway.accounts import models as accounts_models
 from gateway.audit import models as audit_models
 from gateway.db import GatewayBase, SimulatorBase
+from gateway.notifications import models as notifications_models
 from gateway.outbox import models as outbox_models
 from gateway.payments import models as payments_models
 from gateway.payments.idempotency import models as idempotency_models
@@ -14,6 +15,7 @@ from gateway.wallets import models as wallets_models
 ALL_MODEL_MODULES = (
     accounts_models,
     audit_models,
+    notifications_models,
     outbox_models,
     payments_models,
     idempotency_models,
