@@ -17,11 +17,21 @@ CauseCode = Literal[
     "unclassified",
 ]
 RemediationOwner = Literal["sender", "transfer_provider", "unknown"]
+SenderStatus = Literal["success", "failed", "pending", "reversed"]
+
+_SENDER_FACING_STATUS: dict[str, SenderStatus] = {
+    "success": "success",
+    "failed": "failed",
+    "pending": "pending",
+    "reversed": "reversed",
+    "flagged": "pending",
+}
 
 
 @dataclass(frozen=True)
 class TransferStatus:
-    """A transfer as the sender may see it: no `rule_id`."""
+    """A transfer as the sender may see it: no `rule_id`. `status` is the raw value; show the sender
+    `sender_facing_status(status)`."""
 
     transfer_id: uuid.UUID
     amount_minor: int
@@ -37,6 +47,12 @@ class TransferStatus:
     next_tier_limit_minor: int | None
     sender_balance_minor: int | None
     decided_at: datetime
+
+
+def sender_facing_status(raw: str) -> SenderStatus:
+    """The status the sender is shown. A fraud hold (`flagged`) and any unknown value read as `pending`, so
+    the sender cannot tell a hold apart or probe its thresholds."""
+    return _SENDER_FACING_STATUS.get(raw, "pending")
 
 
 def get_payment_status(
@@ -83,6 +99,7 @@ def classify_transfer(status: TransferStatus) -> tuple[CauseCode, RemediationOwn
         status.reason_code == "cross_border_limit_kyc_tier"
         and status.country_sender != status.country_receiver
         and status.limit_currency == status.currency
+        and status.kyc_tier is not None
         and status.limit_minor is not None
         and balance is not None
         and amount > status.limit_minor

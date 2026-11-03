@@ -15,9 +15,8 @@ from ops_ai.transfers.tools import (
     TransferStatus,
     classify_transfer,
     get_payment_status,
+    sender_facing_status,
 )
-
-NEXT_KYC_TIER = 2
 
 
 @dataclass(frozen=True)
@@ -74,16 +73,19 @@ def investigate_transfer(
 
 def _money(minor: int, currency: str) -> str:
     """Two-decimal currencies only; every currency the fixture produces is one."""
-    return f"{minor // 100}.{minor % 100:02d} {currency}"
+    sign = "-" if minor < 0 else ""
+    units, cents = divmod(abs(minor), 100)
+    return f"{sign}{units}.{cents:02d} {currency}"
 
 
 def _suggested_fixes(transfer: TransferStatus, cause_code: CauseCode) -> tuple[str, ...]:
     if cause_code == "cross_border_limit_for_kyc_tier":
         next_limit, limit_currency = transfer.next_tier_limit_minor, transfer.limit_currency
-        if next_limit is None or limit_currency is None or next_limit < transfer.amount_minor:
+        tier = transfer.kyc_tier
+        if tier is None or next_limit is None or limit_currency is None or next_limit < transfer.amount_minor:
             return ()
         return (
-            f"Upgrade to KYC tier {NEXT_KYC_TIER}: its cross-border limit of "
+            f"Upgrade to KYC tier {tier + 1}: its cross-border limit of "
             f"{_money(next_limit, limit_currency)} per transfer covers "
             f"{_money(transfer.amount_minor, transfer.currency)}.",
         )
@@ -106,7 +108,7 @@ def _evidence(transfer: TransferStatus, cause_code: CauseCode) -> tuple[Evidence
             ref=f"transfer:{transfer_id}",
             summary=(
                 f"Transfer of {amount} from {transfer.country_sender} to {transfer.country_receiver}, "
-                f"{transfer.status} at {transfer.decided_at.isoformat()}"
+                f"{sender_facing_status(transfer.status)} at {transfer.decided_at.isoformat()}"
             ),
         ),
         EvidenceItem(

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -18,7 +18,13 @@ from ops_ai.clock import Clock
 from ops_ai.investigation.service import CauseLabel, Intent, investigate
 from ops_ai.investigation.tools import FailureAggregate
 from ops_ai.scope import Principal, Scope, UserScope
-from ops_ai.transfers import CauseCode, RemediationOwner, TransferStatus
+from ops_ai.transfers import (
+    CauseCode,
+    RemediationOwner,
+    SenderStatus,
+    TransferStatus,
+    sender_facing_status,
+)
 from ops_ai.transfers.service import investigate_transfer
 
 
@@ -113,7 +119,7 @@ class TransferOut(BaseModel):
     amount_minor: int
     currency: str
     method: str
-    status: str
+    status: SenderStatus
     country_sender: str
     country_receiver: str
     kyc_tier: int | None
@@ -130,7 +136,7 @@ class TransferOut(BaseModel):
             amount_minor=transfer.amount_minor,
             currency=transfer.currency,
             method=transfer.method,
-            status=transfer.status,
+            status=sender_facing_status(transfer.status),
             country_sender=transfer.country_sender,
             country_receiver=transfer.country_receiver,
             kyc_tier=transfer.kyc_tier,
@@ -174,7 +180,8 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
     - POST /v1/assistant/ask (Authorization: Bearer <merchant token>) {question} → AskResponse.
     - POST /v1/assistant/investigate (same auth and body as /ask) → InvestigateResponse; now = deps.clock().
     - POST /v1/assistant/investigate-transfer (Authorization: Bearer <user token>) {question, transfer_id?}
-      → InvestigateTransferResponse. Another sender's transfer and a missing one → the identical 404.
+      → InvestigateTransferResponse with Cache-Control: no-store. Another sender's transfer and a missing one
+      → the identical 404.
     Missing/invalid/expired token → 401 {"detail": "invalid token"}. A valid token of the other kind
     (user token on the merchant routes, merchant token on the transfer route) → 403 {"detail": "forbidden"}.
     """
@@ -245,12 +252,15 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
 
     @app.post("/v1/assistant/investigate-transfer")
     def assistant_investigate_transfer(
-        body: InvestigateTransferRequest, scope: Annotated[UserScope, Depends(user_scope)]
+        body: InvestigateTransferRequest,
+        scope: Annotated[UserScope, Depends(user_scope)],
+        response: Response,
     ) -> InvestigateTransferResponse:
         with deps.session_factory() as session:
             result = investigate_transfer(session, scope, body.question, body.transfer_id, deps.llm)
         if result is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "transfer not found")
+        response.headers["Cache-Control"] = "no-store"
         return InvestigateTransferResponse(
             cause_code=result.cause_code,
             remediation_owner=result.remediation_owner,

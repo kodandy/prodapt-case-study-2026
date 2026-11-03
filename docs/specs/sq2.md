@@ -195,3 +195,72 @@ balance 525_000, `balance_covered_amount` true, one fix naming tier 2, evidence 
 
 ops_agent cross-tenant view and staff TOTP login (Design), tickets (B12), login rate limit / lockout (README known
 gap), transfer execution, FX.
+
+## 9. Hardening after the SQ2 audit
+
+The security audit of the SQ2 commit (ef0ee36) found no CRITICAL or HIGH. These fix the MEDIUM and LOW findings. Existing
+tests stay as they are.
+
+### 9.1 Sender-facing status (audit M2)
+
+`flagged` means a fraud model held the transfer. Telling the sender so tips them off and helps them probe thresholds.
+
+- `ops_ai.transfers.sender_facing_status(raw: str) -> SenderStatus`, where
+  `SenderStatus = Literal["success", "failed", "pending", "reversed"]`. The mapping is `success`, `failed`, `pending` and
+  `reversed` to themselves, and `flagged` to `pending`. Any other raw value maps to `pending` (fail closed).
+- `TransferOut.status` in `POST /v1/assistant/investigate-transfer` is the mapped value, typed `SenderStatus`. The
+  transfer evidence summary ("..., <status> at <time>") uses the mapped value too. The words `flagged`, `fraud` and
+  `review` never appear in the response, in the LLM request or in the text.
+- `TransferStatus.status` keeps the raw value, because `classify_transfer` reads it. A flagged transfer still
+  classifies as `not_declined` / `unknown`.
+
+### 9.2 Login does not hold a DB connection during argon2 (audit M1)
+
+- `accounts.service.find_login(session, email) -> LoginRecord | None`. `LoginRecord(user_id, password_hash)` is a frozen
+  dataclass. The email is normalized as in `sign_up` (strip, lower) and compared with `User.email ==` (stored emails are
+  normalized, so the unique index is used, with no `lower()` scan).
+- `accounts.service.verify_login(record: LoginRecord | None, password) -> uuid.UUID | None`. For None it runs one
+  argon2 verify against the dummy hash and returns None.
+- `authenticate_user` keeps its signature and behaviour: `verify_login(find_login(session, email), password)`.
+- `POST /v1/user-tokens` closes the session after `find_login` and runs `verify_login` outside it. At most
+  `LOGIN_CONCURRENCY = 4` verifies run at once per app, through a `threading.BoundedSemaphore` created in `create_app`.
+  A request that cannot get a slot within `LOGIN_SLOT_WAIT_SECONDS = 2.0` gets 503 `{"detail": "try again later"}`
+  with `Retry-After: 1`. No password check happens and no token is issued for it.
+- `GatewayAppDeps` gains `login_slots: threading.BoundedSemaphore | None = None` (None → `create_app` makes one with
+  `LOGIN_CONCURRENCY`), so a test can pass a semaphore it has already drained.
+
+### 9.3 Stricter token verification (audit L1, L2)
+
+`ops_ai.auth.verify_token` additionally:
+
+- requires `iat`, an int that is not a bool;
+- rejects `iat > now + 30 s` (`MAX_CLOCK_SKEW_SECONDS = 30`) with "token issued in the future";
+- rejects `exp - iat > 900` (`MAX_TOKEN_LIFETIME_SECONDS = 900`, the longest TTL the gateway issues) with
+  "token lifetime too long";
+- requires `merchant_id` / `user_id` to be the canonical string form, `str(uuid.UUID(v)) == v`. Uppercase, braces,
+  `urn:uuid:`, missing hyphens and underscores are rejected as "invalid <name> claim".
+
+These apply to merchant and user tokens alike. The gateway already issues canonical ids, `iat`, and TTLs of 900 s.
+
+### 9.4 KYC tier and money formatting (audit L6)
+
+- The fix text names tier `kyc_tier + 1`, never a fixed 2. `NEXT_KYC_TIER` goes away.
+- `classify_transfer` returns `cross_border_limit_for_kyc_tier` only when `kyc_tier` is not None, in addition to the
+  current conditions. Without a tier it is `unclassified` / `unknown`.
+- `_money` formats negative amounts with the sign in front: -150 USD minor → `-1.50 USD`.
+
+### 9.5 Response caching (audit L5)
+
+`POST /v1/assistant/investigate-transfer` responses carry `Cache-Control: no-store` (balance and limits are financial
+data). 404, 403 and 422 responses are unchanged.
+
+### 9.6 Documented, not fixed
+
+These go to the README known gaps:
+
+- `POST /v1/signup` answers 409 for a registered email, which reveals that the email exists. This bypasses the
+  identical 401 on login.
+- No password rehash on login when the argon2 parameters change.
+- `bootstrap_user` replaces the password of an existing id, so it is for the demo database only.
+- Before a real LLM is attached, output guards are needed (no split or structuring advice, no numbers absent from the
+  evidence), along with data minimisation for the evidence sent to it.

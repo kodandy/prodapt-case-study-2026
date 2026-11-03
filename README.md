@@ -172,10 +172,20 @@ These were found by the Day 1 audit and are planned:
   payment events. The consumer refuses to move a payment to another merchant, but it can still record payments that
   never happened. Fix: per-service Redis ACL users and DB roles with schema grants.
 - No request body size limit in front of the APIs (oversized bodies are rejected only after they are read).
-- The token verifier checks `iss`/`aud`/`exp`, exactly one of `merchant_id`/`user_id`, the role list, and `sub` on
-  user tokens, but does not require `iat` or `sub` on merchant tokens yet.
+- The token verifier checks `iss`/`aud`/`exp`/`iat` (`iat` at most 30 s ahead, lifetime at most 900 s), exactly one
+  canonical `merchant_id`/`user_id`, the role list, and `sub` on user tokens, but does not check `sub` on merchant
+  tokens yet.
 - `POST /v1/user-tokens` has no rate limit and no lockout, so passwords can be guessed online. Unknown email and
-  wrong password cost the same argon2 verification and give the identical 401.
+  wrong password cost the same argon2 verification and give the identical 401. Only the number of concurrent argon2
+  verifications is capped (4 per app; a request that waits more than 2 s gets 503). The route is sync, so a request
+  waiting for a slot holds a threadpool worker; a login flood slows other sync routes. Fix: async route with an AnyIO
+  `CapacityLimiter`, plus per-IP and per-account rate limits. `POST /v1/signup` hashes with no cap.
+- `POST /v1/signup` answers 409 for a registered email, which reveals that the email exists. This bypasses the
+  identical 401 on login.
+- No password rehash on login when the argon2 parameters change.
+- `bootstrap_user` replaces the password of an existing id, so it is for the demo database only.
+- Before a real LLM is attached, output guards are needed (no split or structuring advice, no numbers absent from the
+  evidence), along with data minimisation for the evidence sent to it.
 - User tokens cannot be revoked before they expire (15 minutes).
 - The transfer system is a fixture (`scripts/transfer_fixture.py`) loaded by the seed. There is no transfer execution,
   no stream event for transfers, and no FX.

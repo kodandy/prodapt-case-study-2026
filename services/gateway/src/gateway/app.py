@@ -1,3 +1,4 @@
+import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -12,8 +13,9 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from gateway.accounts.service import (
     EmailAlreadyRegisteredError,
     authenticate_api_key,
-    authenticate_user,
+    find_login,
     sign_up,
+    verify_login,
 )
 from gateway.accounts.tokens import (
     MERCHANT_TOKEN_TTL_SECONDS,
@@ -24,6 +26,9 @@ from gateway.accounts.tokens import (
 from gateway.payments.charge import ChargeDeps, charge_card
 from gateway.payments.schemas import ChargeRequest
 
+LOGIN_CONCURRENCY = 4
+LOGIN_SLOT_WAIT_SECONDS = 2.0
+
 
 @dataclass(frozen=True)
 class GatewayAppDeps:
@@ -31,6 +36,8 @@ class GatewayAppDeps:
     api_key_pepper: str = field(repr=False)
     jwt_private_key_pem: str | None = field(default=None, repr=False)
     readiness: Callable[[], list[str]] = field(default=lambda: [])
+    login_slots: threading.BoundedSemaphore | None = None
+    """Caps concurrent argon2 verifications on login; None → LOGIN_CONCURRENCY slots."""
 
 
 class SignUpRequest(BaseModel):
@@ -69,12 +76,17 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
       for ops-ai. Invalid API key → 401; no private key configured → 503.
     - POST /v1/user-tokens {email, password} → 201 {access_token, token_type, expires_in}: an RS256 user token
       for ops-ai. Unknown email and wrong password → the identical 401; no private key configured → 503.
+      At most LOGIN_CONCURRENCY password checks run at once; no slot within LOGIN_SLOT_WAIT_SECONDS → 503
+      {"detail": "try again later"} with Retry-After: 1.
     - GET /healthz → 200 (liveness). GET /readyz → 200 ready, or 503 with the failed components.
     """
     app = FastAPI(title="gateway")
     app.add_exception_handler(RequestValidationError, _validation_error_without_input)
     bearer = HTTPBearer(auto_error=False)
     session_factory = deps.charge.session_factory
+    login_slots = (
+        threading.BoundedSemaphore(LOGIN_CONCURRENCY) if deps.login_slots is None else deps.login_slots
+    )
 
     def merchant_from_api_key(
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
@@ -115,7 +127,15 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         if deps.jwt_private_key_pem is None:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "token issuing not configured")
         with session_factory() as session:
-            user_id = authenticate_user(session, body.email, body.password.get_secret_value())
+            record = find_login(session, body.email)
+        if not login_slots.acquire(timeout=LOGIN_SLOT_WAIT_SECONDS):
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE, "try again later", headers={"Retry-After": "1"}
+            )
+        try:
+            user_id = verify_login(record, body.password.get_secret_value())
+        finally:
+            login_slots.release()
         if user_id is None:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
         token = issue_user_token(deps.jwt_private_key_pem, user_id, deps.charge.clock())

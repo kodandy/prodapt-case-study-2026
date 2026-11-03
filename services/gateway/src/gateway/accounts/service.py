@@ -2,7 +2,7 @@ import hashlib
 import hmac
 import secrets
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
@@ -32,6 +32,12 @@ class MerchantCredentials:
     merchant_id: uuid.UUID
     api_key: str
     """Plaintext API key: returned once, stored only as a keyed hash."""
+
+
+@dataclass(frozen=True)
+class LoginRecord:
+    user_id: uuid.UUID
+    password_hash: str = field(repr=False)
 
 
 class EmailAlreadyRegisteredError(Exception):
@@ -97,15 +103,29 @@ def sign_up(
     return SignUpResult(user_id=user.id, wallet_account_id=wallet_id)
 
 
-def authenticate_user(session: Session, email: str, password: str) -> uuid.UUID | None:
-    """The user id for a matching email (case-insensitive) and correct password, else None."""
+def find_login(session: Session, email: str) -> LoginRecord | None:
+    """The login record for `email`, normalized as in `sign_up`. Stored emails are normalized, so the column
+    is compared directly and the unique index serves the lookup."""
     row = session.execute(
-        select(User.id, User.password_hash).where(func.lower(User.email) == email.strip().lower())
+        select(User.id, User.password_hash).where(User.email == email.strip().lower())
     ).one_or_none()
     if row is None:
+        return None
+    return LoginRecord(user_id=row.id, password_hash=row.password_hash)
+
+
+def verify_login(record: LoginRecord | None, password: str) -> uuid.UUID | None:
+    """The user id when `password` matches the record, else None. Needs no session. For no record it still
+    runs one argon2 verification against a dummy hash, so both login failures cost the same."""
+    if record is None:
         verify_password(_DUMMY_PASSWORD_HASH, password)
         return None
-    return row.id if verify_password(row.password_hash, password) else None
+    return record.user_id if verify_password(record.password_hash, password) else None
+
+
+def authenticate_user(session: Session, email: str, password: str) -> uuid.UUID | None:
+    """The user id for a matching email (case-insensitive) and correct password, else None."""
+    return verify_login(find_login(session, email), password)
 
 
 def set_password(session: Session, user_id: uuid.UUID, password: str) -> None:
