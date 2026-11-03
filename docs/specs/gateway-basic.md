@@ -255,3 +255,93 @@ factor and a wallet read. `/v1/user-tokens` is unchanged (it does not ask for TO
 - Bearer for `/v1/me/*`: missing → 401 `{"detail": "missing session"}`; invalid / expired / wrong audience
   (an ops-ai user token, a merchant token, an API key) → 401 `{"detail": "invalid session"}`. A user with TOTP
   enabled must present a session with `"otp"` in `amr` for `/v1/me/*`, else 401 `{"detail": "mfa required"}`.
+
+## B2 — P2P wallet transfer, per-currency wallets
+
+Source: `docs/submission-outline.md` §2 row B2 ("P2P wallet transfer, per-currency wallets; FX conversion
+**Design**"), `docs/architecture-detail.md` §3 (ledger and locking, funds hold: P2P is internal and synchronous, no
+hold). A user can hold one wallet per currency; a transfer moves money between two users' wallets **in the same
+currency** in one transaction. There is no FX conversion, no KYC / corridor / tier limit check (SQ2's external
+transfer system and the design doc cover those) and no outbox event (B11 adds notifications).
+
+### Decisions
+
+1. **Same currency only.** The sender pays from their wallet in the request currency; the recipient is credited in
+   that same currency. A sender with no wallet in that currency has nothing to pay with → `insufficient_funds`
+   (`available_minor: 0`). A recipient with no wallet in that currency gets one created inside the transfer
+   transaction (ledger account + zero balance row, both race-safe). Cross-currency is Design (FX clearing accounts,
+   rate snapshot id on the journal).
+2. **Sign convention.** A user wallet is a platform liability: money *into* a wallet is a credit (negative posting),
+   money out is a debit (positive). For every wallet, `available_minor + held_minor == -(sum of its postings)`.
+   A transfer journal (`ref_type "transfer"`, `ref_id = transfer_id`) has exactly two lines: sender wallet
+   `+amount`, recipient wallet `-amount`.
+3. **One lock order.** The transfer locks both balance rows with `SELECT … FOR UPDATE` in ascending `account_id`
+   order, then checks the sender's `available_minor`, then moves the balances and posts the journal, all in one
+   transaction. Two transfers in opposite directions between the same pair cannot deadlock; N parallel transfers
+   from one wallet never overdraw it (the `available_non_negative` CHECK is the last line, not the mechanism).
+4. **Idempotency per sender.** `Idempotency-Key` is required. The transfer row stores `(sender_user_id,
+   idempotency_key)` unique, a request hash (recipient email normalized, amount, currency) and the 201 body. Same
+   key + same request → the stored 201 body (no second debit); same key + different request → 422
+   `idempotency_key_reused`. Errors are not stored (a retry after topping up can succeed). Same pattern as refunds:
+   insert `ON CONFLICT DO NOTHING`, and a concurrent winner is answered from its stored row.
+5. **Recipient by email.** `recipient_email` is normalized like signup (strip, lower). Unknown → 404
+   `recipient_not_found`. The sender themself → 422 `self_transfer`. (Signup already answers 409 for a taken
+   email, so the 404 adds no new enumeration surface; noted for the report.)
+6. **Funding.** There is no external funding rail in Basic. `top_up_wallet` is a service function (not an HTTP
+   route) for tests and demo seeding: it credits the wallet from the platform `topup_clearing` account with a
+   balanced journal (`ref_type "top_up"`), creating the wallet if missing. A real top-up would come through a
+   payment method and is Design.
+7. **Audit.** One append-only `audit_log` row per created transfer: actor `user:<sender>`, role `consumer`, action
+   `transfer.created`, target `transfer:<id>`, summary `{"amount_minor", "currency", "recipient_user_id"}`. No email
+   in the summary. Replays write nothing.
+8. **Auth.** `/v1/me/transfers` uses the B1 session dependency, so a TOTP-enabled user needs an `otp` session.
+   Per-transfer step-up and velocity limits are Design.
+
+### Data — `gateway.transfers` (`gateway/wallets/models.py: Transfer`)
+
+`id` (uuid PK), `sender_user_id` (FK users), `recipient_user_id` (FK users), `sender_account_id` /
+`recipient_account_id` (FK ledger_accounts), `amount_minor` (bigint, CHECK `> 0`, name `amount_positive`),
+`currency` (3), `state` (16, always `"succeeded"` in Basic), `idempotency_key` (255), `request_hash` (64),
+`response_body` (JSONB), `created_at`. Unique `(sender_user_id, idempotency_key)`; index on
+`(recipient_user_id, created_at)`.
+
+### `gateway/wallets/service.py`
+
+- `TransferOutcome(status_code: int, body: dict[str, object])` (frozen dataclass), like `RefundOutcome`.
+- `transfer(session_factory, clock, sender_user_id, idempotency_key, recipient_email, amount_minor, currency) ->
+  TransferOutcome`:
+  - 201 `{"transfer_id", "state": "succeeded", "amount_minor", "currency", "recipient_user_id",
+    "sender_available_minor"}` (the sender's available balance in that currency after the transfer);
+  - 404 `{"error": "recipient_not_found"}`; 422 `{"error": "self_transfer"}`;
+  - 409 `{"error": "insufficient_funds", "available_minor": <sender's current available>}`;
+  - 422 `{"error": "idempotency_key_reused"}`.
+  - Validation order: replay check (a stored key answers first, even if the balance has since changed) →
+    recipient → self → lock → balance.
+- `top_up_wallet(session, clock, user_id, currency, amount_minor) -> uuid.UUID` (the wallet account id): ensures
+  the wallet + balance row, locks the balance row, `available_minor += amount`, posts the balanced top-up journal.
+  Does not commit. `amount_minor <= 0` → `ValueError`.
+- `ensure_wallet(session, user_id, currency) -> uuid.UUID`: wallet ledger account + zero balance row, race-safe
+  (insert `ON CONFLICT DO NOTHING`). Used by `transfer` (recipient) and `top_up_wallet`.
+- `list_wallets` (B1) now also lists wallets created by transfers / top-ups (no change in behaviour, just more rows).
+
+### Route
+
+- `POST /v1/me/transfers` (Bearer session, `Idempotency-Key` required, same header rules as `/v1/payments`)
+  body `TransferRequest {recipient_email: EmailStr-like str (1..320), amount_minor: int (1..10^12, strict int),
+  currency: "USD" | "EUR" | "JPY" | "INR"}`, `extra="forbid"` → the `TransferOutcome` status and body.
+  `Cache-Control: no-store` on every answer. Missing / invalid key → 400 as for payments; invalid body → 422.
+  `recipient_email` rejects NUL (422, not a Postgres `DataError` 500). The replay check runs again after the
+  balance locks, so a same-key retry that waited behind its own winner answers the stored 201, never a 409.
+  That late answer (201 replay or key reused) rolls back, so it never leaves a recipient wallet behind.
+  `transfer` itself raises `ValueError` for `amount_minor <= 0` (the route already rejects it with 422).
+
+### Known residuals (audit, not fixed in Basic)
+
+- Recipient e-mail is not ownership-verified at sign-up: whoever registers an address first receives transfers
+  to it. Verified e-mail or a pending claim is Design.
+- No per-sender rate limit, concurrency cap or `lock_timeout` on transfers; a hot balance row can hold pool
+  connections. Dust spam into a wallet is possible. Step-up TOTP and daily limits are Design.
+- 404 recipient_not_found plus `recipient_user_id` in the 201 body map e-mail → user id; rejected attempts are
+  not audited.
+- `top_up_wallet` lives in the service module (only tests call it). No DB CHECK for sender ≠ recipient and no
+  balance-vs-postings reconciliation job.

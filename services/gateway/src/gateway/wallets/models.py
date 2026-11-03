@@ -1,6 +1,9 @@
 import uuid
+from datetime import datetime
+from typing import Any
 
-from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, String, UniqueConstraint
+from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from gateway.db import GatewayBase, uuid_pk
@@ -33,3 +36,27 @@ class AccountBalance(GatewayBase):
     account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ledger_accounts.id"), primary_key=True)
     available_minor: Mapped[int] = mapped_column(BigInteger, default=0)
     held_minor: Mapped[int] = mapped_column(BigInteger, default=0)
+
+
+class Transfer(GatewayBase):
+    """P2P wallet transfer, same currency, settled synchronously (`succeeded` only in Basic)."""
+
+    __tablename__ = "transfers"
+    __table_args__ = (
+        UniqueConstraint("sender_user_id", "idempotency_key"),
+        CheckConstraint("amount_minor > 0", name="amount_positive"),
+        Index("ix_transfers_recipient_created", "recipient_user_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    sender_user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    recipient_user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    sender_account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ledger_accounts.id"))
+    recipient_account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ledger_accounts.id"))
+    amount_minor: Mapped[int] = mapped_column(BigInteger)
+    currency: Mapped[str] = mapped_column(String(3))
+    state: Mapped[str] = mapped_column(String(16))
+    idempotency_key: Mapped[str] = mapped_column(String(255))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    response_body: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime]

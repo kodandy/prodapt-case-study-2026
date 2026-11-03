@@ -3,13 +3,13 @@ import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictInt
 
 from gateway.accounts.mfa import (
     InvalidTotpCodeError,
@@ -57,6 +57,7 @@ from gateway.payments.history import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, InvalidCu
 from gateway.payments.refunds import refund_payment
 from gateway.payments.risk import get_payment_risk
 from gateway.payments.schemas import (
+    MAX_AMOUNT_MINOR,
     ChargeRequest,
     DisputeView,
     EvidenceRequest,
@@ -65,9 +66,10 @@ from gateway.payments.schemas import (
     RefundRequest,
 )
 from gateway.payments.state import PaymentState
-from gateway.wallets.service import WalletBalanceView, list_wallets
+from gateway.wallets.service import WalletBalanceView, list_wallets, transfer
 
 LOGIN_CONCURRENCY = 4
+NO_STORE_HEADERS = {"Cache-Control": "no-store", "Pragma": "no-cache"}
 LOGIN_SLOT_WAIT_SECONDS = 2.0
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"[\x21-\x7e]{1,255}")
 
@@ -136,6 +138,15 @@ class WalletListResponse(BaseModel):
     items: list[WalletBalanceView]
 
 
+class TransferRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recipient_email: str = Field(min_length=1, max_length=320, pattern=r"^[^\x00]+$")
+    """NUL would reach Postgres as a DataError (500)."""
+    amount_minor: StrictInt = Field(gt=0, le=MAX_AMOUNT_MINOR)
+    currency: Literal["USD", "EUR", "JPY", "INR"]
+
+
 class PaymentListResponse(BaseModel):
     items: list[PaymentSummary]
     next_cursor: str | None
@@ -162,6 +173,9 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
       not enrolled → 404; already enabled → 409; locked → 423. Both MFA routes → 503 without the key.
     - GET /v1/me/wallets (Bearer session) → 200 {items}. Once TOTP is enabled, a `/v1/me/*` session must carry
       "otp" in amr, else 401 "mfa required".
+    - POST /v1/me/transfers (Bearer session, Idempotency-Key required) body TransferRequest → TransferOutcome
+      status/body (201 / 404 recipient_not_found / 409 insufficient_funds / 422 self_transfer or key
+      reused), all with Cache-Control: no-store. Same currency only; FX is Design.
     - GET /v1/payments?limit&cursor&state (Bearer API key) → 200 {items, next_cursor}: the merchant's
       payments, newest first. Invalid cursor → 400.
     - GET /v1/payments/{payment_id}/risk (Bearer API key) → 200 PaymentRiskView (flags only); unknown or
@@ -359,6 +373,27 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         with session_factory() as session:
             return WalletListResponse(items=list_wallets(session, user_id))
 
+    @app.post("/v1/me/transfers")
+    def create_transfer(
+        body: TransferRequest,
+        user_id: Annotated[uuid.UUID, Depends(session_user)],
+        idempotency_key: Annotated[str | None, Header(max_length=255)] = None,
+    ) -> JSONResponse:
+        try:
+            key = _require_idempotency_key(idempotency_key)
+        except HTTPException as exc:
+            raise HTTPException(exc.status_code, exc.detail, headers=NO_STORE_HEADERS) from None
+        outcome = transfer(
+            session_factory,
+            deps.charge.clock,
+            user_id,
+            key,
+            body.recipient_email,
+            body.amount_minor,
+            body.currency,
+        )
+        return JSONResponse(outcome.body, status_code=outcome.status_code, headers=NO_STORE_HEADERS)
+
     @app.post("/v1/signup", status_code=status.HTTP_201_CREATED)
     def signup(body: SignUpRequest) -> SignUpResponse:
         try:
@@ -468,4 +503,6 @@ async def _validation_error_without_input(_request: Request, exc: Exception) -> 
     """FastAPI's default 422 echoes the rejected input; for a card that would be the PAN."""
     errors = exc.errors() if isinstance(exc, RequestValidationError) else []
     detail = [{"loc": list(error["loc"]), "msg": error["msg"], "type": error["type"]} for error in errors]
-    return JSONResponse({"error": "validation_failed", "detail": detail}, status_code=422)
+    return JSONResponse(
+        {"error": "validation_failed", "detail": detail}, status_code=422, headers=NO_STORE_HEADERS
+    )
