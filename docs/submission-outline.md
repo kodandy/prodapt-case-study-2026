@@ -2,7 +2,7 @@
 
 Draft. This file fixes what the submission claims, what it does not, and what the demo shows. The design doc, the
 diagram, the README and the slides are written from it. Agreed with Sol on 2026-11-03
-(`~/.claude/logs/consults/20261103-145215-consult.md`). Rows marked **[decide]** need Nakata's call.
+(`~/.claude/logs/consults/20261103-145215-consult.md`). Open scope decisions were settled on 2026-11-03 (section 7).
 
 ## 1. One-line goal
 
@@ -18,8 +18,8 @@ live walkthrough. **Design** = described in `docs/design.md` only; reported as a
 | Item | Today (11-03) | Target by 11-05 | Depth |
 |---|---|---|---|
 | B1 accounts, MFA, wallets | Sign-up (argon2id) + wallet account | Login, TOTP enrol/verify, wallet balance read | Thin |
-| B2 P2P + merchant payments, multi-currency | Merchant card charge (tokenized, idempotent, ledger) | + P2P wallet transfer, per-currency wallets; FX conversion **[decide]** Thin or Design | Demo (card) / Thin |
-| B3 history, refunds, disputes | — | `GET /v1/payments`, full/partial refund; dispute state machine **[decide]** | Thin |
+| B2 P2P + merchant payments, multi-currency | Merchant card charge (tokenized, idempotent, ledger) | + P2P wallet transfer, per-currency wallets; FX conversion **Design** | Demo (card) / Thin |
+| B3 history, refunds, disputes | — | `GET /v1/payments`, full/partial refund; dispute state machine (`opened → under_review → won | lost`) | Thin |
 | B4 NL failure-reason detection | — | Rules-first taxonomy + suggested fix, through SQ1 | Demo |
 | B5 RAG support assistant | Assistant with evidence, T2 fallback | Retrieval of incidents + transactions, grounded answer | Demo |
 | B6 hybrid search | Postgres FTS | + pgvector with a pinned embedder, RRF fusion | Thin |
@@ -29,7 +29,7 @@ live walkthrough. **Design** = described in `docs/design.md` only; reported as a
 | B10 memory + session | — | Redis session (last N turns, tenant-owned); long-term memory **Design** | Thin |
 | B11 notifications | Outbox to stream | Payment confirmation + suspicious-activity alert records | Thin |
 | B12 ticket routing | — | Rule router to `{fraud, payments_ops, settlement, compliance}` | Thin |
-| B13 front end | — | **[decide]** minimal merchant/ops screen (assistant + evidence + payments) vs. API-only with curl | Thin |
+| B13 front end | — | Minimal merchant/ops screen (assistant + evidence + payments list), built 11-05 | Thin |
 
 ## 3. Explicitly not in this submission
 
@@ -99,8 +99,9 @@ Golden checks (E2E):
   UI if time remains.
 - **11-06**: submission check, rehearsal, reviewer invite.
 
-## 7. Open decisions
+## 7. Scope decisions (settled 2026-11-03)
 
-1. B13: build a minimal screen, or submit API-only with curl and say so?
-2. B2 FX: real conversion legs (Thin), or same-currency wallets only with FX in the design doc?
-3. B3 disputes: state machine (Thin), or design only?
+1. B13: build a minimal merchant/ops screen. B13 is a Basic item, so an API-only submission would leave it unmet.
+2. B2 FX: per-currency wallets only. FX conversion legs are described in the design doc. A balanced multi-currency
+   ledger test does not fit in the time left.
+3. B3 disputes: implement the state machine (Thin). It lives in the same layer as refunds, so it costs little extra.
