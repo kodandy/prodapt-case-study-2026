@@ -1,7 +1,7 @@
 DC := docker compose
 RUN := $(DC) run --rm dev
 
-.PHONY: up down build sync lint fmt type test migrate migrate-check ci demo demo-down web-install web-ci web-up web-smoke web-merchant-key
+.PHONY: up down build sync lint fmt type test migrate migrate-check ci demo demo-down web-install web-ci web-up web-smoke web-merchant-key docs-diagram
 
 up:
 	$(DC) up -d --wait postgres redis
@@ -77,3 +77,12 @@ web-merchant-key:
 web-smoke: web-up web-install
 	@key=$$($(MAKE) -s web-merchant-key 2>/dev/null) && WEB_DEMO_MERCHANT_KEY="$$key" \
 	  $(DC) --profile web-smoke run --rm -e WEB_DEMO_MERCHANT_KEY web-smoke npx playwright test
+
+# DL1: renders the first Mermaid block of docs/architecture.md (runtime topology); mmdc only in the pinned image
+MMDC_IMAGE := minlag/mermaid-cli:11.4.2
+MMDC := docker run --rm -i -u $$(id -u):$$(id -g) -e HOME=/tmp -v $(CURDIR)/docs:/data $(MMDC_IMAGE)
+ARCH_MMD := awk '/^```mermaid/ {n++; if (n == 1) {f = 1; next}} f && /^```/ {exit} f' docs/architecture.md
+
+docs-diagram:
+	$(ARCH_MMD) | $(MMDC) -i - -o /data/architecture.png -b white -s 2
+	$(ARCH_MMD) | $(MMDC) -i - -o /data/architecture.pdf -b white --pdfFit
