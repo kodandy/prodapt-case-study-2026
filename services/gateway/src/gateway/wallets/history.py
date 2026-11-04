@@ -1,3 +1,4 @@
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -59,13 +60,24 @@ def list_transfers(
     return TransferPage(items=items, next_cursor=next_cursor)
 
 
+_UNPRINTABLE_CATEGORIES = frozenset({"C", "Z", "M"})
+
+
 def mask_email(email: str) -> str:
     """`alice@example.com` → `a***@example.com`: the first character and the part after the last `@`.
-    A value with no `@` or an empty local part gives `***`, so it never echoes the stored value."""
+    A value with no `@` or an empty local part gives `***`, so it never echoes the stored value. A first
+    character that is a control, format (bidi), separator or combining mark becomes `*`, and a domain holding
+    any such character becomes `***`: sign-up does not reject them, and RLO there would spoof the label."""
     local, _, domain = email.rpartition("@")
     if not local:
         return "***"
-    return f"{local[:1]}***@{domain}"
+    first = "*" if _unprintable(local[0]) else local[0]
+    shown_domain = "***" if any(_unprintable(ch) for ch in domain) else domain
+    return f"{first}***@{shown_domain}"
+
+
+def _unprintable(ch: str) -> bool:
+    return unicodedata.category(ch)[0] in _UNPRINTABLE_CATEGORIES
 
 
 def _item(row: Transfer, user_id: uuid.UUID, sender_email: str, recipient_email: str) -> TransferHistoryItem:

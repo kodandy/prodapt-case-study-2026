@@ -1,6 +1,8 @@
 """Tests for `transfer`, `top_up_wallet`, `ensure_wallet` and the `Transfer` model, written from
 docs/specs/gateway-basic.md section B2."""
 
+import hashlib
+import json
 import threading
 import uuid
 from collections.abc import Callable, Sequence
@@ -188,7 +190,6 @@ def test_transfer_moves_the_amount_between_the_wallets_and_returns_the_201_body(
         "state": "succeeded",
         "amount_minor": 2_500,
         "currency": "USD",
-        "recipient_user_id": str(bob),
         "sender_available_minor": 7_500,
     }
     assert _wallets(session_factory, alice) == [("USD", 7_500, 0)]
@@ -360,7 +361,9 @@ def test_transfer_normalizes_the_recipient_email_by_stripping_and_lowercasing(
 
     # Assert
     assert outcome.status_code == 201
-    assert outcome.body["recipient_user_id"] == str(bob)
+    with session_factory() as session:
+        recipients = session.scalars(select(Transfer.recipient_user_id)).all()
+    assert recipients == [bob]
     assert _wallets(session_factory, bob) == [("USD", 400, 0)]
 
 
@@ -727,7 +730,48 @@ def test_a_recipient_not_found_answer_is_not_stored_so_a_retry_after_they_sign_u
 
     # Assert
     assert (rejected.status_code, rejected.body) == (404, {"error": "recipient_not_found"})
-    assert (retry.status_code, retry.body["recipient_user_id"]) == (201, str(bob))
+    assert retry.status_code == 201
+    assert _wallets(session_factory, bob) == [("USD", 300, 0)]
+
+
+def test_a_replay_of_a_legacy_row_whose_stored_body_has_recipient_user_id_answers_without_that_key(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    alice, alice_wallet = _user(session_factory, clock, ALICE)
+    bob, bob_wallet = _user(session_factory, clock, BOB)
+    legacy_id = uuid.uuid4()
+    canonical = {"recipient_email": BOB, "amount_minor": 2_500, "currency": "USD"}
+    row = _transfer_row(alice, bob, alice_wallet, bob_wallet, clock, key="k-legacy", amount_minor=2_500)
+    row.id = legacy_id
+    row.request_hash = hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    row.response_body = {
+        "transfer_id": str(legacy_id),
+        "state": "succeeded",
+        "amount_minor": 2_500,
+        "currency": "USD",
+        "recipient_user_id": str(bob),
+        "sender_available_minor": 7_500,
+    }
+    with session_factory.begin() as session:
+        session.add(row)
+
+    # Act
+    replay = _send(session_factory, clock, alice, "k-legacy", BOB, 2_500)
+
+    # Assert
+    assert replay.status_code == 201
+    assert replay.body == {
+        "transfer_id": str(legacy_id),
+        "state": "succeeded",
+        "amount_minor": 2_500,
+        "currency": "USD",
+        "sender_available_minor": 7_500,
+    }
+    assert _transfer_count(session_factory) == 1
+    assert _journal_count(session_factory, "transfer") == 0
 
 
 def test_a_self_transfer_answer_is_not_stored(
@@ -809,7 +853,6 @@ def test_parallel_identical_requests_for_the_whole_balance_all_answer_201_from_t
         "state": "succeeded",
         "amount_minor": 500,
         "currency": "USD",
-        "recipient_user_id": str(bob),
         "sender_available_minor": 0,
     }
     assert _transfer_count(session_factory) == 1

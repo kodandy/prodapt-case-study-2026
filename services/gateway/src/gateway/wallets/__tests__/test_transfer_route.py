@@ -171,11 +171,28 @@ def test_post_transfer_returns_201_with_the_transfer_body_and_moves_the_money(
         "state": "succeeded",
         "amount_minor": 2_500,
         "currency": "USD",
-        "recipient_user_id": str(bob),
         "sender_available_minor": 7_500,
     }
     assert _wallets(session_factory, alice) == [("USD", 7_500, 0)]
     assert _wallets(session_factory, bob) == [("USD", 2_500, 0)]
+
+
+def test_post_transfer_201_response_text_never_contains_the_recipient_user_id(
+    session_factory: sessionmaker[Session], clock: FixedClock, private_pem: str
+) -> None:
+    # Arrange
+    client = _client(session_factory, clock, private_pem)
+    alice = _sign_up(session_factory, clock, ALICE)
+    bob = _sign_up(session_factory, clock, BOB)
+    _fund(session_factory, clock, alice, "USD", 10_000)
+
+    # Act
+    response = _post(client, _token(private_pem, clock, alice), _body(amount_minor=2_500))
+
+    # Assert
+    assert response.status_code == 201
+    assert str(bob) not in response.text
+    assert "recipient_user_id" not in response.text
 
 
 def test_post_transfer_replay_returns_the_same_201_body_without_a_second_debit(
@@ -479,8 +496,9 @@ def test_post_transfer_accepts_an_otp_session_once_totp_is_enabled(
     response = _post(client, _token(private_pem, clock, alice, ("pwd", "otp")), _body(amount_minor=400))
 
     # Assert
-    assert (response.status_code, response.json()["recipient_user_id"]) == (201, str(bob))
+    assert response.status_code == 201
     assert _wallets(session_factory, alice) == [("USD", 600, 0)]
+    assert _wallets(session_factory, bob) == [("USD", 400, 0)]
 
 
 def test_post_transfer_accepts_a_password_only_session_for_a_user_without_totp(

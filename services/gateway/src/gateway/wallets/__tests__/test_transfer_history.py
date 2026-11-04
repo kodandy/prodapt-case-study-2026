@@ -48,6 +48,8 @@ MFA_REQUIRED = {"detail": "mfa required"}
 INVALID_CURSOR = {"detail": "invalid cursor"}
 VALID_CURSOR_ID = "00000000-0000-0000-0000-000000000001"
 NO_STORE = "no-store"
+NO_CACHE = "no-cache"
+WALLETS = "/v1/me/wallets"
 
 
 def _cursor(raw: str) -> str:
@@ -315,6 +317,30 @@ def test_mask_email_does_not_leak_the_rest_of_the_local_part() -> None:
 
 
 @pytest.mark.parametrize(
+    ("email", "masked"),
+    [
+        ("\u202ex@moc.knab", "****@moc.knab"),
+        ("\u200bx@example.com", "****@example.com"),
+        ("\u0007x@example.com", "****@example.com"),
+        ("\u00a0x@example.com", "****@example.com"),
+        ("\u0301x@example.com", "****@example.com"),
+    ],
+    ids=["bidi_rlo_cf", "zero_width_space_cf", "control_cc", "no_break_space_zs", "combining_acute_mn"],
+)
+def test_mask_email_replaces_a_leading_control_format_separator_or_mark_character_with_a_star(
+    email: str, masked: str
+) -> None:
+    # Arrange
+    # (parametrized)
+
+    # Act
+    result = mask_email(email)
+
+    # Assert
+    assert result == masked
+
+
+@pytest.mark.parametrize(
     "email",
     ["alice", "", "@example.com"],
     ids=["no_at_sign", "empty_input", "empty_local_part"],
@@ -341,6 +367,61 @@ def test_mask_email_placeholder_does_not_echo_an_input_without_an_at_sign() -> N
     assert result == "***"
     assert "alexander" not in result
     assert "hamilton" not in result
+
+
+@pytest.mark.parametrize(
+    ("email", "masked"),
+    [
+        ("x@\u202emoc.knab", "x***@***"),
+        ("a@exa\u200bmple.com", "a***@***"),
+        ("a@example.com\u001b", "a***@***"),
+        ("a@exa\u0000mple.com", "a***@***"),
+        ("a@exa\u00a0mple.com", "a***@***"),
+        ("a@e\u0301xample.com", "a***@***"),
+        ("\u202ex@\u202emoc.knab", "****@***"),
+    ],
+    ids=[
+        "domain_bidi_rlo_cf",
+        "domain_zero_width_space_cf",
+        "domain_escape_cc",
+        "domain_nul_cc",
+        "domain_no_break_space_zs",
+        "domain_combining_acute_mn",
+        "local_and_domain_both_unprintable",
+    ],
+)
+def test_mask_email_replaces_a_domain_containing_a_control_format_separator_or_mark_character(
+    email: str, masked: str
+) -> None:
+    # Arrange
+    # (parametrized)
+
+    # Act
+    result = mask_email(email)
+
+    # Assert
+    assert result == masked
+
+
+@pytest.mark.parametrize(
+    ("email", "masked"),
+    [
+        ("a@bücher.example", "a***@bücher.example"),
+        ("a@例え.jp", "a***@例え.jp"),
+    ],
+    ids=["idn_latin_precomposed", "idn_cjk"],
+)
+def test_mask_email_keeps_a_unicode_domain_without_control_format_separator_or_mark_characters(
+    email: str, masked: str
+) -> None:
+    # Arrange
+    # (parametrized)
+
+    # Act
+    result = mask_email(email)
+
+    # Assert
+    assert result == masked
 
 
 # --- list_transfers: scoping and direction ----------------------------------------------------------------
@@ -968,6 +1049,63 @@ def test_get_history_requires_an_otp_session_once_totp_is_enabled(
 
     # Assert
     assert (response.status_code, response.json()) == (401, MFA_REQUIRED)
+
+
+@pytest.mark.parametrize("path", [WALLETS, HISTORY], ids=["wallets", "transfers"])
+def test_me_routes_401_missing_session_forbids_caching(
+    session_factory: sessionmaker[Session], clock: FixedClock, private_pem: str, path: str
+) -> None:
+    # Arrange
+    client = _client(session_factory, clock, private_pem)
+    _sign_up(session_factory, clock, ALICE)
+
+    # Act
+    response = client.get(path)
+
+    # Assert
+    assert (response.status_code, response.json()) == (401, MISSING_SESSION)
+    assert response.headers["Cache-Control"] == NO_STORE
+    assert response.headers["Pragma"] == NO_CACHE
+
+
+@pytest.mark.parametrize("path", [WALLETS, HISTORY], ids=["wallets", "transfers"])
+@pytest.mark.parametrize("kind", ["garbage", "expired"])
+def test_me_routes_401_invalid_session_forbids_caching(
+    session_factory: sessionmaker[Session], clock: FixedClock, private_pem: str, path: str, kind: str
+) -> None:
+    # Arrange
+    client = _client(session_factory, clock, private_pem)
+    alice = _sign_up(session_factory, clock, ALICE)
+    tokens = {
+        "garbage": "not-a-jwt",
+        "expired": issue_session_token(private_pem, alice.user_id, clock() - timedelta(hours=1), ("pwd",)),
+    }
+
+    # Act
+    response = client.get(path, headers=_bearer(tokens[kind]))
+
+    # Assert
+    assert (response.status_code, response.json()) == (401, INVALID_SESSION)
+    assert response.headers["Cache-Control"] == NO_STORE
+    assert response.headers["Pragma"] == NO_CACHE
+
+
+@pytest.mark.parametrize("path", [WALLETS, HISTORY], ids=["wallets", "transfers"])
+def test_me_routes_401_mfa_required_forbids_caching(
+    session_factory: sessionmaker[Session], clock: FixedClock, private_pem: str, path: str
+) -> None:
+    # Arrange
+    client = _client(session_factory, clock, private_pem)
+    alice = _sign_up(session_factory, clock, ALICE)
+    _enable_totp(client, clock, ALICE)
+
+    # Act
+    response = client.get(path, headers=_bearer(_token(private_pem, clock, alice, ("pwd",))))
+
+    # Assert
+    assert (response.status_code, response.json()) == (401, MFA_REQUIRED)
+    assert response.headers["Cache-Control"] == NO_STORE
+    assert response.headers["Pragma"] == NO_CACHE
 
 
 def test_get_history_accepts_an_otp_session_once_totp_is_enabled(

@@ -3,6 +3,7 @@ import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
@@ -58,7 +59,14 @@ from gateway.payments.disputes import (
     get_dispute,
     submit_evidence,
 )
-from gateway.payments.history import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, InvalidCursorError, list_payments
+from gateway.payments.history import (
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    PAYMENT_METHODS,
+    InvalidCursorError,
+    get_payment,
+    list_payments,
+)
 from gateway.payments.refunds import refund_payment
 from gateway.payments.risk import get_payment_risk
 from gateway.payments.schemas import (
@@ -191,8 +199,11 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     - GET /v1/me/transfers?limit&cursor (Bearer session) → 200 {items, next_cursor}: the user's sent and
       received transfers, newest first, counterparty email masked; invalid cursor → 400. All with
       Cache-Control: no-store.
-    - GET /v1/payments?limit&cursor&state (Bearer API key) → 200 {items, next_cursor}: the merchant's
-      payments, newest first. Invalid cursor → 400.
+    - GET /v1/payments?limit&cursor&state&created_from&created_to&method (Bearer API key) → 200 {items,
+      next_cursor}: the merchant's payments, newest first; half-open date range, offsets required.
+      Invalid cursor, date, range or method → 400.
+    - GET /v1/payments/{payment_id} (Bearer API key) → 200 PaymentSummary; unknown or another merchant's → the
+      same 404. Both with Cache-Control: no-store.
     - GET /v1/payments/{payment_id}/risk (Bearer API key) → 200 PaymentRiskView (flags only); unknown or
       another merchant's → 404.
     - POST /v1/payments/{payment_id}/refunds (Bearer API key, Idempotency-Key required) body RefundRequest →
@@ -306,19 +317,21 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
     ) -> uuid.UUID:
         if credentials is None:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing session")
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing session", headers=NO_STORE_HEADERS)
         if deps.jwt_private_key_pem is None:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid session")
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid session", headers=NO_STORE_HEADERS)
         try:
             claims = verify_session_token(
                 deps.jwt_private_key_pem, credentials.credentials, deps.charge.clock()
             )
         except InvalidSessionError:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid session") from None
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED, "invalid session", headers=NO_STORE_HEADERS
+            ) from None
         with session_factory() as session:
             needs_otp = totp_enabled(session, claims.user_id)
         if needs_otp and AMR_OTP not in claims.amr:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "mfa required")
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "mfa required", headers=NO_STORE_HEADERS)
         return claims.user_id
 
     def totp_key() -> str:
@@ -478,13 +491,35 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
         cursor: Annotated[str | None, Query(max_length=512)] = None,
         state: PaymentState | None = None,
+        created_from: Annotated[str | None, Query(max_length=64)] = None,
+        created_to: Annotated[str | None, Query(max_length=64)] = None,
+        method: Annotated[str | None, Query(max_length=16)] = None,
     ) -> PaymentListResponse:
+        start = _aware_datetime_param(created_from, "created_from")
+        end = _aware_datetime_param(created_to, "created_to")
+        if start is not None and end is not None and start >= end:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid date range")
+        if method is not None and method not in PAYMENT_METHODS:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid method")
         try:
             with session_factory() as session:
-                page = list_payments(session, merchant_id, limit, cursor, state)
+                page = list_payments(session, merchant_id, limit, cursor, state, start, end, method)
         except InvalidCursorError:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid cursor") from None
         return PaymentListResponse(items=page.items, next_cursor=page.next_cursor)
+
+    @app.get("/v1/payments/{payment_id}", response_model=PaymentSummary)
+    def payment_detail(
+        payment_id: uuid.UUID, merchant_id: Annotated[uuid.UUID, Depends(merchant_from_api_key)]
+    ) -> JSONResponse:
+        try:
+            with session_factory() as session:
+                summary = get_payment(session, merchant_id, payment_id)
+        except PaymentNotFoundError:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, "payment not found", headers=NO_STORE_HEADERS
+            ) from None
+        return JSONResponse(summary.model_dump(mode="json"), headers=NO_STORE_HEADERS)
 
     @app.get("/v1/payments/{payment_id}/risk")
     def payment_risk(
@@ -539,6 +574,20 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
             raise HTTPException(status.HTTP_409_CONFLICT, "invalid dispute transition") from None
 
     return app
+
+
+def _aware_datetime_param(value: str | None, name: str) -> datetime | None:
+    """An ISO 8601 date-time with an offset, returned in UTC. Anything else (naive, date-only, or an instant
+    outside the UTC datetime range such as `9999-12-31T23:59:59-23:59`) → 400."""
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.utcoffset() is None:
+            raise ValueError
+        return parsed.astimezone(UTC)
+    except (ValueError, OverflowError):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"invalid {name}") from None
 
 
 def _require_idempotency_key(idempotency_key: str | None) -> str:
