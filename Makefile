@@ -1,7 +1,7 @@
 DC := docker compose
 RUN := $(DC) run --rm dev
 
-.PHONY: up down build sync lint fmt type test migrate migrate-check ci demo demo-down web-install web-ci web-up web-smoke web-merchant-key docs-diagram
+.PHONY: up down build sync lint fmt type test migrate migrate-check ci demo demo-down web-install web-ci web-up web-smoke web-reresolve-check web-merchant-key docs-diagram
 
 up:
 	$(DC) up -d --wait postgres redis
@@ -77,6 +77,11 @@ web-merchant-key:
 web-smoke: web-up web-install
 	@key=$$($(MAKE) -s web-merchant-key 2>/dev/null) && WEB_DEMO_MERCHANT_KEY="$$key" \
 	  $(DC) --profile web-smoke run --rm -e WEB_DEMO_MERCHANT_KEY web-smoke npx playwright test
+
+# regression: web (nginx) must keep proxying after gateway-api / ops-ai-api are recreated, without a web restart
+web-reresolve-check:
+	$(MAKE) web-up
+	DC='$(DC)' sh scripts/web_reresolve_check.sh
 
 # DL1: renders the first Mermaid block of docs/architecture.md (runtime topology); mmdc only in the pinned image
 MMDC_IMAGE := minlag/mermaid-cli:11.4.2
