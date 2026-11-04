@@ -58,9 +58,9 @@ Paths are planned locations from `docs/architecture-detail.md` §1; they are fix
 
 | ID | Sub-requirement | Acceptance criterion | Satisfied by (code) | Verified by (test) | Phase | Status |
 |---|---|---|---|---|---|---|
-| B6.1 | Keyword retrieval | Postgres full-text search (`tsvector`) behind a swappable interface | `ai/search/` | `ai/search/__tests__/` | 3 | Planned |
-| B6.2 | Semantic retrieval | pgvector similarity; embedder swappable (OpenAI / pinned local model), one index per embedder | `ai/search/` | `ai/search/__tests__/` | 3 | Planned |
-| B6.3 | Fusion | Reciprocal Rank Fusion; on a fixed corpus a keyword-only miss is found by vector and vice versa | `ai/search/` | `ai/search/__tests__/` | 3 | Planned |
+| B6.1 | Keyword retrieval | Postgres full-text search (`tsvector`) behind a swappable interface | `ai/search/service.py` (`search_documents`) | `ai/search/__tests__/test_search_service.py` | 3 | Done (2026-11-04; keyword leg of `hybrid_search`) |
+| B6.2 | Semantic retrieval | pgvector similarity; embedder swappable (OpenAI / pinned local model), one index per embedder | `ai/search/embedder.py` (`Embedder` port, deterministic `LocalHashEmbedder`), `ai/search/openai_embedder.py` (`OPS_AI_EMBEDDER=openai`), `ai/search/models.py` (one `vector` column + HNSW index per embedder id; migration `b6e1c2d3f4a5`), `ai/search/service.py` (`vector_search`), `ai/ingest/consumer.py` + `ai/search/backfill.py` (`python -m ops_ai.search backfill`) | `ai/search/__tests__/test_local_embedder.py`, `test_vector_search.py`, `test_openai_embedder.py`, `test_backfill.py`; `ai/ingest/__tests__/test_consumer_embedding.py`; `ai/__tests__/test_config_embedder.py`, `test_main_embedder.py` | 3 | Done (2026-11-04; local embedder is feature hashing, spelling-level not semantic; ingest writes the local column only, OpenAI column via backfill) |
+| B6.3 | Fusion | Reciprocal Rank Fusion; on a fixed corpus a keyword-only miss is found by vector and vice versa | `ai/search/service.py` (`reciprocal_rank_fusion` k=60, `hybrid_search`, both legs scoped to `merchant_id`), wired into `ai/assistant/service.py` (`ask`) | `ai/search/__tests__/test_rrf.py`, `test_hybrid_search.py`; `ai/assistant/__tests__/test_assistant_hybrid.py`; `ai/__tests__/test_app_embedder.py` | 3 | Done (2026-11-04; `investigation` `search_incidents` not yet on hybrid) |
 
 ## B7. Fraud detection and basic risk scoring with flagging of suspicious transactions
 

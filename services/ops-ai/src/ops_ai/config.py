@@ -1,4 +1,5 @@
 import os
+from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -23,6 +24,8 @@ class OpsAiSettings(BaseSettings):
         default=DEFAULT_FALLBACK_MODEL, validation_alias="OPENAI_FALLBACK_MODEL"
     )
     openai_base_url: str = Field(default=OPENAI_BASE_URL, validation_alias="OPENAI_BASE_URL")
+    embedder: Literal["local", "openai"] = "local"
+    """OPS_AI_EMBEDDER: query-side embedder for hybrid search (B6.2)."""
 
     @field_validator("openai_fallback_model", mode="before")
     @classmethod

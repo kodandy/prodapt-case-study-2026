@@ -8,6 +8,8 @@ from ops_ai.clock import system_clock
 from ops_ai.config import load_ops_ai_settings
 from ops_ai.db import make_engine, make_session_factory
 from ops_ai.health import check_ready
+from ops_ai.search.embedder import Embedder, LocalHashEmbedder
+from ops_ai.search.openai_embedder import OpenAiEmbedder
 
 REDIS_CONNECT_TIMEOUT_SECONDS = 1.0
 REDIS_SOCKET_TIMEOUT_SECONDS = 2.0
@@ -17,6 +19,7 @@ def build_app_from_env() -> FastAPI:
     """uvicorn factory (`--factory ops_ai.main:build_app_from_env`). Refuses to start without the public key.
 
     Without OPENAI_API_KEY (unset or empty) the assistant uses MockLlm (evidence-led, model "mock").
+    OPS_AI_EMBEDDER=openai needs OPENAI_API_KEY (RuntimeError otherwise); the default is the local embedder.
     """
     settings = load_ops_ai_settings()
     if settings.jwt_public_key_pem is None:
@@ -36,6 +39,11 @@ def build_app_from_env() -> FastAPI:
             fallback_model=settings.openai_fallback_model,
             base_url=settings.openai_base_url,
         )
+    embedder: Embedder = LocalHashEmbedder()
+    if settings.embedder == "openai":
+        if api_key is None or not api_key.get_secret_value():
+            raise RuntimeError("OPS_AI_EMBEDDER=openai requires OPENAI_API_KEY")
+        embedder = OpenAiEmbedder(api_key, base_url=settings.openai_base_url)
     return create_app(
         OpsAiAppDeps(
             session_factory=session_factory,
@@ -43,5 +51,6 @@ def build_app_from_env() -> FastAPI:
             jwt_public_key_pem=settings.jwt_public_key_pem,
             clock=system_clock,
             readiness=lambda: check_ready(session_factory, redis),
+            embedder=embedder,
         )
     )

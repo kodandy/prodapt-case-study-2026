@@ -8,7 +8,8 @@ from ops_ai.assistant.evidence import EvidenceItem
 from ops_ai.assistant.llm_port import LlmPort, LlmRequest, LlmUnavailableError
 from ops_ai.ingest.models import PaymentFact
 from ops_ai.scope import Scope
-from ops_ai.search.service import search_documents
+from ops_ai.search.embedder import Embedder, LocalHashEmbedder
+from ops_ai.search.service import hybrid_search
 
 AnswerMode = Literal["llm", "t2_fallback"]
 MAX_QUESTION_CHARS = 2000
@@ -24,12 +25,19 @@ class AssistantAnswer:
     model: str | None
 
 
-def ask(session: Session, scope: Scope, question: str, llm: LlmPort) -> AssistantAnswer:
-    """Collects evidence (failure counts by decline_code from payment_facts + search hits for the question),
-    all within scope, then asks the LLM. Any LlmUnavailableError → mode t2_fallback with the same evidence.
+def ask(
+    session: Session, scope: Scope, question: str, llm: LlmPort, embedder: Embedder | None = None
+) -> AssistantAnswer:
+    """Collects evidence (failure counts by decline_code from payment_facts + hybrid search hits for the
+    question), all within scope, then asks the LLM. Any LlmUnavailableError → mode t2_fallback with the same
+    evidence. `embedder` None → LocalHashEmbedder; an unavailable embedder degrades search to keyword only.
     """
     bounded = question[:MAX_QUESTION_CHARS]
-    evidence = (*_decline_aggregates(session, scope), *_search_evidence(session, scope, bounded))
+    search_embedder = embedder if embedder is not None else LocalHashEmbedder()
+    evidence = (
+        *_decline_aggregates(session, scope),
+        *_search_evidence(session, scope, bounded, search_embedder),
+    )
     session.close()
     try:
         response = llm.complete(LlmRequest(question=bounded, evidence=evidence))
@@ -58,8 +66,8 @@ def _decline_aggregates(session: Session, scope: Scope) -> list[EvidenceItem]:
     ]
 
 
-def _search_evidence(session: Session, scope: Scope, question: str) -> list[EvidenceItem]:
+def _search_evidence(session: Session, scope: Scope, question: str, embedder: Embedder) -> list[EvidenceItem]:
     if not question.strip():
         return []
-    hits = search_documents(session, scope, question, limit=SEARCH_LIMIT)
+    hits = hybrid_search(session, scope, question, embedder, limit=SEARCH_LIMIT)
     return [EvidenceItem(ref=f"{hit.kind}:{hit.ref_id}", summary=f"{hit.title}: {hit.body}") for hit in hits]
