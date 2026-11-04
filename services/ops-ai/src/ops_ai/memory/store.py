@@ -11,9 +11,11 @@ from sqlalchemy.orm import Session
 
 from ops_ai.memory.models import MerchantMemoryRecord
 from ops_ai.memory.session import PendingMemory, SessionOwner
+from ops_ai.memory.state import is_storable_memory
 from ops_ai.scope import Scope
 
 RECALL_LIMIT = 20
+MAX_CHAIN_DEPTH = 1000
 DELETED_CONTENT = "[deleted]"
 _log = logging.getLogger(__name__)
 
@@ -52,6 +54,8 @@ def save_confirmed_memory(
     now: datetime,
 ) -> MemoryRecord:
     """DuplicateMemoryError when this source turn already produced a memory (one row per proposal, ever)."""
+    if not is_storable_memory(proposal.content):
+        raise ValueError("memory content is not storable")
     memory_id = uuid.uuid4()
     inserted = db.execute(
         insert(MerchantMemoryRecord)
@@ -116,6 +120,8 @@ def _active_row(db: Session, scope: Scope, memory_id: uuid.UUID) -> MerchantMemo
 def correct_memory(
     db: Session, scope: Scope, owner: SessionOwner, memory_id: uuid.UUID, content: str, now: datetime
 ) -> MemoryRecord | None:
+    if not is_storable_memory(content):
+        raise ValueError("memory content is not storable")
     old = _active_row(db, scope, memory_id)
     if old is None:
         db.rollback()
@@ -158,7 +164,7 @@ def delete_memory(
     row.deleted_by = owner.user_id
     chain = [row.memory_id]
     ancestor = row.supersedes_id
-    while ancestor is not None:
+    while ancestor is not None and len(chain) < MAX_CHAIN_DEPTH:
         chain.append(ancestor)
         ancestor = db.scalar(
             select(MerchantMemoryRecord.supersedes_id).where(

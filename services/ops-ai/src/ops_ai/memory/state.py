@@ -20,7 +20,7 @@ _LAST_N = re.compile(r"\b(?:last|past)\s+([0-9]{1,4})\s+(hour|day)s?\b")
 _MEMORY_PREFIXES = ("remember that ", "remember: ")
 # control, format (ZWSP, RLO), line/paragraph separators, private use, surrogates
 _HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Co", "Cs"})
-_DIGIT_RUN = re.compile(r"\d(?:[^0-9A-Za-z]{0,3}\d)+")
+_DIGIT_RUN = re.compile(r"\d(?:\D{0,3}\d)+")
 
 
 @dataclass(frozen=True)
@@ -79,7 +79,7 @@ def is_storable_memory(content: str) -> bool:
 
 
 def _holds_card_number(text: str) -> bool:
-    """Any run of 13+ digits joined by up to 3 non-alphanumerics (stricter than the prompt masking)."""
+    """13+ digits joined by gaps of up to 3 characters of any kind (fail-closed)."""
     return any(len(re.sub(r"\D", "", run.group())) >= 13 for run in _DIGIT_RUN.finditer(text))
 
 

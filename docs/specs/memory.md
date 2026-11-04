@@ -45,8 +45,8 @@ ConversationState, pending: tuple[PendingMemory, ...])`. `EMPTY_STATE = Conversa
   before `today`.
 - `detect_memory_request(question) -> str | None`: the question (stripped) starts with `remember that ` or
   `remember: ` (case-insensitive) → the rest, stripped; `None` unless `is_storable_memory(rest)`: 1..`MAX_MEMORY_CHARS`
-  (500) chars, no hidden characters (Unicode Cc/Cf/Zl/Zp/Co/Cs), no run of 13+ digits joined by up to 3
-  non-alphanumerics after NFKC (long-term rows outlive any log masking).
+  (500) chars, no hidden characters (Unicode Cc/Cf/Zl/Zp/Co/Cs), no 13+ digits joined by gaps of up to 3
+  characters of any kind after NFKC (long-term rows outlive any log masking).
 - `resolve(question, previous: ConversationState, now) -> tuple[ChatIntent, ConversationState]`:
   memory request → `("memory_proposal", previous)`. Otherwise `metric = detect_metric(q) or previous.metric`;
   no metric → `("unsupported", previous)`. `window = detect_window(q, now) or previous.window or
