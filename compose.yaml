@@ -116,6 +116,16 @@ services:
     volumes: [*gateway-secrets]
     depends_on: *runtime-deps
 
+  notifier:
+    image: payplat-app
+    environment:
+      <<: *app-env
+      GATEWAY_SECRETS_DIR: /run/secrets/gateway
+    command: ["python", "-m", "gateway.notifications.worker"]
+    restart: unless-stopped
+    volumes: [*gateway-secrets]
+    depends_on: *runtime-deps
+
   ops-ai-api:
     image: payplat-app
     environment:
@@ -153,6 +163,7 @@ services:
       gateway-api: { condition: service_healthy }
       ops-ai-api: { condition: service_healthy }
       relay: { condition: service_started }
+      notifier: { condition: service_started }
       ops-ai-consumer: { condition: service_started }
 
 volumes:
