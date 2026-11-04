@@ -108,9 +108,9 @@ Paths are planned locations from `docs/architecture-detail.md` §1; they are fix
 
 | ID | Sub-requirement | Acceptance criterion | Satisfied by (code) | Verified by (test) | Phase | Status |
 |---|---|---|---|---|---|---|
-| B12.1 | Escalation → ticket | Assistant escalation, fraud alert, dispute and unresolved `unknown` attempt create tickets with reason | `ai/tickets/` | `ai/tickets/__tests__/` | 3 | Planned |
-| B12.2 | Routing | Rule router → queue `{fraud, payments_ops, settlement, compliance}` + priority | `ai/tickets/` | `ai/tickets/__tests__/` | 3 | Planned |
-| B12.3 | Lifecycle + dedupe | `open → assigned → resolved`; duplicate source event creates no second ticket | `ai/tickets/` | `ai/tickets/__tests__/` | 3 | Planned |
+| B12.1 | Escalation → ticket | Assistant escalation, fraud alert, dispute and unresolved `unknown` attempt create tickets with reason | `ai/tickets/escalation.py` (`/v1/assistant/ask`: human request or `t2_fallback`; question redacted, 50/merchant/UTC day), `ai/tickets/sources.py` (dispute = settlement-report `chargeback` flag via `seed_settlement`, since no dispute event reaches ops-ai; `unknown` older than 15 min swept by the ingest worker every 60 s), `ai/fraud_watch/watch.py` (card testing) | `ai/tickets/__tests__/` (escalation, dispute, unknown sweep, worker sweep, card-testing source) | 3 | Done |
+| B12.2 | Routing | Rule router → queue `{fraud, payments_ops, settlement, compliance}` + priority | `ai/tickets/routing.py` (`route_ticket`: card_testing → fraud/high, dispute → compliance/high, unknown_payment → payments_ops/normal, escalation by keyword topic) | `ai/tickets/__tests__/test_routing_b12.py`, `test_route_ticket.py` | 3 | Done |
+| B12.3 | Lifecycle + dedupe | `open → assigned → resolved`; duplicate source event creates no second ticket | `ai/tickets/service.py` (unique `source_key` + `ON CONFLICT DO NOTHING`; conditional `UPDATE … WHERE status`; invalid → 409), `ai/tickets/api.py` (`GET /v1/tickets`, `GET /v1/tickets/{id}`, `POST /v1/tickets/{id}/transition`; merchant token, own tickets only), migration `b12c4e7a9f31` | `ai/tickets/__tests__/test_lifecycle.py`, `test_open_ticket.py`, `test_tickets_api.py` | 3 | Done (no ops-staff role in the gateway yet: the API is merchant-scoped) |
 
 ## B13. Simple front-end interface for user and merchant interaction
 

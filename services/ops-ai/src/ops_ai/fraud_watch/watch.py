@@ -70,6 +70,7 @@ def watch_payment(session: Session, clock: Clock, event: PaymentEventV1) -> uuid
         .values(
             ticket_id=uuid.uuid4(),
             source_key=window_key,
+            source=CARD_TESTING_KIND,
             queue=queue,
             priority=priority,
             merchant_id=event.merchant_id,

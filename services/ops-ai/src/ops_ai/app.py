@@ -1,3 +1,4 @@
+import logging
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -9,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from ops_ai.assistant.llm_port import LlmPort
@@ -22,6 +24,8 @@ from ops_ai.investigation.tools import FailureAggregate
 from ops_ai.scope import Principal, Scope, UserScope
 from ops_ai.settlement.service import explain_payout
 from ops_ai.settlement.statement import LineKind
+from ops_ai.tickets.api import create_ticket_router
+from ops_ai.tickets.escalation import escalate_assistant_turn
 from ops_ai.transfers import (
     CauseCode,
     RemediationOwner,
@@ -30,6 +34,8 @@ from ops_ai.transfers import (
     sender_facing_status,
 )
 from ops_ai.transfers.service import investigate_transfer
+
+logger = logging.getLogger(__name__)
 
 
 def _always_ready() -> list[str]:
@@ -308,6 +314,9 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
       Cache-Control: no-store; now = deps.clock().
     - POST /v1/assistant/explain-settlement (merchant token) {question, period?: YYYY-MM}
       → ExplainSettlementResponse with Cache-Control: no-store. No statement for the period → 404.
+    - /ask also opens an escalation ticket when the assistant abstains or a human is asked for (B12.1).
+    - GET /v1/tickets, GET /v1/tickets/{id}, POST /v1/tickets/{id}/transition (merchant token):
+      see ops_ai.tickets.api.
     Missing/invalid/expired token → 401 {"detail": "invalid token"}. A valid token of the other kind
     (user token on the merchant routes, merchant token on the transfer route) → 403 {"detail": "forbidden"}.
     """
@@ -350,6 +359,12 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
     def assistant_ask(body: AskRequest, scope: Annotated[Scope, Depends(merchant_scope)]) -> AskResponse:
         with deps.session_factory() as session:
             answer = ask(session, scope, body.question, deps.llm)
+        try:
+            with deps.session_factory.begin() as session:
+                escalate_assistant_turn(session, deps.clock, scope, body.question, answer.mode)
+        except SQLAlchemyError as error:
+            # The answer is already built; a failed escalation is logged by class name only (no question).
+            logger.warning("assistant escalation failed: %s", type(error).__name__)
         return AskResponse(
             mode=answer.mode,
             text=answer.text,
@@ -462,6 +477,7 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
             evidence=[EvidenceOut(ref=item.ref, summary=item.summary) for item in result.evidence],
         )
 
+    app.include_router(create_ticket_router(deps.session_factory, deps.clock, merchant_scope))
     return app
 
 
