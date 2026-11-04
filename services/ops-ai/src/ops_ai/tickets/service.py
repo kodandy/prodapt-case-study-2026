@@ -15,6 +15,8 @@ from ops_ai.tickets.routing import EscalationTopic, Queue, TicketSource, route_t
 TicketStatus = Literal["open", "assigned", "resolved"]
 TransitionTarget = Literal["assigned", "resolved"]
 LIST_LIMIT_MAX = 100
+MERCHANT_OWNED_SOURCES: frozenset[str] = frozenset({"assistant_escalation"})
+"""Sources a merchant may assign and resolve; fraud, dispute and unknown-payment tickets belong to ops."""
 
 # target → the only status it may be reached from
 _ALLOWED_FROM: dict[TransitionTarget, TicketStatus] = {"assigned": "open", "resolved": "assigned"}
@@ -54,6 +56,10 @@ class TicketView:
 
 class TicketNotFoundError(Exception):
     """Missing, or owned by another merchant: the two are indistinguishable to the caller."""
+
+
+class TicketNotMerchantOwnedError(Exception):
+    """The merchant can read this ticket but not change it."""
 
 
 class InvalidTicketTransitionError(Exception):
@@ -126,21 +132,24 @@ def transition_ticket(
     target: TransitionTarget,
     assignee: str | None = None,
 ) -> TicketView:
-    """open → assigned (needs an assignee) or assigned → resolved; else InvalidTicketTransitionError.
+    """open → assigned (needs an assignee) or assigned → resolved, on merchant-owned sources only.
 
+    Refusals in order: not found / another merchant's → TicketNotFoundError; source not in
+    MERCHANT_OWNED_SOURCES → TicketNotMerchantOwnedError; else InvalidTicketTransitionError.
     One conditional UPDATE (WHERE status = the only allowed source status), so two racing transitions cannot
     both succeed. Does not commit.
     """
     values: dict[str, object] = {"status": target, "updated_at": clock()}
     if target == "assigned":
         if not assignee:
-            raise InvalidTicketTransitionError("assigning needs an assignee")
+            raise _refusal(session, scope, ticket_id, target)
         values["assignee"] = assignee
     updated = session.scalars(
         update(Ticket)
         .where(
             Ticket.ticket_id == ticket_id,
             Ticket.merchant_id == scope.merchant_id,
+            Ticket.source.in_(MERCHANT_OWNED_SOURCES),
             Ticket.status == _ALLOWED_FROM[target],
         )
         .values(**values)
@@ -148,9 +157,16 @@ def transition_ticket(
     ).one_or_none()
     if updated is not None:
         return _view(updated)
-    if get_ticket(session, scope, ticket_id) is None:
-        raise TicketNotFoundError(str(ticket_id))
-    raise InvalidTicketTransitionError(f"cannot move to {target}")
+    raise _refusal(session, scope, ticket_id, target)
+
+
+def _refusal(session: Session, scope: Scope, ticket_id: uuid.UUID, target: TransitionTarget) -> Exception:
+    current = get_ticket(session, scope, ticket_id)
+    if current is None:
+        return TicketNotFoundError(str(ticket_id))
+    if current.source not in MERCHANT_OWNED_SOURCES:
+        return TicketNotMerchantOwnedError(str(ticket_id))
+    return InvalidTicketTransitionError(f"cannot move to {target}")
 
 
 def _view(ticket: Ticket) -> TicketView:

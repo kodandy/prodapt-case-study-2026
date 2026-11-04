@@ -14,6 +14,7 @@ from ops_ai.tickets.service import (
     LIST_LIMIT_MAX,
     InvalidTicketTransitionError,
     TicketNotFoundError,
+    TicketNotMerchantOwnedError,
     TicketStatus,
     TicketView,
     get_ticket,
@@ -110,6 +111,10 @@ def create_ticket_router(
         except TicketNotFoundError:
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, NOT_FOUND, headers={"Cache-Control": "no-store"}
+            ) from None
+        except TicketNotMerchantOwnedError:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "ticket_not_merchant_owned", headers={"Cache-Control": "no-store"}
             ) from None
         except InvalidTicketTransitionError:
             raise HTTPException(

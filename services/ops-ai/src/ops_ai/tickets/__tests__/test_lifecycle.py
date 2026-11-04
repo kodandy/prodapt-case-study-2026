@@ -42,7 +42,7 @@ def _open(
     key: str,
     *,
     merchant_id: uuid.UUID = MERCHANT,
-    source: TicketSource = "dispute",
+    source: TicketSource = "assistant_escalation",
     at: datetime = TEST_NOW,
 ) -> uuid.UUID:
     new = NewTicket(
@@ -96,6 +96,15 @@ def _row(session_factory: sessionmaker[Session], ticket_id: uuid.UUID) -> dict[s
             )
             .mappings()
             .one()
+        )
+
+
+def _force_assigned(session_factory: sessionmaker[Session], ticket_id: uuid.UUID, assignee: str) -> None:
+    """Arrange-only: read-only sources cannot be assigned through the service."""
+    with session_factory.begin() as session:
+        session.execute(
+            text("UPDATE ops_ai.tickets SET status = 'assigned', assignee = :a WHERE ticket_id = :t"),
+            {"a": assignee, "t": ticket_id},
         )
 
 
@@ -246,9 +255,9 @@ def test_list_tickets_combines_the_status_and_queue_filters(session_factory: ses
     # Arrange
     _open(session_factory, "d-open", source="dispute")
     assigned_dispute = _open(session_factory, "d-assigned", source="dispute")
-    _transition(session_factory, assigned_dispute, "assigned", "alice")
+    _force_assigned(session_factory, assigned_dispute, "alice")
     unknown = _open(session_factory, "u", source="unknown_payment")
-    _transition(session_factory, unknown, "assigned", "bob")
+    _force_assigned(session_factory, unknown, "bob")
 
     # Act
     views = _list(session_factory, status="assigned", queue="compliance")
@@ -304,9 +313,9 @@ def test_open_to_assigned_sets_the_assignee_status_and_updated_at(
     # Assert
     expected = TicketView(
         ticket_id=ticket_id,
-        source="dispute",
-        queue="compliance",
-        priority="high",
+        source="assistant_escalation",
+        queue="payments_ops",
+        priority="normal",
         status="assigned",
         title="Title k",
         reason="Reason k",

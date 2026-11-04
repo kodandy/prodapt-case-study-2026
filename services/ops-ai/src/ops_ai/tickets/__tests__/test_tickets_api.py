@@ -140,7 +140,7 @@ def _open(
     key: str,
     *,
     merchant_id: uuid.UUID = MERCHANT,
-    source: TicketSource = "dispute",
+    source: TicketSource = "assistant_escalation",
     at: datetime = TEST_NOW,
 ) -> uuid.UUID:
     new = NewTicket(
@@ -325,8 +325,11 @@ def test_list_filters_by_status_and_queue(session_factory: sessionmaker[Session]
     unknown = _open(session_factory, "u", source="unknown_payment")
     client = _client(session_factory, key_pair.public_pem, RecordingLlm())
     headers = _bearer(_merchant_token(key_pair.private_pem))
-    assign = {"status": "assigned", "assignee": "alice"}
-    client.post(f"/v1/tickets/{unknown}/transition", json=assign, headers=headers)
+    with session_factory.begin() as session:  # read-only source: Arrange via SQL, not the API
+        session.execute(
+            text("UPDATE ops_ai.tickets SET status = 'assigned', assignee = 'alice' WHERE ticket_id = :t"),
+            {"t": unknown},
+        )
 
     # Act
     by_queue = client.get("/v1/tickets", params={"queue": "compliance"}, headers=headers)
