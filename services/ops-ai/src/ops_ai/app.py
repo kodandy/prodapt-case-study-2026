@@ -9,6 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from redis import Redis
 from sqlalchemy.orm import Session, sessionmaker
 
 from ops_ai.assistant.llm_port import LlmPort
@@ -19,6 +20,8 @@ from ops_ai.fraud_watch import FraudAnalysis
 from ops_ai.fraud_watch.service import FraudCause, FraudIntent, investigate_fraud
 from ops_ai.investigation.service import CauseLabel, Intent, investigate
 from ops_ai.investigation.tools import FailureAggregate
+from ops_ai.memory.routes import build_memory_router
+from ops_ai.memory.session import SessionStore
 from ops_ai.scope import Principal, Scope, UserScope
 from ops_ai.search.embedder import Embedder, LocalHashEmbedder
 from ops_ai.settlement.service import explain_payout
@@ -45,6 +48,8 @@ class OpsAiAppDeps:
     clock: Clock
     readiness: Callable[[], list[str]] = field(default=_always_ready)
     embedder: Embedder = field(default_factory=LocalHashEmbedder)
+    redis: Redis | None = None
+    """Set → the B10 session and memory routes are mounted (docs/specs/memory.md)."""
 
 
 class AskRequest(BaseModel):
@@ -462,6 +467,17 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
             model=result.model,
             tool_calls=[ToolCallOut(name=call.name, args=call.args) for call in result.tool_calls],
             evidence=[EvidenceOut(ref=item.ref, summary=item.summary) for item in result.evidence],
+        )
+
+    if deps.redis is not None:
+        app.include_router(
+            build_memory_router(
+                session_factory=deps.session_factory,
+                store=SessionStore(deps.redis),
+                llm=deps.llm,
+                clock=deps.clock,
+                merchant_scope=merchant_scope,
+            )
         )
 
     return app

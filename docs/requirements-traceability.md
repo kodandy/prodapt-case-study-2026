@@ -92,9 +92,9 @@ Code and test paths are real files on main (checked 2026-11-04); `none` means no
 
 | ID | Sub-requirement | Acceptance criterion | Satisfied by (code) | Verified by (test) | Phase | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| B10.1 | Session management | Redis session keyed by `(merchant_id, user_id, session_id)` with TTL and ownership check; merchant A cannot read merchant B's session | none (no `ai/memory/`, no Redis session in ops-ai) | none | 3 | Planned |
-| B10.2 | Short-term memory | Last N turns + structured conversation state; "what about yesterday?" keeps merchant + metric and shifts the window | none | none | 3 | Planned |
-| B10.3 | Long-term memory | Explicit, auditable `merchant_memory` records written only via a confirmed tool call, with source turn id; recalled in a new session; correct/delete endpoint | none | none | 3 | Planned |
+| B10.1 | Session management | Redis session keyed by `(merchant_id, user_id, session_id)` with TTL and ownership check; merchant A cannot read merchant B's session | `ai/memory/session.py`, `ai/memory/routes.py` (scope from the merchant token only; another owner's session is a 404) | `ai/memory/__tests__/test_session_store.py`, `test_memory_routes.py` | 3 | Done (TTL 1800 s; per-merchant session cap is open: rate limit belongs at the edge) |
+| B10.2 | Short-term memory | Last N turns + structured conversation state; "what about yesterday?" keeps merchant + metric and shifts the window | `ai/memory/state.py`, `ai/memory/conversation.py` (last 10 turns; rule-based, works with the mock LLM) | `ai/memory/__tests__/test_state.py`, `test_conversation.py` | 3 | Done |
+| B10.3 | Long-term memory | Explicit, auditable `merchant_memory` records written only via a confirmed tool call, with source turn id; recalled in a new session; correct/delete endpoint | `ai/memory/store.py`, `ai/memory/models.py`, migration `b10a4e7c2d91` (`propose_merchant_memory` → `POST …/memory-proposals/{id}/confirm`; one row per source turn; `PATCH`/`DELETE /v1/assistant/memories/{id}`) | `ai/memory/__tests__/test_long_term_store.py`, `test_memory_routes.py` | 3 | Done |
 
 ## B11. Notifications for payment confirmations and suspicious activity alerts
 

@@ -52,5 +52,6 @@ def build_app_from_env() -> FastAPI:
             clock=system_clock,
             readiness=lambda: check_ready(session_factory, redis),
             embedder=embedder,
+            redis=redis,
         )
     )
