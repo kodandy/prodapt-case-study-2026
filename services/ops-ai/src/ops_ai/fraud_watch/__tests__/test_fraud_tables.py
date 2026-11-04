@@ -208,6 +208,9 @@ def test_tickets_columns_have_the_specified_types_and_nullability(engine: Engine
         "reason": ("text", "NO", None),
         "alert_id": ("uuid", "YES", None),
         "created_at": ("timestamp with time zone", "NO", None),
+        "source": ("character varying", "NO", 32),
+        "assignee": ("character varying", "YES", 64),
+        "updated_at": ("timestamp with time zone", "YES", None),
     }
 
 

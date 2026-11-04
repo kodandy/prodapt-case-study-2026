@@ -22,7 +22,7 @@ class OpsAiBase(DeclarativeBase):
 
 
 def make_engine(database_url: str) -> Engine:
-    return create_engine(database_url, pool_size=10, max_overflow=5, pool_pre_ping=True)
+    return create_engine(database_url, pool_size=10, max_overflow=5, pool_pre_ping=True, hide_parameters=True)
 
 
 def make_session_factory(engine: Engine) -> sessionmaker[Session]:
