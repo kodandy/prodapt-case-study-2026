@@ -3,6 +3,7 @@ from redis import Redis
 
 from ops_ai.app import OpsAiAppDeps, create_app
 from ops_ai.assistant.llm_port import LlmPort, MockLlm
+from ops_ai.assistant.openai_llm import OpenAiLlm
 from ops_ai.clock import system_clock
 from ops_ai.config import load_ops_ai_settings
 from ops_ai.db import make_engine, make_session_factory
@@ -15,7 +16,7 @@ REDIS_SOCKET_TIMEOUT_SECONDS = 2.0
 def build_app_from_env() -> FastAPI:
     """uvicorn factory (`--factory ops_ai.main:build_app_from_env`). Refuses to start without the public key.
 
-    Without OPENAI_API_KEY the assistant runs on MockLlm (evidence-led narration, labeled model "mock").
+    Without OPENAI_API_KEY (unset or empty) the assistant uses MockLlm (evidence-led, model "mock").
     """
     settings = load_ops_ai_settings()
     if settings.jwt_public_key_pem is None:
@@ -27,6 +28,14 @@ def build_app_from_env() -> FastAPI:
         socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
     )
     llm: LlmPort = MockLlm()
+    api_key = settings.openai_api_key
+    if api_key is not None and api_key.get_secret_value():
+        llm = OpenAiLlm(
+            api_key=api_key,
+            chat_model=settings.openai_chat_model,
+            fallback_model=settings.openai_fallback_model,
+            base_url=settings.openai_base_url,
+        )
     return create_app(
         OpsAiAppDeps(
             session_factory=session_factory,

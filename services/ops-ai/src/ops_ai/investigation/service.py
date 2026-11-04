@@ -118,6 +118,7 @@ def investigate(session: Session, scope: Scope, question: str, now: datetime, ll
         text=None,
         model=None,
     )
+    session.close()
     try:
         response = llm.complete(LlmRequest(question=bounded, evidence=evidence))
     except LlmUnavailableError:

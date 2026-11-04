@@ -106,6 +106,7 @@ def investigate_fraud(
         text=None,
         model=None,
     )
+    session.close()
     try:
         response = llm.complete(LlmRequest(question=bounded, evidence=evidence))
     except LlmUnavailableError:

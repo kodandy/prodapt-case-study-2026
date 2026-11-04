@@ -30,6 +30,7 @@ def ask(session: Session, scope: Scope, question: str, llm: LlmPort) -> Assistan
     """
     bounded = question[:MAX_QUESTION_CHARS]
     evidence = (*_decline_aggregates(session, scope), *_search_evidence(session, scope, bounded))
+    session.close()
     try:
         response = llm.complete(LlmRequest(question=bounded, evidence=evidence))
     except LlmUnavailableError:

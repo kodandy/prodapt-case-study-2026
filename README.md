@@ -152,8 +152,9 @@ Settings come from environment variables. Copy `.env.example` to `.env` and fill
 | `OPS_AI_JWT_PUBLIC_KEY_PEM` | Matching public key. ops-ai refuses to start without it |
 | `GATEWAY_SECRETS_DIR`, `OPS_AI_SECRETS_DIR` | Optional directory with one file per setting (used by compose with the `demo-secrets` volume) |
 | `GATEWAY_TOTP_ENCRYPTION_KEY` | Reserved for staff login with TOTP (not in the thin slice yet) |
-| `OPENAI_API_KEY` | Empty means the mock LLM is used |
-| `OPENAI_CHAT_MODEL`, `OPENAI_FALLBACK_MODEL`, `OPENAI_EMBEDDING_MODEL` | Model names when a key is set (`text-embedding-3-small` for embeddings) |
+| `OPENAI_API_KEY` | Empty means the mock LLM is used. Set, the assistant narrates through the OpenAI Responses API (20 s budget, one fallback model, then the deterministic fallback answer) |
+| `OPENAI_CHAT_MODEL`, `OPENAI_FALLBACK_MODEL`, `OPENAI_EMBEDDING_MODEL` | Model names when a key is set: pinned snapshots `gpt-4.1-mini-2025-04-14` and `gpt-4.1-nano-2025-04-14` by default, an empty fallback means none, `text-embedding-3-small` for embeddings |
+| `OPENAI_BASE_URL` | API base URL (default `https://api.openai.com/v1`; tests point it at a local fake server) |
 
 Secrets are never logged. SQL errors hide bound parameters, and settings validation errors do not echo input values.
 
@@ -197,8 +198,16 @@ These were found by the Day 1 audit and are planned:
   identical 401 on login.
 - No password rehash on login when the argon2 parameters change.
 - `bootstrap_user` replaces the password of an existing id, so it is for the demo database only.
-- Before a real LLM is attached, output guards are needed (no split or structuring advice, no numbers absent from the
-  evidence), along with data minimisation for the evidence sent to it.
+- The OpenAI adapter is in place and runs only when `OPENAI_API_KEY` is set, but output guards are not (no split or
+  structuring advice, no numbers absent from the evidence, and cited `[ref]`s are not checked against the evidence
+  refs). Before sending it masks Luhn-valid card numbers, strips evidence tags and caps sizes, but sends no less data
+  than that. It has been tested against a local fake server only, not the real API.
+- Card masking is a heuristic: a card number written with separators other than space, tab, `-`, `.`, `/` or `_`
+  (such as `,`, `:` or `|`), or with more than three of them between digits, reaches the model unmasked.
+- LLM failures are silent: the route falls back to the deterministic answer with no reason-code log or counter.
+- `decline_code`, `provider` and `card_bin` have no format pattern in the event contract.
+- `OPENAI_API_KEY` reaches the container as a plain environment variable, and `database_url` is a plain string in the
+  ops-ai settings (not a secret type).
 - User tokens cannot be revoked before they expire (15 minutes).
 - The transfer system is a fixture (`scripts/transfer_fixture.py`) loaded by the seed. There is no transfer execution,
   no stream event for transfers, and no FX.

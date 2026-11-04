@@ -64,6 +64,7 @@ def investigate_transfer(
         text=None,
         model=None,
     )
+    session.close()
     try:
         response = llm.complete(LlmRequest(question=question[:MAX_QUESTION_CHARS], evidence=evidence))
     except LlmUnavailableError:
