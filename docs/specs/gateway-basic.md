@@ -47,6 +47,14 @@ Route `GET /v1/payments` (Bearer API key) query `limit` (1–100, default 20; ou
 (one of the payment states; else 422) → 200 `{"items": [...], "next_cursor": str | null}`. Missing/invalid key → 401.
 Invalid cursor → 400 `{"detail": "invalid cursor"}`.
 
+`get_payment(session, merchant_id, payment_id) -> PaymentSummary` (B8.1): the same summary as a `list_payments` item.
+Another merchant's payment or an unknown id → `PaymentNotFoundError` (from `gateway.payments.disputes`), so the two
+cannot be told apart.
+
+Route `GET /v1/payments/{payment_id}` (Bearer API key) → 200 `PaymentSummary`; another merchant's or unknown → 404
+`{"detail": "payment not found"}`; a `payment_id` that is not a UUID → 422; missing/invalid key → 401. The 200 and
+the 404 carry `Cache-Control: no-store`.
+
 ### Refunds — `gateway/payments/refunds.py`
 
 Table `refunds`: `id`, `payment_id` (FK), `merchant_id` (FK), `amount_minor`, `currency`, `state` (`succeeded`),

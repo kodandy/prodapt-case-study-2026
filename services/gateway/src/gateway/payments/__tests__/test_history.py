@@ -10,7 +10,8 @@ from gateway.accounts.service import create_merchant
 from gateway.app import GatewayAppDeps, create_app
 from gateway.clock import FixedClock
 from gateway.payments.charge import ChargeDeps, charge_card
-from gateway.payments.history import InvalidCursorError, PaymentPage, list_payments
+from gateway.payments.disputes import PaymentNotFoundError
+from gateway.payments.history import InvalidCursorError, PaymentPage, get_payment, list_payments
 from gateway.payments.providers.simulator.provider import SimulatorProvider
 from gateway.payments.schemas import CardSummary, ChargeRequest, PaymentSummary
 from gateway.payments.state import PaymentState
@@ -559,3 +560,225 @@ def test_get_payments_with_an_invalid_cursor_returns_400_invalid_cursor(
     # Assert
     assert response.status_code == 400
     assert response.json() == {"detail": "invalid cursor"}
+
+
+# --- get_payment ---------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("pan", "expected_state"),
+    [(APPROVE_PAN, "succeeded"), (DECLINED_PAN, "declined")],
+    ids=["approved_card_payment", "declined_payment"],
+)
+def test_get_payment_returns_the_same_summary_as_the_matching_list_payments_item(
+    session_factory: sessionmaker[Session], clock: FixedClock, pan: str, expected_state: str
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    payment_id = _charge(h, pan=pan, amount_minor=2500, currency="EUR")
+
+    # Act
+    with session_factory() as session:
+        summary = get_payment(session, h.merchant_id, payment_id)
+        listed = list_payments(session, h.merchant_id).items
+
+    # Assert
+    assert listed == [summary]
+    assert (summary.payment_id, summary.state) == (payment_id, expected_state)
+
+
+def test_get_payment_of_an_approved_card_payment_carries_bin_and_last4(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    payment_id = _charge(h, amount_minor=2500, currency="EUR")
+
+    # Act
+    with session_factory() as session:
+        summary = get_payment(session, h.merchant_id, payment_id)
+
+    # Assert
+    assert summary == PaymentSummary(
+        payment_id=payment_id,
+        state="succeeded",
+        amount_minor=2500,
+        currency="EUR",
+        method="card",
+        card=CardSummary(bin="424242", last4="4242"),
+        decline_code=None,
+        refunded_minor=0,
+        disputed_minor=0,
+        chargeback_minor=0,
+        created_at=clock(),
+    )
+
+
+def test_get_payment_of_another_merchants_payment_raises_payment_not_found_error(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    other = _harness(session_factory, clock, deps=h.deps, name="Other")
+    others_payment = _charge(other)
+
+    # Act / Assert
+    with session_factory() as session, pytest.raises(PaymentNotFoundError):
+        get_payment(session, h.merchant_id, others_payment)
+
+
+def test_get_payment_with_an_unknown_id_raises_payment_not_found_error(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    _charge(h)
+
+    # Act / Assert
+    with session_factory() as session, pytest.raises(PaymentNotFoundError):
+        get_payment(session, h.merchant_id, uuid.uuid4())
+
+
+# --- GET /v1/payments/{payment_id} ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [{}, {"Authorization": "Bearer sk_test_unknown"}, {"Authorization": "Basic c2tfdGVzdF94Og=="}],
+    ids=["no_auth", "unknown_bearer_key", "not_a_bearer_scheme"],
+)
+def test_get_payment_by_id_without_a_valid_api_key_returns_401(
+    session_factory: sessionmaker[Session], clock: FixedClock, headers: dict[str, str]
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    payment_id = _charge(h)
+    client = _client(h)
+
+    # Act
+    response = client.get(f"/v1/payments/{payment_id}", headers=headers)
+
+    # Assert
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize("pan", [APPROVE_PAN, DECLINED_PAN], ids=["approved", "declined"])
+def test_get_payment_by_id_returns_200_equal_to_the_list_item_with_no_store(
+    session_factory: sessionmaker[Session], clock: FixedClock, pan: str
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    payment_id = _charge(h, pan=pan)
+    client = _client(h)
+    listed = client.get("/v1/payments", headers=h.auth).json()["items"]
+
+    # Act
+    response = client.get(f"/v1/payments/{payment_id}", headers=h.auth)
+
+    # Assert
+    assert response.status_code == 200
+    assert response.json() == listed[0]
+    assert response.json()["payment_id"] == str(payment_id)
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_get_payment_by_id_for_an_approved_card_payment_returns_the_full_summary_json(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    payment_id = _charge(h, amount_minor=2500, currency="EUR")
+    client = _client(h)
+
+    # Act
+    response = client.get(f"/v1/payments/{payment_id}", headers=h.auth)
+
+    # Assert
+    body = response.json()
+    assert response.status_code == 200
+    assert body == {
+        "payment_id": str(payment_id),
+        "state": "succeeded",
+        "amount_minor": 2500,
+        "currency": "EUR",
+        "method": "card",
+        "card": {"bin": "424242", "last4": "4242"},
+        "decline_code": None,
+        "refunded_minor": 0,
+        "disputed_minor": 0,
+        "chargeback_minor": 0,
+        "created_at": body["created_at"],
+    }
+
+
+def test_get_payment_by_id_returns_identical_404_for_another_merchants_and_an_unknown_payment(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    other = _harness(session_factory, clock, deps=h.deps, name="Other")
+    others_payment = _charge(other)
+    client = _client(h)
+
+    # Act
+    foreign = client.get(f"/v1/payments/{others_payment}", headers=h.auth)
+    unknown = client.get(f"/v1/payments/{uuid.uuid4()}", headers=h.auth)
+
+    # Assert
+    assert (foreign.status_code, unknown.status_code) == (404, 404)
+    assert foreign.json() == {"detail": "payment not found"}
+    assert unknown.json() == foreign.json()
+    assert foreign.headers["Cache-Control"] == "no-store"
+    assert unknown.headers["Cache-Control"] == "no-store"
+
+
+def test_get_payment_by_id_with_a_non_uuid_id_returns_422(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    client = _client(h)
+
+    # Act
+    response = client.get("/v1/payments/not-a-uuid", headers=h.auth)
+
+    # Assert
+    assert response.status_code == 422
+
+
+def test_get_payment_by_id_404s_for_another_merchants_and_an_unknown_payment_have_identical_headers(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    other = _harness(session_factory, clock, deps=h.deps, name="Other")
+    others_payment = _charge(other)
+    client = _client(h)
+
+    # Act
+    foreign = client.get(f"/v1/payments/{others_payment}", headers=h.auth)
+    unknown = client.get(f"/v1/payments/{uuid.uuid4()}", headers=h.auth)
+
+    # Assert
+    assert (foreign.status_code, unknown.status_code) == (404, 404)
+    assert dict(foreign.headers) == dict(unknown.headers)
+    assert foreign.headers["Pragma"] == "no-cache"
+    assert unknown.headers["Pragma"] == "no-cache"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [{}, {"Authorization": "Bearer sk_test_unknown"}, {"Authorization": "Basic c2tfdGVzdF94Og=="}],
+    ids=["no_auth", "unknown_bearer_key", "not_a_bearer_scheme"],
+)
+def test_get_payment_by_id_with_a_non_uuid_id_and_no_valid_api_key_returns_401_not_422(
+    session_factory: sessionmaker[Session], clock: FixedClock, headers: dict[str, str]
+) -> None:
+    # Arrange
+    client = _client(_harness(session_factory, clock))
+
+    # Act
+    response = client.get("/v1/payments/not-a-uuid", headers=headers)
+
+    # Assert
+    assert response.status_code == 401

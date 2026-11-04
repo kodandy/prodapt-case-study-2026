@@ -74,7 +74,7 @@ Paths are planned locations from `docs/architecture-detail.md` §1; they are fix
 
 | ID | Sub-requirement | Acceptance criterion | Satisfied by (code) | Verified by (test) | Phase | Status |
 |---|---|---|---|---|---|---|
-| B8.1 | REST API | `POST /v1/payments`, `GET /v1/payments/{id}`, `GET /v1/payments`, refunds; merchant API key auth (stored hashed) | `gw/merchant_api/rest/` | `gw/merchant_api/__tests__/` | 2 | Planned |
+| B8.1 | REST API | `POST /v1/payments`, `GET /v1/payments/{id}`, `GET /v1/payments`, refunds; merchant API key auth (stored hashed) | `gw/app.py`, `gw/payments/history.py` (`get_payment`, `list_payments`), `gw/payments/refunds.py`, `gw/accounts/service.py` (HMAC-SHA256 key hash) | `gw/payments/__tests__/test_charge.py`, `gw/payments/__tests__/test_history.py`, `gw/payments/__tests__/test_refunds.py` | 2 | Done |
 | B8.2 | gRPC API | `CreatePayment` / `GetPayment` / `ListPayments` call the same domain service as REST | `gw/merchant_api/grpc/` | `gw/merchant_api/__tests__/` | 2 | Planned |
 | B8.3 | Input validation guardrails (API) | Invalid currency, amount, card (Luhn / non-test PAN), oversize fields → field-level errors on both REST and gRPC, from one validation module | `gw/merchant_api/` | `gw/merchant_api/__tests__/` | 2 | Planned |
 | B8.4 | Idempotency enforcement | `Idempotency-Key` header (REST) / `idempotency-key` metadata (gRPC); lost-response replay returns the stored response; same key + different body → 422; concurrency proof in P0-1 | `gw/payments/idempotency/` | `gw/payments/idempotency/__tests__/` | 2 | Planned |
