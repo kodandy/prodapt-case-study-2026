@@ -37,6 +37,12 @@ from gateway.accounts.sessions import (
     issue_session_token,
     verify_session_token,
 )
+from gateway.accounts.throttle import (
+    AccountLockedError,
+    lock_retry_after,
+    record_password_failure,
+    settle_login_success,
+)
 from gateway.accounts.tokens import (
     MERCHANT_TOKEN_TTL_SECONDS,
     USER_TOKEN_TTL_SECONDS,
@@ -65,6 +71,7 @@ from gateway.payments.schemas import (
     RefundRequest,
 )
 from gateway.payments.state import PaymentState
+from gateway.wallets.history import TransferHistoryItem, list_transfers
 from gateway.wallets.service import WalletBalanceView, list_wallets, transfer
 
 LOGIN_CONCURRENCY = 4
@@ -151,6 +158,11 @@ class PaymentListResponse(BaseModel):
     next_cursor: str | None
 
 
+class TransferHistoryResponse(BaseModel):
+    items: list[TransferHistoryItem]
+    next_cursor: str | None
+
+
 def create_app(deps: GatewayAppDeps) -> FastAPI:
     """Routes:
     - POST /v1/signup {email, password} → 201 {user_id, wallet_account_id}; duplicate email → 409.
@@ -176,6 +188,9 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     - POST /v1/me/transfers (Bearer session, Idempotency-Key required) body TransferRequest → TransferOutcome
       status/body (201 / 404 recipient_not_found / 409 insufficient_funds / 422 self_transfer or key
       reused), all with Cache-Control: no-store. Same currency only; FX is Design.
+    - GET /v1/me/transfers?limit&cursor (Bearer session) → 200 {items, next_cursor}: the user's sent and
+      received transfers, newest first, counterparty email masked; invalid cursor → 400. All with
+      Cache-Control: no-store.
     - GET /v1/payments?limit&cursor&state (Bearer API key) → 200 {items, next_cursor}: the merchant's
       payments, newest first. Invalid cursor → 400.
     - GET /v1/payments/{payment_id}/risk (Bearer API key) → 200 PaymentRiskView (flags only); unknown or
@@ -205,30 +220,51 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid api key")
         return merchant_id
 
-    def check_password(body: SignUpRequest) -> uuid.UUID:
-        """The user id on a password success. Unknown email and wrong password take the same argon2 path and
-        the identical 401; a known user's failure is audited. 503 when no login slot is free."""
+    def check_password(body: SignUpRequest) -> tuple[uuid.UUID, bool]:
+        """The user id and whether TOTP is enabled, on a password success. Unknown email and wrong password
+        take the same argon2 path and the identical 401; a known user's failure is audited and counted. A
+        locked account (Decision 7) gets 429 before any slot or argon2 work, again once it holds a slot, and
+        after argon2 if another request locked it meanwhile. 503 when no login slot is free."""
         with session_factory() as session:
             record = find_login(session, body.email)
+            now = deps.charge.clock()
+            locked = None if record is None else lock_retry_after(session, record.user_id, now)
+        if locked is not None:
+            raise too_many_attempts(locked)
         if not login_slots.acquire(timeout=LOGIN_SLOT_WAIT_SECONDS):
             raise HTTPException(
                 status.HTTP_503_SERVICE_UNAVAILABLE, "try again later", headers={"Retry-After": "1"}
             )
         try:
+            if record is not None:
+                with session_factory() as session:
+                    locked = lock_retry_after(session, record.user_id, deps.charge.clock())
+                if locked is not None:
+                    raise too_many_attempts(locked)
             user_id = verify_login(record, body.password.get_secret_value())
         finally:
             login_slots.release()
-        if user_id is None:
-            if record is not None:
-                write_user_audit(record.user_id, "auth.login_failed", {"factor": "password"})
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
-        return user_id
+        try:
+            if user_id is None:
+                if record is not None:
+                    with session_factory.begin() as session:
+                        record_password_failure(session, record.user_id, deps.charge.clock())
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
+            with session_factory.begin() as session:
+                settle_login_success(session, user_id, deps.charge.clock())
+                needs_otp = totp_enabled(session, user_id)
+        except AccountLockedError as lock:
+            raise too_many_attempts(lock.retry_after) from None
+        return user_id, needs_otp
 
-    def second_factor(user_id: uuid.UUID, totp_code: SecretStr | None) -> tuple[str, ...]:
-        """amr after a password success; a user with TOTP enabled must also pass the code check. The flag is
-        read only now, after argon2, so an enrolment confirmed during the password check is not missed."""
-        with session_factory() as session:
-            needs_otp = totp_enabled(session, user_id)
+    def too_many_attempts(retry_after: int) -> HTTPException:
+        return HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS, "too many attempts", headers={"Retry-After": str(retry_after)}
+        )
+
+    def second_factor(user_id: uuid.UUID, needs_otp: bool, totp_code: SecretStr | None) -> tuple[str, ...]:
+        """amr after a password success; a user with TOTP enabled must also pass the code check.
+        `check_password` reads `needs_otp` after argon2, so an enrolment confirmed meanwhile is not missed."""
         if not needs_otp:
             return (AMR_FIRST_FACTOR,)
         if deps.totp_encryption_key is None:
@@ -317,8 +353,8 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     def user_tokens(body: UserTokenRequest, response: Response) -> UserTokenResponse:
         if deps.jwt_private_key_pem is None:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "token issuing not configured")
-        user_id = check_password(body)
-        second_factor(user_id, body.totp_code)
+        user_id, needs_otp = check_password(body)
+        second_factor(user_id, needs_otp, body.totp_code)
         token = issue_user_token(deps.jwt_private_key_pem, user_id, deps.charge.clock())
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
@@ -328,8 +364,8 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     def create_session(body: SessionRequest, response: Response) -> SessionResponse:
         if deps.jwt_private_key_pem is None:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "token issuing not configured")
-        user_id = check_password(body)
-        amr = second_factor(user_id, body.totp_code)
+        user_id, needs_otp = check_password(body)
+        amr = second_factor(user_id, needs_otp, body.totp_code)
         token = issue_session_token(deps.jwt_private_key_pem, user_id, deps.charge.clock(), amr)
         write_user_audit(user_id, "auth.login", {"amr": list(amr)})
         response.headers["Cache-Control"] = "no-store"
@@ -378,6 +414,23 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         response.headers["Pragma"] = "no-cache"
         with session_factory() as session:
             return WalletListResponse(items=list_wallets(session, user_id))
+
+    @app.get("/v1/me/transfers")
+    def my_transfers(
+        user_id: Annotated[uuid.UUID, Depends(session_user)],
+        response: Response,
+        limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+        cursor: Annotated[str | None, Query(max_length=512)] = None,
+    ) -> TransferHistoryResponse:
+        try:
+            with session_factory() as session:
+                page = list_transfers(session, user_id, limit, cursor)
+        except InvalidCursorError:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "invalid cursor", headers=NO_STORE_HEADERS
+            ) from None
+        response.headers.update(NO_STORE_HEADERS)
+        return TransferHistoryResponse(items=page.items, next_cursor=page.next_cursor)
 
     @app.post("/v1/me/transfers")
     def create_transfer(

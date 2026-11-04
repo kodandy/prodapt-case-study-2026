@@ -104,8 +104,13 @@ def test_login_concurrency_is_4_and_the_slot_wait_is_2_seconds() -> None:
 @pytest.mark.parametrize(
     ("email", "password", "expected_status", "expected_events"),
     [
-        (EMAIL, PASSWORD, 201, ["session_close", "argon2_verify", "session_close"]),
-        (EMAIL, "wrong-password-xyz", 401, ["session_close", "argon2_verify", "session_close"]),
+        (EMAIL, PASSWORD, 201, ["session_close", "session_close", "argon2_verify", "session_close"]),
+        (
+            EMAIL,
+            "wrong-password-xyz",
+            401,
+            ["session_close", "session_close", "argon2_verify", "session_close"],
+        ),
         ("nobody@example.com", PASSWORD, 401, ["session_close", "argon2_verify"]),
     ],
     ids=["correct_login", "wrong_password", "unknown_email"],

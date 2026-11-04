@@ -42,7 +42,7 @@ def list_payments(
     if state is not None:
         query = query.where(Payment.state == state)
     if cursor is not None:
-        created_at, payment_id = _decode_cursor(cursor)
+        created_at, payment_id = decode_cursor(cursor)
         query = query.where(tuple_(Payment.created_at, Payment.id) < tuple_(created_at, payment_id))
     rows = session.execute(
         query.order_by(Payment.created_at.desc(), Payment.id.desc()).limit(limit + 1)
@@ -67,17 +67,17 @@ def list_payments(
     next_cursor = None
     if len(rows) > limit:
         last = page[-1][0]
-        next_cursor = _encode_cursor(last.created_at, last.id)
+        next_cursor = encode_cursor(last.created_at, last.id)
     return PaymentPage(items=items, next_cursor=next_cursor)
 
 
-def _encode_cursor(created_at: datetime, payment_id: uuid.UUID) -> str:
+def encode_cursor(created_at: datetime, payment_id: uuid.UUID) -> str:
     return base64.urlsafe_b64encode(
         f"{created_at.astimezone(UTC).isoformat()}|{payment_id}".encode()
     ).decode()
 
 
-def _decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
+def decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
     try:
         raw = base64.urlsafe_b64decode(cursor.encode()).decode()
         created_text, id_text = raw.split("|")
