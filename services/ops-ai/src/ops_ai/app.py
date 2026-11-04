@@ -20,6 +20,7 @@ from ops_ai.fraud_watch.service import FraudCause, FraudIntent, investigate_frau
 from ops_ai.investigation.service import CauseLabel, Intent, investigate
 from ops_ai.investigation.tools import FailureAggregate
 from ops_ai.scope import Principal, Scope, UserScope
+from ops_ai.search.embedder import Embedder, LocalHashEmbedder
 from ops_ai.settlement.service import explain_payout
 from ops_ai.settlement.statement import LineKind
 from ops_ai.transfers import (
@@ -43,6 +44,7 @@ class OpsAiAppDeps:
     jwt_public_key_pem: str
     clock: Clock
     readiness: Callable[[], list[str]] = field(default=_always_ready)
+    embedder: Embedder = field(default_factory=LocalHashEmbedder)
 
 
 class AskRequest(BaseModel):
@@ -349,7 +351,7 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
     @app.post("/v1/assistant/ask")
     def assistant_ask(body: AskRequest, scope: Annotated[Scope, Depends(merchant_scope)]) -> AskResponse:
         with deps.session_factory() as session:
-            answer = ask(session, scope, body.question, deps.llm)
+            answer = ask(session, scope, body.question, deps.llm, deps.embedder)
         return AskResponse(
             mode=answer.mode,
             text=answer.text,

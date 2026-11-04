@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from ops_ai.clock import Clock
 from ops_ai.fraud_watch.watch import watch_payment
 from ops_ai.ingest.models import PaymentFact, ProcessedEvent
+from ops_ai.search.embedder import LocalHashEmbedder, document_text, is_zero
 from ops_ai.search.models import SearchDocument
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 PAYMENT_FACTS_GROUP = "ops-ai.payment-facts"
 PAYMENTS_DEAD_LETTER_TOPIC = "gw.payments.v1.dead"
 DEAD_LETTER_MAXLEN = 10_000
+_LOCAL_EMBEDDER = LocalHashEmbedder()
 
 
 def ensure_group(redis: Redis, stream: str, group: str) -> None:
@@ -31,8 +33,9 @@ def ensure_group(redis: Redis, stream: str, group: str) -> None:
 
 
 def apply_payment_event(session: Session, clock: Clock, event: PaymentEventV1) -> bool:
-    """Upserts payment_facts (highest entity_version wins) and the payment search document, then runs
-    the card-testing watch on the projected payment.
+    """Upserts payment_facts (highest entity_version wins) and the payment search document (with its
+    local-hash-v1 embedding; other embedders' columns are filled by `python -m ops_ai.search backfill`),
+    then runs the card-testing watch on the projected payment.
 
     Dedupes on processed_events(consumer, event_id) in the same transaction. Returns False for a duplicate.
     Does not commit.
@@ -72,13 +75,17 @@ def apply_payment_event(session: Session, clock: Clock, event: PaymentEventV1) -
     session.execute(
         insert(PaymentFact).values(**fact).on_conflict_do_update(index_elements=["payment_id"], set_=fact)
     )
+    title = f"Card payment {event.state}"
+    body = _payment_body(event)
+    [embedding] = _LOCAL_EMBEDDER.embed([document_text(title, body)])
     document = {
         "kind": "payment",
         "ref_id": event.payment_id,
         "merchant_id": event.merchant_id,
-        "title": f"Card payment {event.state}",
-        "body": _payment_body(event),
+        "title": title,
+        "body": body,
         "occurred_at": event.occurred_at,
+        "embedding_local_hash_v1": None if is_zero(embedding) else embedding,
     }
     session.execute(
         insert(SearchDocument)

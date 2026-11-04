@@ -159,11 +159,11 @@ def test_the_constraints_migration_follows_the_settlement_entries_migration() ->
     script = ScriptDirectory.from_config(_ops_ai_config())
 
     # Act
-    head = script.get_revision(script.get_current_head() or "")
+    constraints = script.get_revision("a3f7c9e15b28")
 
     # Assert
-    assert head.revision != SETTLEMENT_ENTRIES_REVISION
-    assert head.down_revision == SETTLEMENT_ENTRIES_REVISION
+    assert constraints.revision != SETTLEMENT_ENTRIES_REVISION
+    assert constraints.down_revision == SETTLEMENT_ENTRIES_REVISION
 
 
 def test_migration_downgrade_drops_the_three_constraints_and_upgrade_restores_them(engine: Engine) -> None:
