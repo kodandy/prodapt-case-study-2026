@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 from gateway.accounts.mfa import confirm_totp
 from gateway.accounts.service import sign_up
+from gateway.accounts.throttle import LOGIN_MAX_FAILURES
 from gateway.app import GatewayAppDeps, create_app
 from gateway.clock import FixedClock
 from gateway.payments.charge import ChargeDeps
@@ -564,7 +565,7 @@ def test_user_tokens_with_a_wrong_password_neither_counts_a_totp_failure_nor_bur
     wrong_code = _wrong_code(secret, clock)
     for _ in range(MAX_FAILURES + 1):
         _user_token(client, password=WRONG_PASSWORD, totp_code=wrong_code)
-    for _ in range(MAX_FAILURES + 1):
+    for _ in range(LOGIN_MAX_FAILURES - 1 - (MAX_FAILURES + 1)):
         _user_token(client, password=WRONG_PASSWORD, totp_code=code)
 
     # Act

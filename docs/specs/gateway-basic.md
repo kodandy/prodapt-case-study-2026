@@ -202,11 +202,11 @@ factor and a wallet read. `/v1/user-tokens` asks for the same second factor as `
 4. **Lockout** on the second factor: `TOTP_MAX_FAILURES = 5` consecutive wrong codes (verify or login) lock TOTP
    for `TOTP_LOCKOUT = 15 minutes`; only a success resets the counter, so after a lock expires one more wrong
    code locks again (audit M1: the budget does not refill every 15 minutes). While locked, every TOTP check fails
-   with `TotpLockedError` even for a correct code. A stored secret that fails to decrypt answers 503. Password-only brute force stays bounded by the existing login
-   semaphore; per-IP / per-email throttling is Design.
+   with `TotpLockedError` even for a correct code. A stored secret that fails to decrypt answers 503. Password brute force on one account is
+   throttled by Decision 7; per-IP throttling (credential stuffing across accounts) is Design.
 5. **Audit** (append-only `audit_log`, actor `user:<id>`, role `consumer`): `auth.login` (success, summary `amr`),
    `auth.login_failed` (known user only, summary `{"factor": "password" | "totp"}`), `mfa.totp_enrolled`,
-   `mfa.totp_enabled`, `mfa.totp_locked`. Unknown emails write nothing (no raw email in the audit log). Secrets,
+   `mfa.totp_enabled`, `mfa.totp_locked`, `auth.login_locked` (Decision 7, summary `{}`). Unknown emails write nothing (no raw email in the audit log). Secrets,
    codes and passwords are never in a summary.
 6. **`/v1/user-tokens` requires TOTP once it is enabled** (user decision 2026-11-04). Before, a password alone
    issued an ops-ai token for a user with TOTP on, which bypassed MFA for the ops-ai scope. The route now runs the
@@ -219,6 +219,38 @@ factor and a wallet read. `/v1/user-tokens` asks for the same second factor as `
    2026-11-04). A wrong password for a known user writes `auth.login_failed {"factor": "password"}`, as on
    `/v1/sessions` (user decision 2026-11-04). An ops-ai token issued before TOTP was enabled stays valid until
    it expires (at most 900 s); ops-ai tokens cannot be revoked.
+7. **Per-account password throttle** (user decision 2026-11-04: per account, Postgres, 10 failures in 15
+   minutes → 15 minutes of 429). One counter per known user, shared by `/v1/sessions` and `/v1/user-tokens`.
+   - A wrong password for a known user adds one failure. The window starts at the first failure; a failure
+     after `LOGIN_FAILURE_WINDOW = 15 minutes` starts a new window at 1.
+   - The failure that reaches `LOGIN_MAX_FAILURES = 10` sets `locked_until = now + LOGIN_LOCKOUT (15 minutes)`
+     and writes `auth.login_locked` (summary `{}`); that request itself still answers the identical 401.
+   - While locked, the route answers 429 `{"detail": "too many attempts"}` with `Retry-After` (whole seconds
+     left, at least 1) before taking a login slot or running argon2, so a correct password also gets 429 and
+     the response does not reveal whether it was correct. Locked requests add no failure and write no audit.
+   - The lock is checked again after the request gets a login slot, right before argon2 (security review
+     2026-11-04): requests that passed the first check while waiting for a slot (the route is sync, so up to
+     the threadpool width can wait) get the same 429 once the lock exists and run no argon2.
+   - A request that finishes argon2 after another request locked the account gets the same 429, whatever its
+     password: its failure is not counted or audited, and a correct password does not reset the lock or get a
+     token (security review 2026-11-04). The row is read under a row lock for this decision.
+   - After the lock expires the counter starts again from 0 (a new window); a password success resets it.
+   - The failure count and the `auth.login_failed` audit row are written in one transaction. A success resets
+     the row only when it has failures, so a login with no prior failures writes nothing extra.
+   - Unknown emails are not throttled (there is no account to count against) and still write nothing.
+   - Residuals: a 429 reveals that the email is registered (`/v1/signup` already does). Each single answer is
+     the same for an unknown and a known email, but an attacker who sends 11 wrong passwords sees a known email
+     turn 401 → 429 while an unknown one stays 401 (red-team RT-001, LOW; only per-IP throttling, which is
+     Design, removes it). A wrong password for a known email also writes the throttle and audit rows, which an
+     unknown email does not; the response-time difference this could leak has not been measured. Requests
+     already past the slot re-check when the lock starts run argon2 (at most `LOGIN_CONCURRENCY` per app process) but are
+     answered 429; anyone who knows the email can keep the account locked by sending 10 wrong passwords every
+     15 minutes; replacing a password (`set_password`) does not clear the throttle row.
+
+### Data — `gateway.login_throttle` (`gateway/accounts/models.py: LoginThrottle`)
+
+`user_id` (PK, FK users), `failed_attempts` (int ≥ 0, default 0), `window_started_at` (nullable),
+`locked_until` (nullable), `updated_at`. Added by an additive migration; no existing table changes.
 
 ### Data — `gateway.user_totp` (`gateway/accounts/models.py: UserTotp`)
 
@@ -262,6 +294,8 @@ factor and a wallet read. `/v1/user-tokens` asks for the same second factor as `
   amr}` with `Cache-Control: no-store`.
   - Unknown email or wrong password → 401 `{"detail": "invalid credentials"}` (identical, same semaphore path as
     `/v1/user-tokens`, 503 + `Retry-After: 1` when no slot).
+  - Account throttled (Decision 7) → 429 `{"detail": "too many attempts"}` + `Retry-After`; same on
+    `/v1/user-tokens`.
   - TOTP enabled and `totp_code` absent → 401 `{"detail": "mfa required"}`; wrong / replayed code → 401
     `{"detail": "invalid credentials"}`; locked → 423 `{"detail": "mfa locked"}`.
   - TOTP not enabled → `amr ["pwd"]` (a supplied `totp_code` is ignored); enabled → `amr ["pwd", "otp"]`.

@@ -48,3 +48,16 @@ class UserTotp(GatewayBase):
     locked_until: Mapped[datetime | None]
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
+
+
+class LoginThrottle(GatewayBase):
+    """Per-account password-failure counter (spec B1 Decision 7, `gateway.accounts.throttle`)."""
+
+    __tablename__ = "login_throttle"
+    __table_args__ = (CheckConstraint("failed_attempts >= 0", name="failed_attempts_non_negative"),)
+
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    failed_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    window_started_at: Mapped[datetime | None]
+    locked_until: Mapped[datetime | None]
+    updated_at: Mapped[datetime]
