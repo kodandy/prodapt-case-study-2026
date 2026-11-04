@@ -5,7 +5,6 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
-from scripts.transfer_fixture import KYC_TIER_LIMITS_MINOR, TransferDecision, transfer_decision
 
 from scripts.generate_dataset import (
     CanonicalTransaction,
@@ -15,6 +14,7 @@ from scripts.generate_dataset import (
     Status,
     generate,
 )
+from scripts.transfer_fixture import KYC_TIER_LIMITS_MINOR, TransferDecision, transfer_decision
 
 TRANSFER_ID = uuid.UUID("5f1b7c2e-8d4a-4e6b-9a3c-0d2e4f6a8b10")
 XB_RULE = "xb_limit_kyc_tier1_v3"

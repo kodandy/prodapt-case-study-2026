@@ -102,8 +102,12 @@ def test_login_concurrency_is_4_and_the_slot_wait_is_2_seconds() -> None:
 
 
 @pytest.mark.parametrize(
-    ("email", "password", "expected_status"),
-    [(EMAIL, PASSWORD, 201), (EMAIL, "wrong-password-xyz", 401), ("nobody@example.com", PASSWORD, 401)],
+    ("email", "password", "expected_status", "expected_events"),
+    [
+        (EMAIL, PASSWORD, 201, ["session_close", "argon2_verify", "session_close"]),
+        (EMAIL, "wrong-password-xyz", 401, ["session_close", "argon2_verify", "session_close"]),
+        ("nobody@example.com", PASSWORD, 401, ["session_close", "argon2_verify"]),
+    ],
     ids=["correct_login", "wrong_password", "unknown_email"],
 )
 def test_the_route_closes_the_session_before_it_runs_the_argon2_verification(
@@ -113,6 +117,7 @@ def test_the_route_closes_the_session_before_it_runs_the_argon2_verification(
     email: str,
     password: str,
     expected_status: int,
+    expected_events: list[str],
 ) -> None:
     # Arrange
     client = _app(session_factory, clock)
@@ -137,7 +142,7 @@ def test_the_route_closes_the_session_before_it_runs_the_argon2_verification(
 
     # Assert
     assert response.status_code == expected_status
-    assert events == ["session_close", "argon2_verify"]
+    assert events == expected_events
 
 
 # --- drained slots: 503, no check, no token --------------------------------------------------------------

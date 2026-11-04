@@ -13,10 +13,11 @@ checks (no attempt row, the stored body, provider never called).
 """
 
 import threading
+import time
 import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from datetime import timedelta
 
 import pytest
@@ -39,6 +40,7 @@ DECLINED_PAN = "4000000000000002"
 HIGH_USD = 500_000
 PARALLEL_CHARGES = 8
 RACE_ROUNDS = 5
+HOLD_TIMEOUT_SECONDS = 30
 
 
 class CountingProvider:
@@ -62,6 +64,19 @@ class CountingProvider:
 
     def lookup(self, provider_key: str) -> ProviderResult | None:
         return self._inner.lookup(provider_key)
+
+
+class HoldingProvider(CountingProvider):
+    """Counts `charge` calls, then holds the answer until `release` is set, so siblings stay `created`."""
+
+    def __init__(self, inner: ProviderPort, release: threading.Event) -> None:
+        super().__init__(inner)
+        self._release = release
+
+    def charge(self, provider_key: str, amount_minor: int, currency: str, card: CardRef) -> ProviderResult:
+        if not self._release.wait(timeout=HOLD_TIMEOUT_SECONDS):
+            raise TimeoutError("provider was never released")
+        return super().charge(provider_key, amount_minor, currency, card)
 
 
 @dataclass(frozen=True)
@@ -148,6 +163,30 @@ def _charge_in_parallel(h: Harness, pan: str, amount_minor: int) -> list[ChargeO
         return [future.result(timeout=60) for future in futures]
 
 
+def _charge_in_parallel_held(
+    h: Harness, pan: str, amount_minor: int, release: threading.Event
+) -> list[ChargeOutcome]:
+    """Like `_charge_in_parallel`, but `release` (the event the provider waits on) is set only once every
+    charge has committed its payment row, i.e. has been scored in tx1 and is still unanswered."""
+    barrier = threading.Barrier(PARALLEL_CHARGES)
+
+    def worker(index: int) -> ChargeOutcome:
+        barrier.wait(timeout=30)
+        return _charge(h, pan=pan, amount_minor=amount_minor, key=f"parallel-{index}")
+
+    scored_query = "SELECT id FROM gateway.payments WHERE amount_minor = :amount"
+    deadline = time.monotonic() + HOLD_TIMEOUT_SECONDS
+    with ThreadPoolExecutor(max_workers=PARALLEL_CHARGES) as pool:
+        futures = [pool.submit(worker, index) for index in range(PARALLEL_CHARGES)]
+        try:
+            while len(_rows(h.session_factory, scored_query, amount=amount_minor)) < PARALLEL_CHARGES:
+                assert time.monotonic() < deadline, "not every charge was scored in time"
+                time.sleep(0.02)
+        finally:
+            release.set()
+        return [future.result(timeout=60) for future in futures]
+
+
 def _reasons(value: object) -> tuple[str, ...]:
     assert isinstance(value, list)
     return tuple(str(reason) for reason in value)
@@ -207,22 +246,34 @@ def test_parallel_high_amount_charges_on_a_card_with_two_declines_reach_the_prov
 
 
 @pytest.mark.parametrize("round_number", range(RACE_ROUNDS))
-def test_parallel_charges_on_a_clean_card_see_each_other_so_velocity_hits_exactly_as_in_a_sequence(
+def test_parallel_high_charges_on_an_approving_card_count_in_flight_siblings_as_declines(
     session_factory: sessionmaker[Session], clock: FixedClock, round_number: int
 ) -> None:
-    # Arrange: serially the earlier-payment counts are 0..7, so three charges see fewer than 3 and five see 3+
-    h = _harness(session_factory, clock)
+    # Arrange: Decision 7. The provider holds every answer until all 8 charges are scored, so each earlier
+    # sibling is still `created` and counts as a decline. In lock order the k-th charge sees k earlier ones:
+    # k=0,1 -> 0.40; k=2 -> 0.70 (recent_declines); k>=3 -> 1.00 (card_velocity too), blocked. Blocked rows
+    # are not declines, but the 3 in-flight ones keep the count at 3.
+    release = threading.Event()
+    base = _harness(session_factory, clock)
+    provider = HoldingProvider(SimulatorProvider(session_factory, clock), release)
+    h = replace(base, provider=provider, deps=replace(base.deps, provider=provider))
 
     # Act
-    outcomes = _charge_in_parallel(h, APPROVE_PAN, HIGH_USD)
+    outcomes = _charge_in_parallel_held(h, APPROVE_PAN, HIGH_USD, release)
 
     # Assert
     assert [outcome.status_code for outcome in outcomes] == [201] * PARALLEL_CHARGES
-    assert Counter(str(outcome.body["state"]) for outcome in outcomes) == {"succeeded": PARALLEL_CHARGES}
-    assert h.provider.calls == PARALLEL_CHARGES
+    assert Counter((outcome.body["state"], outcome.body["decline_code"]) for outcome in outcomes) == {
+        ("succeeded", None): 3,
+        ("declined", "risk_blocked"): PARALLEL_CHARGES - 3,
+    }
+    assert provider.calls == 3
     assert _assessments_of_amount(session_factory, HIGH_USD) == {
-        ("0.40", ("high_amount",), False, False, None): 3,
-        ("0.80", ("high_amount", "card_velocity"), True, False, None): PARALLEL_CHARGES - 3,
+        ("0.40", ("high_amount",), False, False, None): 2,
+        ("0.70", ("high_amount", "recent_declines"), True, False, None): 1,
+        ("1.00", ("high_amount", "card_velocity", "recent_declines"), True, True, "risk_blocked"): (
+            PARALLEL_CHARGES - 3
+        ),
     }
 
 

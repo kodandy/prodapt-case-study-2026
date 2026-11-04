@@ -24,12 +24,12 @@ from gateway.payments.models import Payment, PaymentAttempt
 from gateway.payments.providers.port import CardRef, ProviderPort, ProviderResult, ProviderTimeoutError
 from gateway.payments.risk import RISK_BLOCKED_DECLINE_CODE, assess_charge_risk
 from gateway.payments.schemas import CardSummary, ChargeRequest, ChargeResponse
+from gateway.payments.state import ATTEMPT_LEASE_SECONDS as ATTEMPT_LEASE_SECONDS
 from gateway.payments.state import FINALIZABLE_STATES, PaymentState
 from gateway.payments.tokenization.cards import card_fingerprint, derive_card_ref
 from gateway.payments.tokenization.vault import tokenize_card
 
 IDEMPOTENCY_WAIT_SECONDS = 5.0
-ATTEMPT_LEASE_SECONDS = 30
 REDIS_LOCK_MILLISECONDS = 10_000
 POLL_INTERVAL_SECONDS = 0.02
 ROUTE_CONFIG_VERSION = 1

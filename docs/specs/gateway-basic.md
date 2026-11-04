@@ -130,13 +130,21 @@ Routes (Bearer API key): `GET /v1/disputes/{dispute_id}` → 200 `DisputeView` o
    body. (Security audit LOW-3: no crash window between the decision and its record, no provider attribution.)
 4. **One card at a time** (red-team RT-001, audit MEDIUM-1). tx1 takes `pg_advisory_xact_lock` on the card
    fingerprint (`hashtextextended(fingerprint, 0)`) before counting, so concurrent charges on one card are scored
-   one after another and each sees the earlier ones. Known limit: a sibling still waiting on the provider is
-   counted for `card_velocity` but cannot yet count as a decline.
+   one after another and each sees the earlier ones. A sibling still waiting on the provider counts as a decline
+   (Decision 7).
 5. **Velocity reads the payment's own fingerprint** (audit MEDIUM-2). `payments.card_fingerprint` (the HMAC already
    stored on `card_tokens`) with index `(card_fingerprint, created_at)`; both counts come from one query bounded by
    the 60-minute window.
 6. The degraded-scoring policy (velocity lookup down → `risk_unavailable` / `degraded_scoring`) is Design: velocity
    and persistence share one database here, so a velocity failure fails the charge.
+7. **An in-flight sibling counts as a decline** (red-team R-1, user decision 2026-11-04). Before this, a burst of
+   parallel charges on one card was scored while every earlier sibling was still `created`, so none counted as a
+   decline and the whole burst reached the provider (20 of 20 with a 0.3 s provider; 3 when sent one by one).
+   `recent_declines` now also counts the card's payments in state `created` whose `created_at` is within
+   `IN_FLIGHT_WINDOW = timedelta(seconds=ATTEMPT_LEASE_SECONDS)` (30 s, inclusive of the window start) of `now`.
+   Older `created` rows are stale (a crash between tx1 and tx2) and stay uncounted, so they cannot block a card
+   for the whole decline window. `unknown` and `failed` stay uncounted. The trade-off: a legitimate burst of
+   parallel charges on one card scores as if its in-flight siblings had declined.
 
 ### `gateway/payments/risk.py`
 
@@ -149,7 +157,8 @@ Routes (Bearer API key): `GET /v1/disputes/{dispute_id}` → 200 `DisputeView` o
     merchant) created in the last `VELOCITY_WINDOW = 10 minutes` (inclusive of the window start).
   - `recent_declines` +0.30: at least `DECLINE_LIMIT = 2` earlier `declined` payments with the same fingerprint in the
     last `DECLINE_WINDOW = 60 minutes`, not counting risk-blocked ones (audit LOW-2: a block must not extend
-    itself).
+    itself), plus earlier `created` payments with the same fingerprint inside `IN_FLIGHT_WINDOW` (Decision 7).
+    `IN_FLIGHT_WINDOW` is exported from `risk.py`.
 - `flagged = score >= FLAG_THRESHOLD (0.50)`; `blocked = score >= BLOCK_THRESHOLD (0.90)`. No rule hit → score
   `Decimal("0.00")`, reasons `()`.
 
@@ -176,7 +185,7 @@ Routes (Bearer API key): `GET /v1/disputes/{dispute_id}` → 200 `DisputeView` o
 
 What already exists (SQ2): `POST /v1/signup` (argon2id, one USD wallet), `POST /v1/user-tokens` (an RS256 token
 for ops-ai, aud `ops-ai`, login semaphore and timing-equal failures). B1 adds a gateway-side session, TOTP as a second
-factor and a wallet read. `/v1/user-tokens` is unchanged (it does not ask for TOTP; noted as a gap).
+factor and a wallet read. `/v1/user-tokens` asks for the same second factor as `/v1/sessions` (Decision 6).
 
 ### Decisions
 
@@ -199,6 +208,17 @@ factor and a wallet read. `/v1/user-tokens` is unchanged (it does not ask for TO
    `auth.login_failed` (known user only, summary `{"factor": "password" | "totp"}`), `mfa.totp_enrolled`,
    `mfa.totp_enabled`, `mfa.totp_locked`. Unknown emails write nothing (no raw email in the audit log). Secrets,
    codes and passwords are never in a summary.
+6. **`/v1/user-tokens` requires TOTP once it is enabled** (user decision 2026-11-04). Before, a password alone
+   issued an ops-ai token for a user with TOTP on, which bypassed MFA for the ops-ai scope. The route now runs the
+   same second-factor check as `/v1/sessions`: same body field, same errors, same replay and lockout counter
+   (one budget across both routes), and the same `auth.login_failed {"factor": "totp"}` audit row on a wrong code.
+   A user without TOTP is unchanged: the password alone still issues the token, and a supplied `totp_code` is
+   ignored. The token's claims do not change (no `amr` is added, ops-ai is untouched). The request change is
+   additive: `totp_code` is optional. The TOTP-enabled flag is read after the password check succeeds, not
+   before argon2, so a login racing an enrolment confirm cannot use a stale "not enabled" read (security review
+   2026-11-04). A wrong password for a known user writes `auth.login_failed {"factor": "password"}`, as on
+   `/v1/sessions` (user decision 2026-11-04). An ops-ai token issued before TOTP was enabled stays valid until
+   it expires (at most 900 s); ops-ai tokens cannot be revoked.
 
 ### Data — `gateway.user_totp` (`gateway/accounts/models.py: UserTotp`)
 
@@ -246,6 +266,12 @@ factor and a wallet read. `/v1/user-tokens` is unchanged (it does not ask for TO
     `{"detail": "invalid credentials"}`; locked → 423 `{"detail": "mfa locked"}`.
   - TOTP not enabled → `amr ["pwd"]` (a supplied `totp_code` is ignored); enabled → `amr ["pwd", "otp"]`.
   - `totp_code` (if present) is a string of 1..16 chars, else 422.
+- `POST /v1/user-tokens` `{email, password, totp_code?}` → 201 `{access_token, token_type, expires_in}` as before
+  (Decision 6). Password failures keep the identical 401 and the same semaphore; a known user's wrong password
+  writes `auth.login_failed {"factor": "password"}` as on `/v1/sessions`. For a user with TOTP enabled:
+  `totp_code` absent → 401 `{"detail": "mfa required"}`; wrong / replayed code → 401
+  `{"detail": "invalid credentials"}`; locked → 423 `{"detail": "mfa locked"}`; no encryption key, or a secret
+  that fails to decrypt → 503. `totp_code` field rules as for `/v1/sessions`; other extra fields are still 422.
 - `POST /v1/me/mfa/totp` (Bearer session) → 201 `{secret, otpauth_uri}`, `Cache-Control: no-store`; 409 when
   already enabled; 503 without the encryption key.
 - `POST /v1/me/mfa/totp/verify` (Bearer session) `{code}` → 200 `{"totp_enabled": true}`; 400
