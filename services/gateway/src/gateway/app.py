@@ -71,6 +71,7 @@ from gateway.payments.schemas import (
     RefundRequest,
 )
 from gateway.payments.state import PaymentState
+from gateway.wallets.history import TransferHistoryItem, list_transfers
 from gateway.wallets.service import WalletBalanceView, list_wallets, transfer
 
 LOGIN_CONCURRENCY = 4
@@ -157,6 +158,11 @@ class PaymentListResponse(BaseModel):
     next_cursor: str | None
 
 
+class TransferHistoryResponse(BaseModel):
+    items: list[TransferHistoryItem]
+    next_cursor: str | None
+
+
 def create_app(deps: GatewayAppDeps) -> FastAPI:
     """Routes:
     - POST /v1/signup {email, password} → 201 {user_id, wallet_account_id}; duplicate email → 409.
@@ -182,6 +188,9 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     - POST /v1/me/transfers (Bearer session, Idempotency-Key required) body TransferRequest → TransferOutcome
       status/body (201 / 404 recipient_not_found / 409 insufficient_funds / 422 self_transfer or key
       reused), all with Cache-Control: no-store. Same currency only; FX is Design.
+    - GET /v1/me/transfers?limit&cursor (Bearer session) → 200 {items, next_cursor}: the user's sent and
+      received transfers, newest first, counterparty email masked; invalid cursor → 400. All with
+      Cache-Control: no-store.
     - GET /v1/payments?limit&cursor&state (Bearer API key) → 200 {items, next_cursor}: the merchant's
       payments, newest first. Invalid cursor → 400.
     - GET /v1/payments/{payment_id}/risk (Bearer API key) → 200 PaymentRiskView (flags only); unknown or
@@ -405,6 +414,23 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         response.headers["Pragma"] = "no-cache"
         with session_factory() as session:
             return WalletListResponse(items=list_wallets(session, user_id))
+
+    @app.get("/v1/me/transfers")
+    def my_transfers(
+        user_id: Annotated[uuid.UUID, Depends(session_user)],
+        response: Response,
+        limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+        cursor: Annotated[str | None, Query(max_length=512)] = None,
+    ) -> TransferHistoryResponse:
+        try:
+            with session_factory() as session:
+                page = list_transfers(session, user_id, limit, cursor)
+        except InvalidCursorError:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "invalid cursor", headers=NO_STORE_HEADERS
+            ) from None
+        response.headers.update(NO_STORE_HEADERS)
+        return TransferHistoryResponse(items=page.items, next_cursor=page.next_cursor)
 
     @app.post("/v1/me/transfers")
     def create_transfer(
