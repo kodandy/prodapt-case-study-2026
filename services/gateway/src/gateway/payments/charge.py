@@ -22,6 +22,7 @@ from gateway.payments.idempotency.models import IdempotencyRecord
 from gateway.payments.ledger.service import PostingLine, ensure_account, post_journal
 from gateway.payments.models import Payment, PaymentAttempt
 from gateway.payments.providers.port import CardRef, ProviderPort, ProviderResult, ProviderTimeoutError
+from gateway.payments.risk import RISK_BLOCKED_DECLINE_CODE, assess_charge_risk
 from gateway.payments.schemas import CardSummary, ChargeRequest, ChargeResponse
 from gateway.payments.state import FINALIZABLE_STATES, PaymentState
 from gateway.payments.tokenization.cards import card_fingerprint, derive_card_ref
@@ -52,7 +53,7 @@ class ChargeDeps:
     """None models Redis being down; correctness must not depend on it."""
     provider: ProviderPort
     clock: Clock
-    card_fingerprint_key: str
+    card_fingerprint_key: str = field(repr=False)
     hooks: ChargeHooks = field(default_factory=ChargeHooks)
     idempotency_wait_seconds: float = IDEMPOTENCY_WAIT_SECONDS
 
@@ -69,7 +70,7 @@ class _Claim:
     payment_id: uuid.UUID
     attempt_id: uuid.UUID
     card: CardRef
-    card_fingerprint: str
+    card_fingerprint: str = field(repr=False)
 
 
 KEY_REUSED = ChargeOutcome(422, {"error": "idempotency_key_reused"})
@@ -97,8 +98,11 @@ def charge_card(
         claim = _claim(deps, merchant_id, idempotency_key, request_hash, request, pan)
         if claim is None:
             return _await_stored(deps, merchant_id, idempotency_key, request_hash)
-        result = _call_provider(deps.provider, claim, request)
-        outcome = _finalize(deps, merchant_id, idempotency_key, claim, request, result)
+        if isinstance(claim, ChargeOutcome):
+            outcome: ChargeOutcome | None = claim
+        else:
+            result = _call_provider(deps.provider, claim, request)
+            outcome = _finalize(deps, merchant_id, idempotency_key, claim, request, result)
     finally:
         if isinstance(lock_token, str):
             _release_lock(deps.redis, lock_key, lock_token)
@@ -151,8 +155,12 @@ def _claim(
     request_hash: str,
     request: ChargeRequest,
     pan: str,
-) -> _Claim | None:
-    """tx1: idempotency row + token + payment + attempt. None if the key is already taken."""
+) -> _Claim | ChargeOutcome | None:
+    """tx1: idempotency row + token + payment + attempt. None if the key is already taken.
+
+    A risk-blocked charge settles here as declined `risk_blocked` (no attempt, no provider call), so the
+    decline is visible to the next charge on the card as soon as this transaction commits.
+    """
     with deps.session_factory.begin() as session:
         now = deps.clock()
         inserted = session.execute(
@@ -172,6 +180,7 @@ def _claim(
         card = tokenize_card(
             session, deps.clock, pan, request.card.exp_month, request.card.exp_year, deps.card_fingerprint_key
         )
+        risk = assess_charge_risk(session, now, card.fingerprint, request.amount_minor, request.currency)
         payment = Payment(
             id=uuid.uuid4(),
             merchant_id=merchant_id,
@@ -180,10 +189,35 @@ def _claim(
             method=request.method,
             state="created",
             card_token=card.token,
+            card_fingerprint=card.fingerprint,
+            risk_score=risk.score,
+            risk_reasons=list(risk.reasons),
+            risk_flagged=risk.flagged,
             entity_version=1,
             created_at=now,
             updated_at=now,
         )
+        card_ref = CardRef(token=card.token, bin=card.bin, last4=card.last4)
+        if risk.blocked:
+            payment.state = "declined"
+            payment.decline_code = RISK_BLOCKED_DECLINE_CODE
+            payment.risk_blocked = True
+            session.add(payment)
+            session.flush()
+            return _complete(
+                session,
+                now,
+                merchant_id,
+                idempotency_key,
+                payment.id,
+                card_ref,
+                request,
+                "declined",
+                payment.entity_version,
+                None,
+                RISK_BLOCKED_DECLINE_CODE,
+                derive_card_ref(card.fingerprint, merchant_id, deps.card_fingerprint_key),
+            )
         session.add(payment)
         session.flush()
         attempt = PaymentAttempt(
@@ -205,7 +239,7 @@ def _claim(
         return _Claim(
             payment_id=payment.id,
             attempt_id=attempt.id,
-            card=CardRef(token=card.token, bin=card.bin, last4=card.last4),
+            card=card_ref,
             card_fingerprint=card.fingerprint,
         )
 
@@ -254,16 +288,8 @@ def _finalize(
                 updated_at=now,
             )
         )
-        response = ChargeResponse(
-            payment_id=claim.payment_id,
-            state=state,
-            amount_minor=request.amount_minor,
-            currency=request.currency,
-            method=request.method,
-            card=CardSummary(bin=claim.card.bin, last4=claim.card.last4),
-            decline_code=decline_code,
-        ).model_dump(mode="json")
         if state == "unknown":
+            response = _charge_response(claim.payment_id, claim.card, request, state, decline_code)
             session.execute(
                 update(IdempotencyRecord)
                 .where(IdempotencyRecord.merchant_id == merchant_id, IdempotencyRecord.key == idempotency_key)
@@ -272,11 +298,13 @@ def _finalize(
             return ChargeOutcome(202, response)
         if state == "succeeded":
             _post_charge_journal(session, deps.clock, merchant_id, claim.payment_id, request)
-        _write_outbox(
+        return _complete(
             session,
             now,
             merchant_id,
-            claim,
+            idempotency_key,
+            claim.payment_id,
+            claim.card,
             request,
             state,
             entity_version,
@@ -284,23 +312,79 @@ def _finalize(
             decline_code,
             derive_card_ref(claim.card_fingerprint, merchant_id, deps.card_fingerprint_key),
         )
-        session.add(
-            AuditLog(
-                actor_id=f"merchant:{merchant_id}",
-                actor_role="merchant_api",
-                action="payment.charge",
-                target=f"payment:{claim.payment_id}",
-                summary={"state": state, "amount_minor": request.amount_minor, "currency": request.currency},
-                correlation_id=uuid.uuid4().hex,
-                occurred_at=now,
-            )
+
+
+def _charge_response(
+    payment_id: uuid.UUID,
+    card: CardRef,
+    request: ChargeRequest,
+    state: PaymentState,
+    decline_code: str | None,
+) -> dict[str, Any]:
+    return ChargeResponse(
+        payment_id=payment_id,
+        state=state,
+        amount_minor=request.amount_minor,
+        currency=request.currency,
+        method=request.method,
+        card=CardSummary(bin=card.bin, last4=card.last4),
+        decline_code=decline_code,
+    ).model_dump(mode="json")
+
+
+def _complete(
+    session: Session,
+    now: datetime,
+    merchant_id: uuid.UUID,
+    idempotency_key: str,
+    payment_id: uuid.UUID,
+    card: CardRef,
+    request: ChargeRequest,
+    state: PaymentState,
+    entity_version: int,
+    provider: str | None,
+    decline_code: str | None,
+    card_ref: str,
+) -> ChargeOutcome:
+    """Outbox event + audit row + stored 201 response for a payment that reached a final state."""
+    response = _charge_response(payment_id, card, request, state, decline_code)
+    _write_outbox(
+        session,
+        now,
+        merchant_id,
+        payment_id,
+        card,
+        request,
+        state,
+        entity_version,
+        provider,
+        decline_code,
+        card_ref,
+    )
+    summary: dict[str, object] = {
+        "state": state,
+        "amount_minor": request.amount_minor,
+        "currency": request.currency,
+    }
+    if decline_code == RISK_BLOCKED_DECLINE_CODE:
+        summary["decline_code"] = decline_code
+    session.add(
+        AuditLog(
+            actor_id=f"merchant:{merchant_id}",
+            actor_role="merchant_api",
+            action="payment.charge",
+            target=f"payment:{payment_id}",
+            summary=summary,
+            correlation_id=uuid.uuid4().hex,
+            occurred_at=now,
         )
-        session.execute(
-            update(IdempotencyRecord)
-            .where(IdempotencyRecord.merchant_id == merchant_id, IdempotencyRecord.key == idempotency_key)
-            .values(response_status=201, response_body=response)
-        )
-        return ChargeOutcome(201, response)
+    )
+    session.execute(
+        update(IdempotencyRecord)
+        .where(IdempotencyRecord.merchant_id == merchant_id, IdempotencyRecord.key == idempotency_key)
+        .values(payment_id=payment_id, response_status=201, response_body=response)
+    )
+    return ChargeOutcome(201, response)
 
 
 def _post_charge_journal(
@@ -324,11 +408,12 @@ def _write_outbox(
     session: Session,
     now: datetime,
     merchant_id: uuid.UUID,
-    claim: _Claim,
+    payment_id: uuid.UUID,
+    card: CardRef,
     request: ChargeRequest,
     state: PaymentState,
     entity_version: int,
-    provider: str,
+    provider: str | None,
     decline_code: str | None,
     card_ref: str,
 ) -> None:
@@ -337,7 +422,7 @@ def _write_outbox(
         event_type="payment.succeeded" if state == "succeeded" else "payment.declined",
         occurred_at=now,
         entity_version=entity_version,
-        payment_id=claim.payment_id,
+        payment_id=payment_id,
         merchant_id=merchant_id,
         amount_minor=request.amount_minor,
         currency=request.currency,
@@ -345,8 +430,8 @@ def _write_outbox(
         state=state,
         provider=provider,
         decline_code=decline_code,
-        card_bin=claim.card.bin,
-        card_last4=claim.card.last4,
+        card_bin=card.bin,
+        card_last4=card.last4,
         card_ref=card_ref,
     )
     session.add(

@@ -14,6 +14,7 @@ class GatewaySettings(BaseSettings):
     api_key_pepper: SecretStr = Field(min_length=MIN_SECRET_LENGTH)
     card_fingerprint_key: SecretStr = Field(min_length=MIN_SECRET_LENGTH)
     jwt_private_key_pem: SecretStr | None = None
+    totp_encryption_key: SecretStr | None = Field(default=None, min_length=MIN_SECRET_LENGTH)
 
 
 def load_gateway_settings() -> GatewaySettings:

@@ -36,6 +36,11 @@ def build_app_from_env() -> FastAPI:
             charge=charge,
             api_key_pepper=settings.api_key_pepper.get_secret_value(),
             jwt_private_key_pem=settings.jwt_private_key_pem.get_secret_value(),
+            totp_encryption_key=(
+                None
+                if settings.totp_encryption_key is None
+                else settings.totp_encryption_key.get_secret_value()
+            ),
             readiness=lambda: check_ready(session_factory, redis),
         )
     )
