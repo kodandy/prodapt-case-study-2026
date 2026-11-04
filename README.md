@@ -211,15 +211,23 @@ These were found by the Day 1 audit and are planned:
 - The token verifier checks `iss`/`aud`/`exp`/`iat` (`iat` at most 30 s ahead, lifetime at most 900 s), exactly one
   canonical `merchant_id`/`user_id`, the role list, and `sub` on user tokens, but does not check `sub` on merchant
   tokens yet.
-- `POST /v1/user-tokens` has no rate limit and no lockout, so passwords can be guessed online. Unknown email and
-  wrong password cost the same argon2 verification and give the identical 401. Only the number of concurrent argon2
-  verifications is capped (4 per app; a request that waits more than 2 s gets 503). The route is sync, so a request
-  waiting for a slot holds a threadpool worker; a login flood slows other sync routes. Fix: async route with an AnyIO
-  `CapacityLimiter`, plus per-IP and per-account rate limits. `POST /v1/signup` hashes with no cap.
+- `POST /v1/sessions` and `POST /v1/user-tokens` lock an account for 15 minutes after 10 wrong passwords in 15
+  minutes (429 with Retry-After), but there is no per-IP limit, so guesses spread across many accounts are not
+  slowed, and anyone who knows an email can lock that account out. A locked account answers 429 where an unknown
+  email answers 401, so a lockout reveals that the email exists. Unknown email and wrong password otherwise cost the
+  same argon2 verification and give the identical 401. The number of concurrent argon2 verifications is capped (4
+  per app; a request that waits more than 2 s gets 503). The routes are sync, so a request waiting for a slot holds a
+  threadpool worker; a login flood slows other sync routes. Fix: async route with an AnyIO `CapacityLimiter`, plus a
+  per-IP rate limit. `POST /v1/signup` hashes with no cap.
 - `POST /v1/signup` answers 409 for a registered email, which reveals that the email exists. This bypasses the
   identical 401 on login.
 - No password rehash on login when the argon2 parameters change.
-- Web client: the history panel calls `GET /v1/me/transfers`, which the gateway does not serve yet, so it shows an error. `/healthz` and
+- `GET /v1/me/transfers` masks the counterparty email to its first character and domain, but does not strip
+  control or bidi characters (such as RLO) from that first character. Its 401 has no `Cache-Control: no-store`
+  (the same as `/v1/me/wallets`), and only the recipient side has a `(user, created_at)` index, so a large sent
+  history is sorted in full. `POST /v1/me/transfers` still returns the recipient's `recipient_user_id` on 201, and
+  its 404 `recipient_not_found` reveals whether an email is registered (like the signup 409).
+- Web client: `/healthz` and
   `/readyz` are reachable through nginx (the smoke test uses them). A user-side 401 or enabling TOTP still clears the
   merchant credentials too. The api client has no single-flight on the ops token refresh, does not validate response
   shapes, and there is no error boundary. The nginx container runs with default privileges, and the login form has
