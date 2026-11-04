@@ -130,13 +130,21 @@ Routes (Bearer API key): `GET /v1/disputes/{dispute_id}` → 200 `DisputeView` o
    body. (Security audit LOW-3: no crash window between the decision and its record, no provider attribution.)
 4. **One card at a time** (red-team RT-001, audit MEDIUM-1). tx1 takes `pg_advisory_xact_lock` on the card
    fingerprint (`hashtextextended(fingerprint, 0)`) before counting, so concurrent charges on one card are scored
-   one after another and each sees the earlier ones. Known limit: a sibling still waiting on the provider is
-   counted for `card_velocity` but cannot yet count as a decline.
+   one after another and each sees the earlier ones. A sibling still waiting on the provider counts as a decline
+   (Decision 7).
 5. **Velocity reads the payment's own fingerprint** (audit MEDIUM-2). `payments.card_fingerprint` (the HMAC already
    stored on `card_tokens`) with index `(card_fingerprint, created_at)`; both counts come from one query bounded by
    the 60-minute window.
 6. The degraded-scoring policy (velocity lookup down → `risk_unavailable` / `degraded_scoring`) is Design: velocity
    and persistence share one database here, so a velocity failure fails the charge.
+7. **An in-flight sibling counts as a decline** (red-team R-1, user decision 2026-11-04). Before this, a burst of
+   parallel charges on one card was scored while every earlier sibling was still `created`, so none counted as a
+   decline and the whole burst reached the provider (20 of 20 with a 0.3 s provider; 3 when sent one by one).
+   `recent_declines` now also counts the card's payments in state `created` whose `created_at` is within
+   `IN_FLIGHT_WINDOW = timedelta(seconds=ATTEMPT_LEASE_SECONDS)` (30 s, inclusive of the window start) of `now`.
+   Older `created` rows are stale (a crash between tx1 and tx2) and stay uncounted, so they cannot block a card
+   for the whole decline window. `unknown` and `failed` stay uncounted. The trade-off: a legitimate burst of
+   parallel charges on one card scores as if its in-flight siblings had declined.
 
 ### `gateway/payments/risk.py`
 
@@ -149,7 +157,8 @@ Routes (Bearer API key): `GET /v1/disputes/{dispute_id}` → 200 `DisputeView` o
     merchant) created in the last `VELOCITY_WINDOW = 10 minutes` (inclusive of the window start).
   - `recent_declines` +0.30: at least `DECLINE_LIMIT = 2` earlier `declined` payments with the same fingerprint in the
     last `DECLINE_WINDOW = 60 minutes`, not counting risk-blocked ones (audit LOW-2: a block must not extend
-    itself).
+    itself), plus earlier `created` payments with the same fingerprint inside `IN_FLIGHT_WINDOW` (Decision 7).
+    `IN_FLIGHT_WINDOW` is exported from `risk.py`.
 - `flagged = score >= FLAG_THRESHOLD (0.50)`; `blocked = score >= BLOCK_THRESHOLD (0.90)`. No rule hit → score
   `Decimal("0.00")`, reasons `()`.
 
