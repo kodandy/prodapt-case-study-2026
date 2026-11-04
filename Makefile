@@ -1,7 +1,7 @@
 DC := docker compose
 RUN := $(DC) run --rm dev
 
-.PHONY: up down build sync lint fmt type test migrate migrate-check ci demo demo-down
+.PHONY: up down build sync lint fmt type test migrate migrate-check ci demo demo-down web-install web-ci web-up web-smoke web-merchant-key
 
 up:
 	$(DC) up -d --wait postgres redis
@@ -43,7 +43,7 @@ migrate-check:
 test:
 	$(RUN) uv run --frozen pytest
 
-ci: up sync lint type migrate-check test
+ci: up sync lint type migrate-check test web-ci
 
 # runs every service from the app image, then the end-to-end walkthrough (no .env, no OPENAI_API_KEY needed)
 demo:
@@ -53,3 +53,27 @@ demo:
 
 demo-down:
 	$(DC) --profile demo down
+
+# web client (docs/specs/web.md): node only inside the pinned image, lockfile installs only
+WEB_RUN := $(DC) --profile web-dev run --rm --no-deps web-dev
+
+web-install:
+	$(WEB_RUN) npm ci --ignore-scripts
+
+web-ci: web-install
+	$(WEB_RUN) npm run ci
+
+web-up:
+	$(DC) up -d --wait gateway-api relay ops-ai-api ops-ai-consumer
+	$(DC) up -d --build web
+
+# prints a fresh demo merchant API key once (stdout only) for the web merchant sign-in; run `make demo` first for payments
+web-merchant-key:
+	@$(DC) build -q demo-secrets
+	@$(DC) up -d --wait gateway-api >/dev/null
+	@$(DC) --profile demo run --rm --no-deps demo python scripts/web_merchant_key.py
+
+# full-stack browser smoke; not part of `make ci`
+web-smoke: web-up web-install
+	@key=$$($(MAKE) -s web-merchant-key 2>/dev/null) && WEB_DEMO_MERCHANT_KEY="$$key" \
+	  $(DC) --profile web-smoke run --rm -e WEB_DEMO_MERCHANT_KEY web-smoke npx playwright test

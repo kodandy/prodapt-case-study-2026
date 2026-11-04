@@ -96,6 +96,28 @@ the JWT private key, and ops-ai gets only the public key.
 
 Only the first 8 characters of the API key are printed. Passwords and tokens are never printed.
 
+## Web client: `make web-up`
+
+A Vite + React SPA (`web/`) served by nginx on http://127.0.0.1:8082 (`WEB_PORT`). nginx proxies `/api/gw/` to the gateway and
+`/api/ops/` to ops-ai on the same origin, so the browser never needs CORS. See `docs/specs/web.md`.
+
+```bash
+make demo              # run first: it seeds the data and the demo secrets
+make web-up            # build and start the web container
+make web-merchant-key  # print a fresh demo merchant API key once (paste it into the Merchant tab)
+make web-ci            # typecheck, lint, unit tests, build
+make web-smoke         # Playwright smoke against the running stack
+```
+
+- User tab: sign-up/login (with TOTP when enabled), wallets, P2P transfer with a confirm step, transfer history (needs the gateway route, see Known gaps).
+- Merchant tab: payments list and detail, refund with an explicit amount and a confirm step, support assistant with
+  a guarded "Open payment" action, settlement summary.
+- Credentials live in memory only (never storage, cookies or the URL). Money writes keep the same Idempotency-Key until
+  the server gives a final answer, even across a tab switch, Cancel/Close or a re-render; a merchant-side failure
+  clears only the merchant credentials.
+- nginx sets CSP, `nosniff` and `no-referrer` on every response, `no-store` on the API, and blocks routes the browser
+  must not reach (`/v1/user-tokens`, ops investigation, disputes, the OpenAPI docs, `POST /v1/payments`).
+
 ## End-to-end test
 
 The same thin slice also runs inside one test process against the real Postgres and Redis containers:
@@ -197,6 +219,14 @@ These were found by the Day 1 audit and are planned:
 - `POST /v1/signup` answers 409 for a registered email, which reveals that the email exists. This bypasses the
   identical 401 on login.
 - No password rehash on login when the argon2 parameters change.
+- Web client: the history panel calls `GET /v1/me/transfers`, which the gateway does not serve yet, so it shows an error. `/healthz` and
+  `/readyz` are reachable through nginx (the smoke test uses them). A user-side 401 or enabling TOTP still clears the
+  merchant credentials too. The api client has no single-flight on the ops token refresh, does not validate response
+  shapes, and there is no error boundary. The nginx container runs with default privileges, and the login form has
+  no password-manager hints.
+- Accepted risk (dev only): `npm audit` reports GHSA-g3hv-75wg-m249 (minimatch ReDoS) through eslint and
+  typescript-eslint. minimatch only reads the repo's own lint globs and is not in the production bundle (which has
+  react and react-dom only). `npm audit fix --force` would downgrade eslint, so this waits for an upstream eslint major.
 - `bootstrap_user` replaces the password of an existing id, so it is for the demo database only.
 - The OpenAI adapter is in place and runs only when `OPENAI_API_KEY` is set, but output guards are not (no split or
   structuring advice, no numbers absent from the evidence, and cited `[ref]`s are not checked against the evidence

@@ -16,9 +16,10 @@ from scripts.demo_secrets import main, write_demo_secrets
 
 PEPPER = Path("gateway/gateway_api_key_pepper")
 FINGERPRINT_KEY = Path("gateway/gateway_card_fingerprint_key")
+TOTP_KEY = Path("gateway/gateway_totp_encryption_key")
 PRIVATE_KEY = Path("gateway/gateway_jwt_private_key_pem")
 PUBLIC_KEY = Path("ops-ai/ops_ai_jwt_public_key_pem")
-ALL_FILES = {PEPPER, FINGERPRINT_KEY, PRIVATE_KEY, PUBLIC_KEY}
+ALL_FILES = {PEPPER, FINGERPRINT_KEY, TOTP_KEY, PRIVATE_KEY, PUBLIC_KEY}
 URL_SAFE_ALPHABET = frozenset(string.ascii_letters + string.digits + "-_")
 MIN_SYMMETRIC_KEY_CHARS = 48
 SCRIPT = Path(__file__).resolve().parents[1] / "demo_secrets.py"
@@ -50,10 +51,15 @@ def _secret_fragments(root: Path) -> list[str]:
         for line in _secret_text(root, relative).splitlines()
         if not line.startswith("-----")
     ]
-    return [_secret_text(root, PEPPER), _secret_text(root, FINGERPRINT_KEY), *pem_lines]
+    return [
+        _secret_text(root, PEPPER),
+        _secret_text(root, FINGERPRINT_KEY),
+        _secret_text(root, TOTP_KEY),
+        *pem_lines,
+    ]
 
 
-def test_write_demo_secrets_on_an_empty_root_returns_true_and_creates_exactly_the_four_files(
+def test_write_demo_secrets_on_an_empty_root_returns_true_and_creates_exactly_the_five_files(
     tmp_path: Path,
 ) -> None:
     # Arrange: empty root
@@ -66,7 +72,9 @@ def test_write_demo_secrets_on_an_empty_root_returns_true_and_creates_exactly_th
     assert set(_snapshot(tmp_path)) == ALL_FILES
 
 
-@pytest.mark.parametrize("relative", [PEPPER, FINGERPRINT_KEY], ids=["pepper", "fingerprint_key"])
+@pytest.mark.parametrize(
+    "relative", [PEPPER, FINGERPRINT_KEY, TOTP_KEY], ids=["pepper", "fingerprint_key", "totp_key"]
+)
 def test_write_demo_secrets_symmetric_keys_are_48_or_more_url_safe_characters(
     tmp_path: Path, relative: Path
 ) -> None:
@@ -122,6 +130,7 @@ def test_write_demo_secrets_sets_private_files_to_0600_and_the_public_key_to_064
     assert {relative: _mode(tmp_path, relative) for relative in ALL_FILES} == {
         PEPPER: 0o600,
         FINGERPRINT_KEY: 0o600,
+        TOTP_KEY: 0o600,
         PRIVATE_KEY: 0o600,
         PUBLIC_KEY: 0o644,
     }
@@ -141,7 +150,9 @@ def test_write_demo_secrets_second_call_returns_false_and_changes_no_byte(tmp_pa
 
 
 @pytest.mark.parametrize(
-    "missing", [PEPPER, FINGERPRINT_KEY, PUBLIC_KEY], ids=["pepper", "fingerprint_key", "public_key"]
+    "missing",
+    [PEPPER, FINGERPRINT_KEY, TOTP_KEY, PUBLIC_KEY],
+    ids=["pepper", "fingerprint_key", "totp_key", "public_key"],
 )
 def test_write_demo_secrets_recreates_only_the_missing_file_and_keeps_the_others(
     tmp_path: Path, missing: Path
@@ -204,7 +215,7 @@ def test_write_demo_secrets_gives_two_different_roots_different_secrets(tmp_path
     write_demo_secrets(second)
 
     # Assert
-    for relative in (PEPPER, FINGERPRINT_KEY, PRIVATE_KEY, PUBLIC_KEY):
+    for relative in (PEPPER, FINGERPRINT_KEY, TOTP_KEY, PRIVATE_KEY, PUBLIC_KEY):
         assert (first / relative).read_bytes() != (second / relative).read_bytes()
 
 

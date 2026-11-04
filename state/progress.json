@@ -89,6 +89,11 @@
       "phase": 1,
       "item": "Runtime R1-R8: merchant RS256 token (gateway) + verification (ops-ai), /readyz on both APIs, relay and consumer workers with signal handling and PEL retry, demo secrets volume, compose services, make demo green (10/10 checks); make ci 315 passed + scripts tests; security-auditor MEDIUM (M1 merchant_id overwrite fixed, M2 shared DB role + Redis ACL documented), red-team HARDENED (0 exploits), dependency-auditor LOW (pyjwt>=2.10.1, uv sync --locked)",
       "file": "docs/specs/runtime.md"
+    },
+    {
+      "phase": 1,
+      "item": "B13 web client (Vite+React SPA behind nginx same-origin proxy): user + merchant areas, in-memory credentials, pendingWrites idempotency keys, nginx security headers/route blocks; security-auditor + red-team (2 rounds) findings fixed; 257 vitest + Playwright smoke",
+      "file": "web/"
     }
   ],
   "remaining": [

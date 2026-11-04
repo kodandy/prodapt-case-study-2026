@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 PEPPER = Path("gateway/gateway_api_key_pepper")
 FINGERPRINT_KEY = Path("gateway/gateway_card_fingerprint_key")
+TOTP_KEY = Path("gateway/gateway_totp_encryption_key")
 PRIVATE_KEY = Path("gateway/gateway_jwt_private_key_pem")
 PUBLIC_KEY = Path("ops-ai/ops_ai_jwt_public_key_pem")
 PRIVATE_MODE = 0o600
@@ -48,7 +49,7 @@ def _load_private_key(path: Path) -> rsa.RSAPrivateKey:
 
 def _create_demo_secrets(root: Path) -> list[Path]:
     created: list[Path] = []
-    for relative in (PEPPER, FINGERPRINT_KEY):
+    for relative in (PEPPER, FINGERPRINT_KEY, TOTP_KEY):
         if not (root / relative).exists():
             _write_new(root / relative, secrets.token_urlsafe(SYMMETRIC_KEY_BYTES).encode(), PRIVATE_MODE)
             created.append(relative)

@@ -155,8 +155,39 @@ services:
       relay: { condition: service_started }
       ops-ai-consumer: { condition: service_started }
 
+  # --- web client (docs/specs/web.md). Node runs only in pinned images. ---
+
+  web:
+    build: { context: ./web }
+    ports: ["127.0.0.1:${WEB_PORT:-8082}:80"]
+    restart: unless-stopped
+    depends_on:
+      gateway-api: { condition: service_healthy }
+      ops-ai-api: { condition: service_healthy }
+
+  web-dev:
+    profiles: ["web-dev"]
+    image: node:22.20.0-bookworm-slim
+    working_dir: /web
+    volumes:
+      - ./web:/web
+      - web-node-modules:/web/node_modules
+
+  web-smoke:
+    profiles: ["web-smoke"]
+    image: mcr.microsoft.com/playwright:v1.55.1-noble
+    working_dir: /web
+    environment:
+      WEB_URL: http://web:80
+    volumes:
+      - ./web:/web
+      - web-node-modules:/web/node_modules
+    depends_on:
+      web: { condition: service_started }
+
 volumes:
   pgdata:
   venv:
   uvcache:
   demo-secrets:
+  web-node-modules:
