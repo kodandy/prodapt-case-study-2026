@@ -306,19 +306,21 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
     ) -> uuid.UUID:
         if credentials is None:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing session")
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing session", headers=NO_STORE_HEADERS)
         if deps.jwt_private_key_pem is None:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid session")
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid session", headers=NO_STORE_HEADERS)
         try:
             claims = verify_session_token(
                 deps.jwt_private_key_pem, credentials.credentials, deps.charge.clock()
             )
         except InvalidSessionError:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid session") from None
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED, "invalid session", headers=NO_STORE_HEADERS
+            ) from None
         with session_factory() as session:
             needs_otp = totp_enabled(session, claims.user_id)
         if needs_otp and AMR_OTP not in claims.amr:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "mfa required")
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "mfa required", headers=NO_STORE_HEADERS)
         return claims.user_id
 
     def totp_key() -> str:

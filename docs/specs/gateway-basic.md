@@ -370,8 +370,9 @@ transfer system and the design doc cover those) and no outbox event (B11 adds no
 - `TransferOutcome(status_code: int, body: dict[str, object])` (frozen dataclass), like `RefundOutcome`.
 - `transfer(session_factory, clock, sender_user_id, idempotency_key, recipient_email, amount_minor, currency) ->
   TransferOutcome`:
-  - 201 `{"transfer_id", "state": "succeeded", "amount_minor", "currency", "recipient_user_id",
-    "sender_available_minor"}` (the sender's available balance in that currency after the transfer);
+  - 201 `{"transfer_id", "state": "succeeded", "amount_minor", "currency", "sender_available_minor"}` (the
+    sender's available balance in that currency after the transfer). No recipient user id (web P-1); a replay
+    of a row stored before that change answers only these keys (an allowlist over the stored body);
   - 404 `{"error": "recipient_not_found"}`; 422 `{"error": "self_transfer"}`;
   - 409 `{"error": "insufficient_funds", "available_minor": <sender's current available>}`;
   - 422 `{"error": "idempotency_key_reused"}`.
@@ -401,8 +402,8 @@ transfer system and the design doc cover those) and no outbox event (B11 adds no
   to it. Verified e-mail or a pending claim is Design.
 - No per-sender rate limit, concurrency cap or `lock_timeout` on transfers; a hot balance row can hold pool
   connections. Dust spam into a wallet is possible. Step-up TOTP and daily limits are Design.
-- 404 recipient_not_found plus `recipient_user_id` in the 201 body map e-mail → user id; rejected attempts are
-  not audited.
+- 404 recipient_not_found tells a signed-in sender whether an e-mail is registered; rejected attempts are not
+  audited. (The 201 body no longer carries `recipient_user_id`.)
 - `top_up_wallet` lives in the service module (only tests call it). No DB CHECK for sender ≠ recipient and no
   balance-vs-postings reconciliation job.
 

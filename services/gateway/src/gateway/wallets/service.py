@@ -187,7 +187,6 @@ def _transfer_in_tx(
             "state": "succeeded",
             "amount_minor": amount_minor,
             "currency": currency,
-            "recipient_user_id": str(recipient_user_id),
             "sender_available_minor": sender_balance.available_minor,
         }
         inserted = session.execute(
@@ -285,4 +284,9 @@ def _stored(
         return None
     if row.request_hash != request_hash:
         return KEY_REUSED
-    return TransferOutcome(201, row.response_body)
+    # An allowlist: rows stored before web P-1 also carry the recipient's user id, hidden from the sender.
+    body = {key: row.response_body[key] for key in _PUBLIC_BODY_KEYS if key in row.response_body}
+    return TransferOutcome(201, body)
+
+
+_PUBLIC_BODY_KEYS = ("transfer_id", "state", "amount_minor", "currency", "sender_available_minor")
