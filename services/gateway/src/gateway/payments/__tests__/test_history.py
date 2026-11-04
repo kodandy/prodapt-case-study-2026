@@ -2,7 +2,7 @@
 
 import uuid
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,7 +11,13 @@ from gateway.app import GatewayAppDeps, create_app
 from gateway.clock import FixedClock
 from gateway.payments.charge import ChargeDeps, charge_card
 from gateway.payments.disputes import PaymentNotFoundError
-from gateway.payments.history import InvalidCursorError, PaymentPage, get_payment, list_payments
+from gateway.payments.history import (
+    PAYMENT_METHODS,
+    InvalidCursorError,
+    PaymentPage,
+    get_payment,
+    list_payments,
+)
 from gateway.payments.providers.simulator.provider import SimulatorProvider
 from gateway.payments.schemas import CardSummary, ChargeRequest, PaymentSummary
 from gateway.payments.state import PaymentState
@@ -782,3 +788,622 @@ def test_get_payment_by_id_with_a_non_uuid_id_and_no_valid_api_key_returns_401_n
 
     # Assert
     assert response.status_code == 401
+
+
+# --- B3.1 filters: created_from / created_to / method --------------------------------------------------
+
+T0 = datetime(2026, 11, 4, 0, 0, tzinfo=UTC)
+JST = timezone(timedelta(hours=9))
+
+
+@dataclass(frozen=True)
+class Timeline:
+    """Five payments around the half-open range [T0, T0 + 3h)."""
+
+    before: uuid.UUID  # T0 - 1s, succeeded
+    at_from: uuid.UUID  # T0, succeeded
+    mid: uuid.UUID  # T0 + 1h, declined
+    late: uuid.UUID  # T0 + 2h, succeeded
+    at_to: uuid.UUID  # T0 + 3h, succeeded
+
+    @property
+    def to(self) -> datetime:
+        return T0 + timedelta(hours=3)
+
+
+def _charge_at(h: Harness, clock: FixedClock, instant: datetime, pan: str = APPROVE_PAN) -> uuid.UUID:
+    clock.advance(instant - clock())
+    return _charge(h, pan=pan)
+
+
+def _timeline(h: Harness, clock: FixedClock) -> Timeline:
+    return Timeline(
+        before=_charge_at(h, clock, T0 - timedelta(seconds=1)),
+        at_from=_charge_at(h, clock, T0),
+        mid=_charge_at(h, clock, T0 + timedelta(hours=1), pan=DECLINED_PAN),
+        late=_charge_at(h, clock, T0 + timedelta(hours=2)),
+        at_to=_charge_at(h, clock, T0 + timedelta(hours=3)),
+    )
+
+
+def _ids(page: PaymentPage) -> list[uuid.UUID]:
+    return [item.payment_id for item in page.items]
+
+
+def _body_ids(body: dict[str, object]) -> list[str]:
+    items = body["items"]
+    assert isinstance(items, list)
+    return [str(item["payment_id"]) for item in items]
+
+
+def test_payment_methods_is_the_frozenset_containing_only_card() -> None:
+    # Arrange / Act
+    methods = PAYMENT_METHODS
+
+    # Assert
+    assert methods == frozenset({"card"})
+    assert isinstance(methods, frozenset)
+
+
+def test_list_payments_created_from_is_inclusive_and_excludes_an_earlier_payment(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    t = _timeline(h, clock)
+
+    # Act
+    with session_factory() as session:
+        page = list_payments(session, h.merchant_id, created_from=T0)
+
+    # Assert
+    assert _ids(page) == [t.at_to, t.late, t.mid, t.at_from]
+
+
+def test_list_payments_created_to_is_exclusive(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    t = _timeline(h, clock)
+
+    # Act
+    with session_factory() as session:
+        page = list_payments(session, h.merchant_id, created_to=t.to)
+
+    # Assert
+    assert _ids(page) == [t.late, t.mid, t.at_from, t.before]
+
+
+def test_list_payments_half_open_range_includes_from_and_excludes_to_and_earlier(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    t = _timeline(h, clock)
+
+    # Act
+    with session_factory() as session:
+        page = list_payments(session, h.merchant_id, created_from=T0, created_to=t.to)
+
+    # Assert
+    assert _ids(page) == [t.late, t.mid, t.at_from]
+    assert page.next_cursor is None
+
+
+def test_list_payments_range_starting_just_after_from_excludes_the_payment_at_from(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    t = _timeline(h, clock)
+
+    # Act
+    with session_factory() as session:
+        page = list_payments(
+            session, h.merchant_id, created_from=T0 + timedelta(microseconds=1), created_to=t.to
+        )
+
+    # Assert
+    assert _ids(page) == [t.late, t.mid]
+
+
+def test_list_payments_range_matching_nothing_returns_an_empty_page(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    _timeline(h, clock)
+
+    # Act
+    with session_factory() as session:
+        page = list_payments(
+            session,
+            h.merchant_id,
+            created_from=T0 + timedelta(days=1),
+            created_to=T0 + timedelta(days=2),
+        )
+
+    # Assert
+    assert page == PaymentPage(items=[], next_cursor=None)
+
+
+def test_list_payments_converts_a_non_utc_aware_bound_to_utc(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    t = _timeline(h, clock)
+    from_jst = datetime(2026, 11, 4, 9, 0, tzinfo=JST)  # == T0
+    to_jst = datetime(2026, 11, 4, 12, 0, tzinfo=JST)  # == T0 + 3h
+
+    # Act
+    with session_factory() as session:
+        page = list_payments(session, h.merchant_id, created_from=from_jst, created_to=to_jst)
+
+    # Assert
+    assert _ids(page) == [t.late, t.mid, t.at_from]
+
+
+@pytest.mark.parametrize(
+    ("created_from", "created_to"),
+    [
+        (datetime(2026, 11, 4, 0, 0), None),
+        (None, datetime(2026, 11, 4, 3, 0)),
+        (datetime(2026, 11, 4, 0, 0), T0 + timedelta(hours=3)),
+        (T0, datetime(2026, 11, 4, 3, 0)),
+    ],
+    ids=["naive_from", "naive_to", "naive_from_aware_to", "aware_from_naive_to"],
+)
+def test_list_payments_with_a_naive_datetime_raises_value_error(
+    session_factory: sessionmaker[Session],
+    clock: FixedClock,
+    created_from: datetime | None,
+    created_to: datetime | None,
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    _charge(h)
+
+    # Act / Assert
+    with session_factory() as session, pytest.raises(ValueError):
+        list_payments(session, h.merchant_id, created_from=created_from, created_to=created_to)
+
+
+def test_list_payments_method_card_returns_all_card_payments(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    t = _timeline(h, clock)
+
+    # Act
+    with session_factory() as session:
+        page = list_payments(session, h.merchant_id, method="card")
+
+    # Assert
+    assert _ids(page) == [t.at_to, t.late, t.mid, t.at_from, t.before]
+
+
+def test_list_payments_method_card_combines_with_the_date_range(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    t = _timeline(h, clock)
+
+    # Act
+    with session_factory() as session:
+        page = list_payments(session, h.merchant_id, method="card", created_from=T0, created_to=t.to)
+
+    # Assert
+    assert _ids(page) == [t.late, t.mid, t.at_from]
+
+
+def test_list_payments_state_and_date_range_combine_with_and(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    t = _timeline(h, clock)
+
+    # Act
+    with session_factory() as session:
+        declined = list_payments(session, h.merchant_id, state="declined", created_from=T0, created_to=t.to)
+        succeeded = list_payments(session, h.merchant_id, state="succeeded", created_from=T0, created_to=t.to)
+        declined_outside = list_payments(session, h.merchant_id, state="declined", created_from=t.to)
+
+    # Assert
+    assert _ids(declined) == [t.mid]
+    assert _ids(succeeded) == [t.late, t.at_from]
+    assert declined_outside == PaymentPage(items=[], next_cursor=None)
+
+
+def test_list_payments_date_filter_does_not_leak_another_merchants_payment(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    other = _harness(session_factory, clock, deps=h.deps, name="Other")
+    mine = _charge_at(h, clock, T0 + timedelta(hours=1))
+    _charge_at(other, clock, T0 + timedelta(hours=1))
+    _charge_at(other, clock, T0 + timedelta(hours=2))
+
+    # Act
+    with session_factory() as session:
+        page = list_payments(
+            session, h.merchant_id, created_from=T0, created_to=T0 + timedelta(hours=3), method="card"
+        )
+
+    # Assert
+    assert _ids(page) == [mine]
+
+
+def _tie_series(h: Harness, clock: FixedClock) -> tuple[list[uuid.UUID], datetime, datetime]:
+    """Seven payments around [T0, T0 + 40m); returns the in-range ids newest first, from and to."""
+    _charge_at(h, clock, T0 - timedelta(minutes=10))
+    tied = [_charge_at(h, clock, T0), _charge_at(h, clock, T0)]
+    in_range = [_charge_at(h, clock, T0 + timedelta(minutes=minutes)) for minutes in (10, 20, 30)]
+    _charge_at(h, clock, T0 + timedelta(minutes=40))
+    expected = [*reversed(in_range), *sorted(tied, reverse=True)]
+    return expected, T0, T0 + timedelta(minutes=40)
+
+
+def test_list_payments_walk_under_a_date_filter_returns_exactly_the_matching_rows_once(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    expected, created_from, created_to = _tie_series(h, clock)
+    pages: list[PaymentPage] = []
+    cursor: str | None = None
+
+    # Act
+    for _ in range(100):
+        with session_factory() as session:
+            page = list_payments(
+                session,
+                h.merchant_id,
+                limit=2,
+                cursor=cursor,
+                created_from=created_from,
+                created_to=created_to,
+            )
+        pages.append(page)
+        if page.next_cursor is None:
+            break
+        cursor = page.next_cursor
+
+    # Assert
+    assert [_ids(page) for page in pages] == [expected[0:2], expected[2:4], expected[4:5]]
+    assert [page.next_cursor is None for page in pages] == [False, False, True]
+
+
+def test_list_payments_cursor_outside_the_date_range_yields_an_empty_page(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    t = _timeline(h, clock)
+    with session_factory() as session:
+        newest = list_payments(session, h.merchant_id, limit=1)
+    assert isinstance(newest.next_cursor, str)
+    assert _ids(newest) == [t.at_to]
+
+    # Act
+    with session_factory() as session:
+        page = list_payments(
+            session,
+            h.merchant_id,
+            cursor=newest.next_cursor,
+            created_from=t.to,
+            created_to=t.to + timedelta(hours=1),
+        )
+
+    # Assert
+    assert page == PaymentPage(items=[], next_cursor=None)
+
+
+# --- GET /v1/payments filters ---------------------------------------------------------------------------
+
+
+def test_get_payments_created_from_and_created_to_apply_the_half_open_range(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    t = _timeline(h, clock)
+    client = _client(h)
+
+    # Act
+    response = client.get(
+        "/v1/payments",
+        params={"created_from": T0.isoformat(), "created_to": t.to.isoformat()},
+        headers=h.auth,
+    )
+
+    # Assert
+    assert response.status_code == 200
+    assert _body_ids(response.json()) == [str(t.late), str(t.mid), str(t.at_from)]
+    assert response.json()["next_cursor"] is None
+
+
+def test_get_payments_accepts_a_z_suffix_and_each_bound_alone(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    t = _timeline(h, clock)
+    client = _client(h)
+
+    # Act
+    only_from = client.get("/v1/payments", params={"created_from": "2026-11-04T00:00:00Z"}, headers=h.auth)
+    only_to = client.get("/v1/payments", params={"created_to": "2026-11-04T03:00:00Z"}, headers=h.auth)
+
+    # Assert
+    assert (only_from.status_code, only_to.status_code) == (200, 200)
+    assert _body_ids(only_from.json()) == [str(t.at_to), str(t.late), str(t.mid), str(t.at_from)]
+    assert _body_ids(only_to.json()) == [str(t.late), str(t.mid), str(t.at_from), str(t.before)]
+
+
+def test_get_payments_honors_the_offset_so_plus_nine_equals_utc(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    t = _timeline(h, clock)
+    client = _client(h)
+
+    # Act
+    utc = client.get(
+        "/v1/payments",
+        params={"created_from": "2026-11-04T00:00:00Z", "created_to": "2026-11-04T03:00:00Z"},
+        headers=h.auth,
+    )
+    jst = client.get(
+        "/v1/payments",
+        params={"created_from": "2026-11-04T09:00:00+09:00", "created_to": "2026-11-04T12:00:00+09:00"},
+        headers=h.auth,
+    )
+
+    # Assert
+    assert (utc.status_code, jst.status_code) == (200, 200)
+    assert _body_ids(jst.json()) == [str(t.late), str(t.mid), str(t.at_from)]
+    assert jst.json() == utc.json()
+
+
+def test_get_payments_accepts_a_url_encoded_plus_offset_in_the_raw_query_string(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    t = _timeline(h, clock)
+    client = _client(h)
+
+    # Act
+    response = client.get(
+        "/v1/payments?created_from=2026-11-04T09:00:00%2B09:00&created_to=2026-11-04T12:00:00%2B09:00",
+        headers=h.auth,
+    )
+
+    # Assert
+    assert response.status_code == 200
+    assert _body_ids(response.json()) == [str(t.late), str(t.mid), str(t.at_from)]
+
+
+def test_get_payments_method_card_returns_the_card_payments(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    t = _timeline(h, clock)
+    client = _client(h)
+
+    # Act
+    response = client.get("/v1/payments", params={"method": "card"}, headers=h.auth)
+
+    # Assert
+    assert response.status_code == 200
+    assert _body_ids(response.json()) == [
+        str(t.at_to),
+        str(t.late),
+        str(t.mid),
+        str(t.at_from),
+        str(t.before),
+    ]
+
+
+def test_get_payments_state_method_and_date_range_combine_with_and(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    t = _timeline(h, clock)
+    client = _client(h)
+
+    # Act
+    response = client.get(
+        "/v1/payments",
+        params={
+            "state": "declined",
+            "method": "card",
+            "created_from": T0.isoformat(),
+            "created_to": t.to.isoformat(),
+        },
+        headers=h.auth,
+    )
+
+    # Assert
+    assert response.status_code == 200
+    assert _body_ids(response.json()) == [str(t.mid)]
+
+
+def test_get_payments_date_filter_does_not_leak_another_merchants_payment(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    other = _harness(session_factory, clock, deps=h.deps, name="Other")
+    mine = _charge_at(h, clock, T0 + timedelta(hours=1))
+    _charge_at(other, clock, T0 + timedelta(hours=1))
+    client = _client(h)
+
+    # Act
+    response = client.get(
+        "/v1/payments",
+        params={"created_from": T0.isoformat(), "created_to": (T0 + timedelta(hours=3)).isoformat()},
+        headers=h.auth,
+    )
+
+    # Assert
+    assert response.status_code == 200
+    assert _body_ids(response.json()) == [str(mine)]
+
+
+def test_get_payments_walk_with_limit_two_under_a_date_filter_returns_the_matching_rows_once(
+    session_factory: sessionmaker[Session], clock: FixedClock
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    expected, created_from, created_to = _tie_series(h, clock)
+    client = _client(h)
+    filters = {"created_from": created_from.isoformat(), "created_to": created_to.isoformat(), "limit": "2"}
+    pages: list[dict[str, object]] = []
+    cursor: str | None = None
+
+    # Act
+    for _ in range(100):
+        params = dict(filters)
+        if cursor is not None:
+            params["cursor"] = cursor
+        body: dict[str, object] = client.get("/v1/payments", params=params, headers=h.auth).json()
+        pages.append(body)
+        next_cursor = body["next_cursor"]
+        if next_cursor is None:
+            break
+        assert isinstance(next_cursor, str)
+        cursor = next_cursor
+
+    # Assert
+    assert [_body_ids(page) for page in pages] == [
+        [str(i) for i in expected[0:2]],
+        [str(i) for i in expected[2:4]],
+        [str(i) for i in expected[4:5]],
+    ]
+    assert [page["next_cursor"] is None for page in pages] == [False, False, True]
+
+
+@pytest.mark.parametrize(
+    ("params", "detail"),
+    [
+        ({"created_from": "yesterday"}, "invalid created_from"),
+        ({"created_from": "2026-11-04T00:00:00"}, "invalid created_from"),
+        ({"created_from": "2026-11-04"}, "invalid created_from"),
+        ({"created_to": "yesterday"}, "invalid created_to"),
+        ({"created_to": "2026-11-04T00:00:00"}, "invalid created_to"),
+        ({"created_from": "yesterday", "created_to": "2026-11-04T03:00:00Z"}, "invalid created_from"),
+        ({"created_from": "2026-11-04T00:00:00Z", "created_to": "2026-11-04T03:00:00"}, "invalid created_to"),
+        (
+            {"created_from": "2026-11-04T00:00:00Z", "created_to": "2026-11-04T00:00:00Z"},
+            "invalid date range",
+        ),
+        (
+            {"created_from": "2026-11-04T03:00:00Z", "created_to": "2026-11-04T00:00:00Z"},
+            "invalid date range",
+        ),
+        (
+            {"created_from": "2026-11-04T09:00:00+09:00", "created_to": "2026-11-04T00:00:00Z"},
+            "invalid date range",
+        ),
+        ({"method": "wire"}, "invalid method"),
+        ({"method": "CARD"}, "invalid method"),
+    ],
+    ids=[
+        "from_garbage",
+        "from_naive",
+        "from_date_only",
+        "to_garbage",
+        "to_naive",
+        "from_garbage_with_valid_to",
+        "to_naive_with_valid_from",
+        "range_from_equals_to",
+        "range_from_after_to",
+        "range_equal_instant_across_offsets",
+        "method_wire",
+        "method_wrong_case",
+    ],
+)
+def test_get_payments_with_an_invalid_filter_returns_400_and_the_exact_detail(
+    session_factory: sessionmaker[Session], clock: FixedClock, params: dict[str, str], detail: str
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    _charge(h)
+    client = _client(h)
+
+    # Act
+    response = client.get("/v1/payments", params=params, headers=h.auth)
+
+    # Assert
+    assert response.status_code == 400
+    assert response.json() == {"detail": detail}
+
+
+@pytest.mark.parametrize(
+    ("params", "detail"),
+    [
+        ({"created_from": "9999-12-31T23:59:59-23:59"}, "invalid created_from"),
+        ({"created_to": "0001-01-01T00:00:00+23:59"}, "invalid created_to"),
+    ],
+    ids=["from_unrepresentable_in_utc_after_max", "to_unrepresentable_in_utc_before_min"],
+)
+def test_get_payments_with_a_bound_unrepresentable_in_utc_returns_400_and_the_exact_detail(
+    session_factory: sessionmaker[Session], clock: FixedClock, params: dict[str, str], detail: str
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    _charge(h)
+    client = _client(h)
+
+    # Act
+    response = client.get("/v1/payments", params=params, headers=h.auth)
+
+    # Assert
+    assert response.status_code == 400
+    assert response.json() == {"detail": detail}
+
+
+@pytest.mark.parametrize(
+    ("created_from", "created_to"),
+    [
+        ("2026-11-04T23:00:00+23:00", "2026-11-05T02:00:00+23:00"),
+        ("2026-11-04T23:59:00+23:59", "2026-11-05T02:59:00+23:59"),
+        ("2026-11-03T01:00:00-23:00", "2026-11-03T04:00:00-23:00"),
+    ],
+    ids=["plus_23_00", "plus_23_59", "minus_23_00"],
+)
+def test_get_payments_accepts_a_large_offset_and_filters_like_the_equivalent_utc_range(
+    session_factory: sessionmaker[Session], clock: FixedClock, created_from: str, created_to: str
+) -> None:
+    # Arrange
+    h = _harness(session_factory, clock)
+    t = _timeline(h, clock)
+    client = _client(h)
+
+    # Act
+    utc = client.get(
+        "/v1/payments",
+        params={"created_from": "2026-11-04T00:00:00Z", "created_to": "2026-11-04T03:00:00Z"},
+        headers=h.auth,
+    )
+    offset = client.get(
+        "/v1/payments",
+        params={"created_from": created_from, "created_to": created_to},
+        headers=h.auth,
+    )
+
+    # Assert
+    assert (utc.status_code, offset.status_code) == (200, 200)
+    assert _body_ids(utc.json()) == [str(t.late), str(t.mid), str(t.at_from)]
+    assert _body_ids(offset.json()) == [str(t.late), str(t.mid), str(t.at_from)]
+    assert offset.json() == utc.json()

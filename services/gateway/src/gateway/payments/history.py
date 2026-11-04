@@ -15,6 +15,7 @@ from gateway.payments.tokenization.models import CardToken
 
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
+PAYMENT_METHODS = frozenset({"card"})
 
 
 class InvalidCursorError(Exception):
@@ -33,11 +34,26 @@ def list_payments(
     limit: int = DEFAULT_PAGE_SIZE,
     cursor: str | None = None,
     state: PaymentState | None = None,
+    created_from: datetime | None = None,
+    created_to: datetime | None = None,
+    method: str | None = None,
 ) -> PaymentPage:
-    """The merchant's payments, newest first (`created_at`, then `id`, both DESC), keyset-paginated."""
+    """The merchant's payments, newest first (`created_at`, then `id`, both DESC), keyset-paginated.
+    Filters combine with AND; the date range is half-open `created_from <= created_at < created_to` and takes
+    aware datetimes only (a naive one raises ValueError). The cursor does not carry the filters:
+    resend them with it."""
+    for bound in (created_from, created_to):
+        if bound is not None and bound.utcoffset() is None:
+            raise ValueError("created_from / created_to must be timezone-aware")
     query = _summary_query(merchant_id)
     if state is not None:
         query = query.where(Payment.state == state)
+    if created_from is not None:
+        query = query.where(Payment.created_at >= created_from)
+    if created_to is not None:
+        query = query.where(Payment.created_at < created_to)
+    if method is not None:
+        query = query.where(Payment.method == method)
     if cursor is not None:
         created_at, payment_id = decode_cursor(cursor)
         query = query.where(tuple_(Payment.created_at, Payment.id) < tuple_(created_at, payment_id))

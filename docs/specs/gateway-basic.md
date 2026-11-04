@@ -47,6 +47,20 @@ Route `GET /v1/payments` (Bearer API key) query `limit` (1–100, default 20; ou
 (one of the payment states; else 422) → 200 `{"items": [...], "next_cursor": str | null}`. Missing/invalid key → 401.
 Invalid cursor → 400 `{"detail": "invalid cursor"}`.
 
+Filters (B3.1), all optional and combined with AND (and with `state`):
+- `created_from`, `created_to`: ISO 8601 date-times with an offset (`2026-11-04T00:00:00Z`, `…+09:00`), compared in
+  UTC as a half-open range `created_from <= created_at < created_to`. Either may be given alone. Not parseable, or
+  without an offset (naive) → 400 `{"detail": "invalid created_from"}` / `{"detail": "invalid created_to"}`. Both
+  given with `created_from >= created_to` → 400 `{"detail": "invalid date range"}`. The route normalises an accepted
+  bound to UTC; one that cannot be expressed in UTC (`9999-12-31T23:59:59-23:59`) is also 400 `invalid created_*`,
+  never 500. A `+` offset must be URL-encoded as `%2B` (a raw `+` decodes to a space and gives 400).
+- `method`: one of `PAYMENT_METHODS` (`{"card"}` in Basic); anything else → 400 `{"detail": "invalid method"}`.
+- `list_payments(..., created_from: datetime | None = None, created_to: datetime | None = None, method: str | None =
+  None)` applies them in SQL; the route parses and validates (the service takes aware datetimes only).
+- Pagination: the cursor stays keyset on `(created_at, id)` and does not carry the filters. The caller resends the
+  same filters with `cursor`; every page then holds only matching rows, with none repeated or skipped. A cursor
+  outside the range is not an error (that page is empty).
+
 `get_payment(session, merchant_id, payment_id) -> PaymentSummary` (B8.1): the same summary as a `list_payments` item.
 Another merchant's payment or an unknown id → `PaymentNotFoundError` (from `gateway.payments.disputes`), so the two
 cannot be told apart.

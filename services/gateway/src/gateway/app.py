@@ -3,6 +3,7 @@ import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
@@ -61,6 +62,7 @@ from gateway.payments.disputes import (
 from gateway.payments.history import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
+    PAYMENT_METHODS,
     InvalidCursorError,
     get_payment,
     list_payments,
@@ -197,8 +199,9 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     - GET /v1/me/transfers?limit&cursor (Bearer session) → 200 {items, next_cursor}: the user's sent and
       received transfers, newest first, counterparty email masked; invalid cursor → 400. All with
       Cache-Control: no-store.
-    - GET /v1/payments?limit&cursor&state (Bearer API key) → 200 {items, next_cursor}: the merchant's
-      payments, newest first. Invalid cursor → 400.
+    - GET /v1/payments?limit&cursor&state&created_from&created_to&method (Bearer API key) → 200 {items,
+      next_cursor}: the merchant's payments, newest first; half-open date range, offsets required.
+      Invalid cursor, date, range or method → 400.
     - GET /v1/payments/{payment_id} (Bearer API key) → 200 PaymentSummary; unknown or another merchant's → the
       same 404. Both with Cache-Control: no-store.
     - GET /v1/payments/{payment_id}/risk (Bearer API key) → 200 PaymentRiskView (flags only); unknown or
@@ -488,10 +491,19 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
         cursor: Annotated[str | None, Query(max_length=512)] = None,
         state: PaymentState | None = None,
+        created_from: Annotated[str | None, Query(max_length=64)] = None,
+        created_to: Annotated[str | None, Query(max_length=64)] = None,
+        method: Annotated[str | None, Query(max_length=16)] = None,
     ) -> PaymentListResponse:
+        start = _aware_datetime_param(created_from, "created_from")
+        end = _aware_datetime_param(created_to, "created_to")
+        if start is not None and end is not None and start >= end:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid date range")
+        if method is not None and method not in PAYMENT_METHODS:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid method")
         try:
             with session_factory() as session:
-                page = list_payments(session, merchant_id, limit, cursor, state)
+                page = list_payments(session, merchant_id, limit, cursor, state, start, end, method)
         except InvalidCursorError:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid cursor") from None
         return PaymentListResponse(items=page.items, next_cursor=page.next_cursor)
@@ -562,6 +574,20 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
             raise HTTPException(status.HTTP_409_CONFLICT, "invalid dispute transition") from None
 
     return app
+
+
+def _aware_datetime_param(value: str | None, name: str) -> datetime | None:
+    """An ISO 8601 date-time with an offset, returned in UTC. Anything else (naive, date-only, or an instant
+    outside the UTC datetime range such as `9999-12-31T23:59:59-23:59`) → 400."""
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.utcoffset() is None:
+            raise ValueError
+        return parsed.astimezone(UTC)
+    except (ValueError, OverflowError):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"invalid {name}") from None
 
 
 def _require_idempotency_key(idempotency_key: str | None) -> str:
