@@ -92,10 +92,6 @@ class SignUpRequest(BaseModel):
     password: SecretStr = Field(min_length=8, max_length=256)
 
 
-class UserTokenRequest(SignUpRequest):
-    """Same field rules as sign-up."""
-
-
 class SignUpResponse(BaseModel):
     user_id: str
     wallet_account_id: str
@@ -113,6 +109,10 @@ class UserTokenResponse(MerchantTokenResponse):
 
 class SessionRequest(SignUpRequest):
     totp_code: SecretStr | None = Field(default=None, min_length=1, max_length=16)
+
+
+class UserTokenRequest(SessionRequest):
+    """Same field rules as a session login."""
 
 
 class SessionResponse(MerchantTokenResponse):
@@ -160,8 +160,9 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
       missing Idempotency-Key → 400; invalid card → 422.
     - POST /v1/merchant-tokens (Bearer API key) → 201 {access_token, token_type, expires_in}: an RS256 token
       for ops-ai. Invalid API key → 401; no private key configured → 503.
-    - POST /v1/user-tokens {email, password} → 201 {access_token, token_type, expires_in}: an RS256 user token
-      for ops-ai. Unknown email and wrong password → the identical 401; no private key configured → 503.
+    - POST /v1/user-tokens {email, password, totp_code?} → 201 {access_token, token_type, expires_in}: an
+      RS256 user token for ops-ai. Unknown email and wrong password → the identical 401; no private key
+      configured → 503. A user with TOTP enabled gets the same second-factor errors as /v1/sessions.
       At most LOGIN_CONCURRENCY password checks run at once; no slot within LOGIN_SLOT_WAIT_SECONDS → 503
       {"detail": "try again later"} with Retry-After: 1.
     - POST /v1/sessions {email, password, totp_code?} → 201 {access_token, token_type, expires_in, amr}: a
@@ -205,18 +206,46 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid api key")
         return merchant_id
 
-    def check_password(body: SignUpRequest) -> tuple[LoginRecord | None, uuid.UUID | None]:
-        """Unknown email and wrong password take the same argon2 path; 503 when no login slot is free."""
+    def check_password(body: SignUpRequest) -> tuple[LoginRecord | None, uuid.UUID | None, bool]:
+        """Unknown email and wrong password take the same argon2 path; 503 when no login slot is free. Also
+        returns whether TOTP is enabled, read in the same session so none is open during argon2. An unknown
+        email runs the same query for the nil id, so both cost the same."""
         with session_factory() as session:
             record = find_login(session, body.email)
+            needs_otp = totp_enabled(session, uuid.UUID(int=0) if record is None else record.user_id)
         if not login_slots.acquire(timeout=LOGIN_SLOT_WAIT_SECONDS):
             raise HTTPException(
                 status.HTTP_503_SERVICE_UNAVAILABLE, "try again later", headers={"Retry-After": "1"}
             )
         try:
-            return record, verify_login(record, body.password.get_secret_value())
+            return record, verify_login(record, body.password.get_secret_value()), needs_otp
         finally:
             login_slots.release()
+
+    def second_factor(user_id: uuid.UUID, needs_otp: bool, totp_code: SecretStr | None) -> tuple[str, ...]:
+        """amr after a password success; a user with TOTP enabled must also pass the code check."""
+        if not needs_otp:
+            return (AMR_FIRST_FACTOR,)
+        if deps.totp_encryption_key is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "mfa not configured")
+        if totp_code is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "mfa required")
+        try:
+            check_totp(
+                session_factory,
+                deps.charge.clock,
+                deps.totp_encryption_key,
+                user_id,
+                totp_code.get_secret_value(),
+            )
+        except InvalidTotpCodeError:
+            write_user_audit(user_id, "auth.login_failed", {"factor": "totp"})
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials") from None
+        except TotpLockedError:
+            raise HTTPException(status.HTTP_423_LOCKED, "mfa locked") from None
+        except TotpDecryptError:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "mfa unavailable") from None
+        return (AMR_FIRST_FACTOR, AMR_OTP)
 
     def write_user_audit(user_id: uuid.UUID, action: str, summary: dict[str, object]) -> None:
         with session_factory.begin() as session:
@@ -283,9 +312,10 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     def user_tokens(body: UserTokenRequest, response: Response) -> UserTokenResponse:
         if deps.jwt_private_key_pem is None:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "token issuing not configured")
-        _, user_id = check_password(body)
+        _, user_id, needs_otp = check_password(body)
         if user_id is None:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
+        second_factor(user_id, needs_otp, body.totp_code)
         token = issue_user_token(deps.jwt_private_key_pem, user_id, deps.charge.clock())
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
@@ -295,35 +325,12 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     def create_session(body: SessionRequest, response: Response) -> SessionResponse:
         if deps.jwt_private_key_pem is None:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "token issuing not configured")
-        record, user_id = check_password(body)
+        record, user_id, needs_otp = check_password(body)
         if user_id is None:
             if record is not None:
                 write_user_audit(record.user_id, "auth.login_failed", {"factor": "password"})
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
-        with session_factory() as session:
-            needs_otp = totp_enabled(session, user_id)
-        amr: tuple[str, ...] = (AMR_FIRST_FACTOR,)
-        if needs_otp:
-            if deps.totp_encryption_key is None:
-                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "mfa not configured")
-            if body.totp_code is None:
-                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "mfa required")
-            try:
-                check_totp(
-                    session_factory,
-                    deps.charge.clock,
-                    deps.totp_encryption_key,
-                    user_id,
-                    body.totp_code.get_secret_value(),
-                )
-            except InvalidTotpCodeError:
-                write_user_audit(user_id, "auth.login_failed", {"factor": "totp"})
-                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials") from None
-            except TotpLockedError:
-                raise HTTPException(status.HTTP_423_LOCKED, "mfa locked") from None
-            except TotpDecryptError:
-                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "mfa unavailable") from None
-            amr = (AMR_FIRST_FACTOR, AMR_OTP)
+        amr = second_factor(user_id, needs_otp, body.totp_code)
         token = issue_session_token(deps.jwt_private_key_pem, user_id, deps.charge.clock(), amr)
         write_user_audit(user_id, "auth.login", {"amr": list(amr)})
         response.headers["Cache-Control"] = "no-store"

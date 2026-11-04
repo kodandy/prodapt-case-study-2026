@@ -185,7 +185,7 @@ Routes (Bearer API key): `GET /v1/disputes/{dispute_id}` → 200 `DisputeView` o
 
 What already exists (SQ2): `POST /v1/signup` (argon2id, one USD wallet), `POST /v1/user-tokens` (an RS256 token
 for ops-ai, aud `ops-ai`, login semaphore and timing-equal failures). B1 adds a gateway-side session, TOTP as a second
-factor and a wallet read. `/v1/user-tokens` is unchanged (it does not ask for TOTP; noted as a gap).
+factor and a wallet read. `/v1/user-tokens` asks for the same second factor as `/v1/sessions` (Decision 6).
 
 ### Decisions
 
@@ -208,6 +208,14 @@ factor and a wallet read. `/v1/user-tokens` is unchanged (it does not ask for TO
    `auth.login_failed` (known user only, summary `{"factor": "password" | "totp"}`), `mfa.totp_enrolled`,
    `mfa.totp_enabled`, `mfa.totp_locked`. Unknown emails write nothing (no raw email in the audit log). Secrets,
    codes and passwords are never in a summary.
+6. **`/v1/user-tokens` requires TOTP once it is enabled** (user decision 2026-11-04). Before, a password alone
+   issued an ops-ai token for a user with TOTP on, which bypassed MFA for the ops-ai scope. The route now runs the
+   same second-factor check as `/v1/sessions`: same body field, same errors, same replay and lockout counter
+   (one budget across both routes), and the same `auth.login_failed {"factor": "totp"}` audit row on a wrong code.
+   A user without TOTP is unchanged: the password alone still issues the token, and a supplied `totp_code` is
+   ignored. The token's claims do not change (no `amr` is added, ops-ai is untouched). The request change is
+   additive: `totp_code` is optional. An ops-ai token issued before TOTP was enabled stays valid until it
+   expires (at most 900 s); ops-ai tokens cannot be revoked.
 
 ### Data — `gateway.user_totp` (`gateway/accounts/models.py: UserTotp`)
 
@@ -255,6 +263,11 @@ factor and a wallet read. `/v1/user-tokens` is unchanged (it does not ask for TO
     `{"detail": "invalid credentials"}`; locked → 423 `{"detail": "mfa locked"}`.
   - TOTP not enabled → `amr ["pwd"]` (a supplied `totp_code` is ignored); enabled → `amr ["pwd", "otp"]`.
   - `totp_code` (if present) is a string of 1..16 chars, else 422.
+- `POST /v1/user-tokens` `{email, password, totp_code?}` → 201 `{access_token, token_type, expires_in}` as before
+  (Decision 6). Password failures are unchanged (identical 401, same semaphore). For a user with TOTP enabled:
+  `totp_code` absent → 401 `{"detail": "mfa required"}`; wrong / replayed code → 401
+  `{"detail": "invalid credentials"}`; locked → 423 `{"detail": "mfa locked"}`; no encryption key, or a secret
+  that fails to decrypt → 503. `totp_code` field rules as for `/v1/sessions`; other extra fields are still 422.
 - `POST /v1/me/mfa/totp` (Bearer session) → 201 `{secret, otpauth_uri}`, `Cache-Control: no-store`; 409 when
   already enabled; 503 without the encryption key.
 - `POST /v1/me/mfa/totp/verify` (Bearer session) `{code}` → 200 `{"totp_enabled": true}`; 400
