@@ -24,7 +24,6 @@ from gateway.accounts.mfa import (
 )
 from gateway.accounts.service import (
     EmailAlreadyRegisteredError,
-    LoginRecord,
     authenticate_api_key,
     find_login,
     sign_up,
@@ -206,24 +205,30 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid api key")
         return merchant_id
 
-    def check_password(body: SignUpRequest) -> tuple[LoginRecord | None, uuid.UUID | None, bool]:
-        """Unknown email and wrong password take the same argon2 path; 503 when no login slot is free. Also
-        returns whether TOTP is enabled, read in the same session so none is open during argon2. An unknown
-        email runs the same query for the nil id, so both cost the same."""
+    def check_password(body: SignUpRequest) -> uuid.UUID:
+        """The user id on a password success. Unknown email and wrong password take the same argon2 path and
+        the identical 401; a known user's failure is audited. 503 when no login slot is free."""
         with session_factory() as session:
             record = find_login(session, body.email)
-            needs_otp = totp_enabled(session, uuid.UUID(int=0) if record is None else record.user_id)
         if not login_slots.acquire(timeout=LOGIN_SLOT_WAIT_SECONDS):
             raise HTTPException(
                 status.HTTP_503_SERVICE_UNAVAILABLE, "try again later", headers={"Retry-After": "1"}
             )
         try:
-            return record, verify_login(record, body.password.get_secret_value()), needs_otp
+            user_id = verify_login(record, body.password.get_secret_value())
         finally:
             login_slots.release()
+        if user_id is None:
+            if record is not None:
+                write_user_audit(record.user_id, "auth.login_failed", {"factor": "password"})
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
+        return user_id
 
-    def second_factor(user_id: uuid.UUID, needs_otp: bool, totp_code: SecretStr | None) -> tuple[str, ...]:
-        """amr after a password success; a user with TOTP enabled must also pass the code check."""
+    def second_factor(user_id: uuid.UUID, totp_code: SecretStr | None) -> tuple[str, ...]:
+        """amr after a password success; a user with TOTP enabled must also pass the code check. The flag is
+        read only now, after argon2, so an enrolment confirmed during the password check is not missed."""
+        with session_factory() as session:
+            needs_otp = totp_enabled(session, user_id)
         if not needs_otp:
             return (AMR_FIRST_FACTOR,)
         if deps.totp_encryption_key is None:
@@ -312,10 +317,8 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     def user_tokens(body: UserTokenRequest, response: Response) -> UserTokenResponse:
         if deps.jwt_private_key_pem is None:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "token issuing not configured")
-        _, user_id, needs_otp = check_password(body)
-        if user_id is None:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
-        second_factor(user_id, needs_otp, body.totp_code)
+        user_id = check_password(body)
+        second_factor(user_id, body.totp_code)
         token = issue_user_token(deps.jwt_private_key_pem, user_id, deps.charge.clock())
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
@@ -325,12 +328,8 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     def create_session(body: SessionRequest, response: Response) -> SessionResponse:
         if deps.jwt_private_key_pem is None:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "token issuing not configured")
-        record, user_id, needs_otp = check_password(body)
-        if user_id is None:
-            if record is not None:
-                write_user_audit(record.user_id, "auth.login_failed", {"factor": "password"})
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
-        amr = second_factor(user_id, needs_otp, body.totp_code)
+        user_id = check_password(body)
+        amr = second_factor(user_id, body.totp_code)
         token = issue_session_token(deps.jwt_private_key_pem, user_id, deps.charge.clock(), amr)
         write_user_audit(user_id, "auth.login", {"amr": list(amr)})
         response.headers["Cache-Control"] = "no-store"

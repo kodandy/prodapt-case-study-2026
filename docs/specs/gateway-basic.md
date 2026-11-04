@@ -214,8 +214,11 @@ factor and a wallet read. `/v1/user-tokens` asks for the same second factor as `
    (one budget across both routes), and the same `auth.login_failed {"factor": "totp"}` audit row on a wrong code.
    A user without TOTP is unchanged: the password alone still issues the token, and a supplied `totp_code` is
    ignored. The token's claims do not change (no `amr` is added, ops-ai is untouched). The request change is
-   additive: `totp_code` is optional. An ops-ai token issued before TOTP was enabled stays valid until it
-   expires (at most 900 s); ops-ai tokens cannot be revoked.
+   additive: `totp_code` is optional. The TOTP-enabled flag is read after the password check succeeds, not
+   before argon2, so a login racing an enrolment confirm cannot use a stale "not enabled" read (security review
+   2026-11-04). A wrong password for a known user writes `auth.login_failed {"factor": "password"}`, as on
+   `/v1/sessions` (user decision 2026-11-04). An ops-ai token issued before TOTP was enabled stays valid until
+   it expires (at most 900 s); ops-ai tokens cannot be revoked.
 
 ### Data — `gateway.user_totp` (`gateway/accounts/models.py: UserTotp`)
 
@@ -264,7 +267,8 @@ factor and a wallet read. `/v1/user-tokens` asks for the same second factor as `
   - TOTP not enabled → `amr ["pwd"]` (a supplied `totp_code` is ignored); enabled → `amr ["pwd", "otp"]`.
   - `totp_code` (if present) is a string of 1..16 chars, else 422.
 - `POST /v1/user-tokens` `{email, password, totp_code?}` → 201 `{access_token, token_type, expires_in}` as before
-  (Decision 6). Password failures are unchanged (identical 401, same semaphore). For a user with TOTP enabled:
+  (Decision 6). Password failures keep the identical 401 and the same semaphore; a known user's wrong password
+  writes `auth.login_failed {"factor": "password"}` as on `/v1/sessions`. For a user with TOTP enabled:
   `totp_code` absent → 401 `{"detail": "mfa required"}`; wrong / replayed code → 401
   `{"detail": "invalid credentials"}`; locked → 423 `{"detail": "mfa locked"}`; no encryption key, or a secret
   that fails to decrypt → 503. `totp_code` field rules as for `/v1/sessions`; other extra fields are still 422.

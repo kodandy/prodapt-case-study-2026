@@ -6,9 +6,11 @@ from datetime import timedelta
 import jwt
 import pyotp
 import pytest
+from argon2 import PasswordHasher
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
+from gateway.accounts.mfa import confirm_totp
 from gateway.accounts.service import sign_up
 from gateway.app import GatewayAppDeps, create_app
 from gateway.clock import FixedClock
@@ -139,6 +141,36 @@ def _enable_totp(client: TestClient, clock: FixedClock) -> str:
     assert confirmed.status_code == 200
     clock.advance(timedelta(seconds=2 * STEP_SECONDS))
     return secret
+
+
+def _enrol_pending_totp(client: TestClient) -> str:
+    """Enrols through the routes but does not confirm, so TOTP stays disabled. Returns the secret."""
+    login = _session(client)
+    assert login.status_code == 201
+    enrolled = client.post(ENROL, headers=_bearer(str(login.json()["access_token"])))
+    assert enrolled.status_code == 201
+    return str(enrolled.json()["secret"])
+
+
+def _confirm_totp_while_argon2_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: sessionmaker[Session],
+    clock: FixedClock,
+    user_id: uuid.UUID,
+    code: str,
+) -> list[str]:
+    """Confirms the pending enrolment through a separate session on the first argon2 verify, then verifies."""
+    confirmations: list[str] = []
+    original_verify = PasswordHasher.verify
+
+    def confirming_verify(self: PasswordHasher, hash: str | bytes, password: str | bytes) -> bool:
+        if not confirmations:
+            confirm_totp(session_factory, clock, TOTP_KEY, user_id, code)
+            confirmations.append("confirmed")
+        return original_verify(self, hash, password)
+
+    monkeypatch.setattr(PasswordHasher, "verify", confirming_verify)
+    return confirmations
 
 
 # --- totp_code field -------------------------------------------------------------------------------------
@@ -625,3 +657,117 @@ def test_a_missing_totp_code_on_user_tokens_writes_no_auth_login_failed_row(
     # Assert
     assert (response.status_code, response.json()) == (401, MFA_REQUIRED)
     assert _audit(session_factory, "auth.login_failed") == []
+
+
+# --- the TOTP flag is read after the password check (TOCTOU) ---------------------------------------------
+
+
+def test_user_tokens_asks_for_mfa_when_totp_is_confirmed_while_argon2_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: sessionmaker[Session],
+    clock: FixedClock,
+    private_pem: str,
+) -> None:
+    # Arrange
+    client = _client(session_factory, clock, private_pem)
+    user_id = _sign_up(session_factory, clock)
+    secret = _enrol_pending_totp(client)
+    confirmations = _confirm_totp_while_argon2_runs(
+        monkeypatch, session_factory, clock, user_id, _code(secret, clock)
+    )
+
+    # Act
+    response = _user_token(client)
+
+    # Assert
+    assert confirmations == ["confirmed"]
+    assert (response.status_code, response.json()) == (401, MFA_REQUIRED)
+    assert "access_token" not in response.text
+
+
+def test_sessions_asks_for_mfa_when_totp_is_confirmed_while_argon2_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: sessionmaker[Session],
+    clock: FixedClock,
+    private_pem: str,
+) -> None:
+    # Arrange
+    client = _client(session_factory, clock, private_pem)
+    user_id = _sign_up(session_factory, clock)
+    secret = _enrol_pending_totp(client)
+    confirmations = _confirm_totp_while_argon2_runs(
+        monkeypatch, session_factory, clock, user_id, _code(secret, clock)
+    )
+
+    # Act
+    response = _session(client)
+
+    # Assert
+    assert confirmations == ["confirmed"]
+    assert (response.status_code, response.json()) == (401, MFA_REQUIRED)
+    assert "access_token" not in response.text
+
+
+# --- wrong password audit --------------------------------------------------------------------------------
+
+
+def test_a_wrong_password_for_a_known_user_on_user_tokens_writes_one_password_factor_audit_row(
+    session_factory: sessionmaker[Session], clock: FixedClock, private_pem: str
+) -> None:
+    # Arrange
+    client = _client(session_factory, clock, private_pem)
+    user_id = _sign_up(session_factory, clock)
+
+    # Act
+    response = _user_token(client, password=WRONG_PASSWORD)
+
+    # Assert
+    assert (response.status_code, response.json()) == (401, INVALID_CREDENTIALS)
+    assert _audit(session_factory, "auth.login_failed") == [
+        {
+            "actor_id": f"user:{user_id}",
+            "actor_role": "consumer",
+            "action": "auth.login_failed",
+            "summary": {"factor": "password"},
+        }
+    ]
+
+
+def test_a_wrong_password_for_a_totp_user_on_user_tokens_writes_only_the_password_factor_audit_row(
+    session_factory: sessionmaker[Session], clock: FixedClock, private_pem: str
+) -> None:
+    # Arrange
+    client = _client(session_factory, clock, private_pem)
+    user_id = _sign_up(session_factory, clock)
+    secret = _enable_totp(client, clock)
+
+    # Act
+    response = _user_token(client, password=WRONG_PASSWORD, totp_code=_wrong_code(secret, clock))
+
+    # Assert
+    assert (response.status_code, response.json()) == (401, INVALID_CREDENTIALS)
+    assert _audit(session_factory, "auth.login_failed") == [
+        {
+            "actor_id": f"user:{user_id}",
+            "actor_role": "consumer",
+            "action": "auth.login_failed",
+            "summary": {"factor": "password"},
+        }
+    ]
+
+
+def test_an_unknown_email_on_user_tokens_writes_no_audit_row_at_all(
+    session_factory: sessionmaker[Session], clock: FixedClock, private_pem: str
+) -> None:
+    # Arrange
+    client = _client(session_factory, clock, private_pem)
+    _sign_up(session_factory, clock)
+
+    # Act
+    response = client.post(USER_TOKENS, json={"email": "nobody@example.com", "password": PASSWORD})
+
+    # Assert
+    with session_factory() as session:
+        audit_rows = session.execute(text("SELECT count(*) AS n FROM gateway.audit_log")).scalar_one()
+    assert (response.status_code, response.json()) == (401, INVALID_CREDENTIALS)
+    assert audit_rows == 0
