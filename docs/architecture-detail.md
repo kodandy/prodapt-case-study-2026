@@ -287,7 +287,10 @@ The LLM can propose. It never approves. This is the only command on the port. No
 
 ## 6. Web and ops
 
-- One Vite SPA with three areas: user, merchant and ops console. nginx routes `/api/gw` and `/api/ops`.
+- One Vite + React + TypeScript static SPA (no SSR) with three areas: user, merchant and ops console. A `web` nginx
+  service serves the bundle and routes `/api/gw` and `/api/ops` on the same origin (no CORS), with CSP and `no-store`.
+  Tokens and the merchant API key live in memory only. Production edge: GCP (Cloud CDN + Cloud Armor) as the
+  reference, Cloudflare as a written alternative (design only). Details: `docs/specs/web.md`.
 - The clock is injectable, with a fixed `DEMO_NOW`. Notifications are an in-app table plus a log adapter.
 
 ### Restart behavior

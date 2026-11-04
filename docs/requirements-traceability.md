@@ -116,9 +116,9 @@ Paths are planned locations from `docs/architecture-detail.md` §1; they are fix
 
 | ID | Sub-requirement | Acceptance criterion | Satisfied by (code) | Verified by (test) | Phase | Status |
 |---|---|---|---|---|---|---|
-| B13.1 | User screen | Sign-up/login with MFA, wallets, pay, history, refund request / dispute | `web/src/features/user/` | Playwright smoke | 2–3 | Planned |
+| B13.1 | User screen | Sign-up/login with MFA, wallets, pay, history, refund request / dispute | `web/src/features/user/` | Playwright smoke | 2–3 | Planned (Partial: no user refund/dispute, pay = P2P) |
 | B13.2 | Merchant screen | Payments list, settlement summary, support assistant chat; refund from a `suggested_action` requires explicit confirmation | `web/src/features/merchant/` | Playwright smoke | 2–3 | Planned |
-| B13.3 | Ops console (addition) | NL failure query, investigation with evidence, flagged transactions, alerts, ticket queue, approvals | `web/src/features/ops/` | Playwright smoke | 3 | Planned |
+| B13.3 | Ops console (addition) | NL failure query, investigation with evidence, flagged transactions, alerts, ticket queue, approvals | `web/src/features/ops/` | Playwright smoke | 3 | Design (no ops principal; see docs/specs/web.md) |
 
 ## Sample queries (must run end-to-end in the demo)
 
