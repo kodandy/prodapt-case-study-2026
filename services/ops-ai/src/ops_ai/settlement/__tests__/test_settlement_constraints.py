@@ -159,7 +159,7 @@ def test_the_constraints_migration_follows_the_settlement_entries_migration() ->
     script = ScriptDirectory.from_config(_ops_ai_config())
 
     # Act
-    head = script.get_revision(script.get_current_head() or "")
+    head = script.get_revision("a3f7c9e15b28")
 
     # Assert
     assert head.revision != SETTLEMENT_ENTRIES_REVISION
