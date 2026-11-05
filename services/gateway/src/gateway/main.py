@@ -42,5 +42,6 @@ def build_app_from_env() -> FastAPI:
                 else settings.totp_encryption_key.get_secret_value()
             ),
             readiness=lambda: check_ready(session_factory, redis),
+            demo_top_up_enabled=settings.demo_top_up_enabled,
         )
     )

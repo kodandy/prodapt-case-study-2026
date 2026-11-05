@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from gateway.db import GatewayBase, uuid_pk
+from gateway.payments.fx import models as _fx_models  # noqa: F401  (FK target table)
 
 
 class LedgerAccount(GatewayBase):
@@ -60,3 +61,52 @@ class Transfer(GatewayBase):
     request_hash: Mapped[str] = mapped_column(String(64))
     response_body: Mapped[dict[str, Any]] = mapped_column(JSONB)
     created_at: Mapped[datetime]
+    recipient_currency: Mapped[str | None] = mapped_column(String(3))
+    """Cross-currency only (with the two columns below); NULL for a same-currency transfer."""
+    recipient_amount_minor: Mapped[int | None] = mapped_column(BigInteger)
+    fx_rate_id: Mapped[str | None] = mapped_column(ForeignKey("fx_rates.id"))
+
+
+class WalletTopUp(GatewayBase):
+    """Demo funding source credit (`POST /v1/me/top-ups`), idempotent per user."""
+
+    __tablename__ = "wallet_top_ups"
+    __table_args__ = (
+        UniqueConstraint("user_id", "idempotency_key"),
+        CheckConstraint("amount_minor > 0", name="amount_positive"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ledger_accounts.id"))
+    amount_minor: Mapped[int] = mapped_column(BigInteger)
+    currency: Mapped[str] = mapped_column(String(3))
+    idempotency_key: Mapped[str] = mapped_column(String(255))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    response_body: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime]
+
+
+class Payout(GatewayBase):
+    """External-rail payout (bank_transfer / upi). The raw destination is never stored, only its mask."""
+
+    __tablename__ = "payouts"
+    __table_args__ = (
+        UniqueConstraint("user_id", "idempotency_key"),
+        CheckConstraint("amount_minor > 0", name="amount_positive"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ledger_accounts.id"))
+    method: Mapped[str] = mapped_column(String(16))
+    amount_minor: Mapped[int] = mapped_column(BigInteger)
+    currency: Mapped[str] = mapped_column(String(3))
+    destination_masked: Mapped[str] = mapped_column(String(16))
+    state: Mapped[str] = mapped_column(String(16))
+    """pending | succeeded | failed | unknown"""
+    failure_code: Mapped[str | None] = mapped_column(String(64))
+    idempotency_key: Mapped[str] = mapped_column(String(255))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]

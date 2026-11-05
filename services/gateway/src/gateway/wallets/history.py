@@ -82,11 +82,15 @@ def _unprintable(ch: str) -> bool:
 
 def _item(row: Transfer, user_id: uuid.UUID, sender_email: str, recipient_email: str) -> TransferHistoryItem:
     sent = row.sender_user_id == user_id
+    amount_minor, currency = row.amount_minor, row.currency
+    # A cross-currency transfer shows each side its own money: what was debited or what was credited.
+    if not sent and row.recipient_currency is not None and row.recipient_amount_minor is not None:
+        amount_minor, currency = row.recipient_amount_minor, row.recipient_currency
     return TransferHistoryItem(
         transfer_id=row.id,
         direction="sent" if sent else "received",
         counterparty_email_masked=mask_email(recipient_email if sent else sender_email),
-        amount_minor=row.amount_minor,
-        currency=row.currency,
+        amount_minor=amount_minor,
+        currency=currency,
         created_at=row.created_at,
     )

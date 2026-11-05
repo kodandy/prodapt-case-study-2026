@@ -44,7 +44,12 @@ def ensure_account(
 
 
 def post_journal(
-    session: Session, clock: Clock, ref_type: str, ref_id: uuid.UUID, lines: list[PostingLine]
+    session: Session,
+    clock: Clock,
+    ref_type: str,
+    ref_id: uuid.UUID,
+    lines: list[PostingLine],
+    fx_rate_id: str | None = None,
 ) -> uuid.UUID:
     """Writes one journal. Raises UnbalancedJournalError unless lines sum to zero per currency. No commit."""
     if not lines:
@@ -55,7 +60,9 @@ def post_journal(
     unbalanced = {currency: total for currency, total in totals.items() if total != 0}
     if unbalanced:
         raise UnbalancedJournalError(f"unbalanced per currency: {unbalanced}")
-    journal = JournalEntry(id=uuid.uuid4(), ref_type=ref_type, ref_id=ref_id, created_at=clock())
+    journal = JournalEntry(
+        id=uuid.uuid4(), ref_type=ref_type, ref_id=ref_id, created_at=clock(), fx_rate_id=fx_rate_id
+    )
     session.add(journal)
     session.flush()
     session.add_all(

@@ -15,6 +15,8 @@ class GatewaySettings(BaseSettings):
     card_fingerprint_key: SecretStr = Field(min_length=MIN_SECRET_LENGTH)
     jwt_private_key_pem: SecretStr | None = None
     totp_encryption_key: SecretStr | None = Field(default=None, min_length=MIN_SECRET_LENGTH)
+    demo_top_up_enabled: bool = False
+    """GATEWAY_DEMO_TOP_UP_ENABLED: exposes POST /v1/me/top-ups (demo funding only)."""
 
 
 def load_gateway_settings() -> GatewaySettings:
