@@ -5,7 +5,6 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import pytest
-from gateway.clock import FixedClock
 from ops_ai.alerts import (
     MAX_DELIVERY_ATTEMPTS,
     OPS_ALERT_CHANNEL,
@@ -26,6 +25,19 @@ FRAUD_ALERT = uuid.UUID("cccccccc-0000-4000-8000-000000000003")
 TITLE = "Card testing suspected"
 BODY = "12 micro card payments on 4 distinct cards over 1 min 50 s"
 STREAM_FIELDS = {"alert_id", "kind", "severity", "merchant_id", "title", "created_at"}
+
+
+class FixedClock:
+    """Mirrors the shared `clock` fixture; ops_ai must not import gateway (test_import_rules)."""
+
+    def __init__(self, now: datetime) -> None:
+        self._now = now
+
+    def __call__(self) -> datetime:
+        return self._now
+
+    def advance(self, delta: timedelta) -> None:
+        self._now += delta
 
 
 class FailingRedis:

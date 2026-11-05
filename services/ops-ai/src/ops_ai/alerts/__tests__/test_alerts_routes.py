@@ -10,7 +10,6 @@ from datetime import datetime, timedelta
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-from gateway.clock import FixedClock
 from ops_ai.alerts import (
     acknowledge_ops_alert,
     deliver_pending,
@@ -28,6 +27,21 @@ STAFF = uuid.UUID("dddddddd-0000-4000-8000-000000000004")
 OTHER_STAFF = uuid.UUID("dddddddd-0000-4000-8000-000000000005")
 MERCHANT = uuid.UUID("aaaaaaaa-0000-4000-8000-000000000001")
 FRAUD_ALERT = uuid.UUID("cccccccc-0000-4000-8000-000000000003")
+
+
+class FixedClock:
+    """Mirrors the shared `clock` fixture; ops_ai must not import gateway (test_import_rules)."""
+
+    def __init__(self, now: datetime) -> None:
+        self._now = now
+
+    def __call__(self) -> datetime:
+        return self._now
+
+    def advance(self, delta: timedelta) -> None:
+        self._now += delta
+
+
 ALERTS = "/v1/ops/alerts"
 FORBIDDEN_BODY = {"detail": "forbidden"}
 ITEM_KEYS = {
@@ -104,10 +118,14 @@ def _ids(response_json: dict[str, list[dict[str, object]]]) -> list[object]:
 
 def _stored_ack(session_factory: sessionmaker[Session], alert_id: uuid.UUID) -> dict[str, object]:
     with session_factory() as session:
-        row = session.execute(
-            text("SELECT acknowledged_at, acknowledged_by FROM ops_ai.ops_alerts WHERE alert_id = :id"),
-            {"id": alert_id},
-        ).mappings().one()
+        row = (
+            session.execute(
+                text("SELECT acknowledged_at, acknowledged_by FROM ops_ai.ops_alerts WHERE alert_id = :id"),
+                {"id": alert_id},
+            )
+            .mappings()
+            .one()
+        )
     return dict(row)
 
 

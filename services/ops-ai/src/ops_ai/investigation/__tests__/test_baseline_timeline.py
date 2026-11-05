@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 
 import pytest
 from ops_ai.ingest.models import PaymentFact
@@ -382,7 +383,7 @@ def test_change_timeline_covers_the_window_back_to_back_in_hourly_buckets_by_def
     # Assert
     hours = [START + timedelta(hours=n) for n in range(7)]
     bounds = [(bucket.start, bucket.end) for bucket in result.buckets]
-    assert bounds == list(zip(hours, hours[1:], strict=False))
+    assert bounds == list(pairwise(hours))
     assert len(result.buckets) == 6
 
 
@@ -395,9 +396,7 @@ def test_change_timeline_uses_the_given_bucket_length(session_factory: sessionma
 
     # Assert
     quarter_hours = [START + timedelta(minutes=15 * n) for n in range(5)]
-    assert [(bucket.start, bucket.end) for bucket in result.buckets] == list(
-        zip(quarter_hours, quarter_hours[1:], strict=False)
-    )
+    assert [(bucket.start, bucket.end) for bucket in result.buckets] == list(pairwise(quarter_hours))
 
 
 def test_change_timeline_last_bucket_is_shorter_when_the_window_is_not_a_multiple_of_the_bucket_length(

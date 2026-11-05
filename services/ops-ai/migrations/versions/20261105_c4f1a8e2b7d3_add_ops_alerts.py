@@ -51,9 +51,7 @@ def upgrade() -> None:
         sa.Column("last_error", sa.String(length=64), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("delivered_at", sa.DateTime(timezone=True), nullable=True),
-        sa.UniqueConstraint(
-            "alert_id", "channel", name=op.f("uq_ops_alert_deliveries_alert_id_channel")
-        ),
+        sa.UniqueConstraint("alert_id", "channel", name=op.f("uq_ops_alert_deliveries_alert_id_channel")),
         sa.CheckConstraint(
             "status IN ('pending', 'delivered', 'failed')", name=op.f("ck_ops_alert_deliveries_status")
         ),

@@ -9,7 +9,7 @@ import pytest
 from ops_ai.assistant.llm_port import LlmUnavailableError
 from ops_ai.assistant.tool_calling import ToolChoice, ToolChoiceRequest, ToolPlan
 from ops_ai.ingest.models import PaymentFact
-from ops_ai.investigation.query import FailureQuery
+from ops_ai.investigation.query import FailureMethod, FailureQuery, FailureStatus
 from ops_ai.investigation.reasons import (
     CLASSIFY_FAILURE_REASON,
     MAX_LLM_CLASSIFICATIONS,
@@ -143,8 +143,22 @@ BASE_QUERY = FailureQuery(
 )
 
 
-def _query(**overrides: object) -> FailureQuery:
-    return replace(BASE_QUERY, **overrides)
+def _query(
+    *,
+    method: FailureMethod | None = None,
+    status: FailureStatus | None = None,
+    country: str | None = None,
+    currency: str | None = None,
+    unapplied_filters: tuple[str, ...] = (),
+) -> FailureQuery:
+    return replace(
+        BASE_QUERY,
+        method=method,
+        status=status,
+        country=country,
+        currency=currency,
+        unapplied_filters=unapplied_filters,
+    )
 
 
 def _group(
@@ -824,7 +838,7 @@ def test_failure_reason_groups_filters_by_method(session_factory: sessionmaker[S
 
 @pytest.mark.parametrize("status", ["declined", "failed"])
 def test_failure_reason_groups_filters_by_a_single_failed_state(
-    session_factory: sessionmaker[Session], status: str
+    session_factory: sessionmaker[Session], status: FailureStatus
 ) -> None:
     # Arrange
     with session_factory.begin() as session:
@@ -869,9 +883,7 @@ def test_failure_reason_groups_does_not_filter_by_country(session_factory: sessi
 
     # Act
     with session_factory() as session:
-        result = failure_reason_groups(
-            session, _query(country="IN", unapplied_filters=("country",)), None
-        )
+        result = failure_reason_groups(session, _query(country="IN", unapplied_filters=("country",)), None)
 
     # Assert
     assert result.total_failed == 1

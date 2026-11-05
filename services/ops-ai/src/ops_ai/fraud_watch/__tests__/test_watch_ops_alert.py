@@ -186,7 +186,7 @@ def test_the_ops_alert_title_is_card_testing_suspected_and_the_body_is_the_ticke
     (ticket,) = _tickets(session_factory)
     assert ops_alert["title"] == "Card testing suspected"
     assert ops_alert["body"] == ticket["reason"]
-    assert re.search(r"\b12\b", str(ops_alert["body"])) is not None
+    assert re.search(r"\b10\b", str(ops_alert["body"])) is not None
 
 
 def test_the_ops_alert_has_one_pending_redis_stream_delivery(

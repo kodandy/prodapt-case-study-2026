@@ -118,9 +118,15 @@ def _insert_delivery(
         session.execute(INSERT_DELIVERY, _delivery_params(alert_id, **overrides))
 
 
+COUNT_ROWS = {
+    "ops_alerts": text("SELECT count(*) FROM ops_ai.ops_alerts"),
+    "ops_alert_deliveries": text("SELECT count(*) FROM ops_ai.ops_alert_deliveries"),
+}
+
+
 def _count(session_factory: sessionmaker[Session], table: str) -> int:
     with session_factory() as session:
-        return int(session.execute(text(f"SELECT count(*) FROM ops_ai.{table}")).scalar_one())
+        return int(session.execute(COUNT_ROWS[table]).scalar_one())
 
 
 # --- metadata, columns, keys, indexes --------------------------------------------------------------------
@@ -323,8 +329,7 @@ def test_a_delivery_without_attempts_starts_at_zero_and_unset_fields_read_back_n
     with session_factory() as session:
         row = session.execute(
             text(
-                "SELECT attempts, stream_entry_id, last_error, delivered_at "
-                "FROM ops_ai.ops_alert_deliveries"
+                "SELECT attempts, stream_entry_id, last_error, delivered_at FROM ops_ai.ops_alert_deliveries"
             )
         ).one()
     assert tuple(row) == (0, None, None, None)
