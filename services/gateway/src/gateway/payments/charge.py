@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from gateway.audit.models import AuditLog
 from gateway.clock import Clock
 from gateway.outbox.models import OutboxEvent
+from gateway.payments.fx.service import FxAmountTooSmallError, FxQuote, FxRateNotFoundError, fx_lines, quote
 from gateway.payments.idempotency.models import IdempotencyRecord
 from gateway.payments.ledger.service import PostingLine, ensure_account, post_journal
 from gateway.payments.models import Payment, PaymentAttempt
@@ -75,6 +76,8 @@ class _Claim:
 
 KEY_REUSED = ChargeOutcome(422, {"error": "idempotency_key_reused"})
 IN_PROGRESS = ChargeOutcome(409, {"error": "idempotency_in_progress"})
+FX_RATE_UNAVAILABLE = ChargeOutcome(422, {"error": "fx_rate_unavailable"})
+FX_AMOUNT_TOO_SMALL = ChargeOutcome(422, {"error": "fx_amount_too_small"})
 
 
 def charge_card(
@@ -94,6 +97,14 @@ def charge_card(
     """
     pan = request.card.number.get_secret_value()
     request_hash = _request_hash(request, card_fingerprint(pan, deps.card_fingerprint_key))
+    # Checked before anything is claimed so a missing rate can never surface after the provider charged.
+    try:
+        with deps.session_factory() as session:
+            fx_quote = _settlement_quote(session, deps.clock(), request)
+    except FxRateNotFoundError:
+        return FX_RATE_UNAVAILABLE
+    except FxAmountTooSmallError:
+        return FX_AMOUNT_TOO_SMALL
     lock_key = f"idem:{merchant_id}:{idempotency_key}"
     lock_token = _try_lock(deps.redis, lock_key)
     if lock_token is False:
@@ -106,7 +117,7 @@ def charge_card(
             outcome: ChargeOutcome | None = claim
         else:
             result = _call_provider(deps.provider, claim, request)
-            outcome = _finalize(deps, merchant_id, idempotency_key, claim, request, result)
+            outcome = _finalize(deps, merchant_id, idempotency_key, claim, request, result, fx_quote)
     finally:
         if isinstance(lock_token, str):
             _release_lock(deps.redis, lock_key, lock_token)
@@ -128,6 +139,8 @@ def _request_hash(request: ChargeRequest, fingerprint: str) -> str:
             "exp_year": request.card.exp_year,
         },
     }
+    if request.settlement_currency not in (None, request.currency):
+        canonical["settlement_currency"] = request.settlement_currency
     return hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -265,6 +278,7 @@ def _finalize(
     claim: _Claim,
     request: ChargeRequest,
     result: ProviderResult | None,
+    fx_quote: FxQuote | None,
 ) -> ChargeOutcome | None:
     """tx2. None if another writer (the reconciler) finalized first: the caller reads the stored response."""
     state: PaymentState = "unknown" if result is None else result.status
@@ -303,7 +317,7 @@ def _finalize(
             )
             return ChargeOutcome(202, response)
         if state == "succeeded":
-            _post_charge_journal(session, deps.clock, merchant_id, claim.payment_id, request)
+            _post_charge_journal(session, deps.clock, merchant_id, claim.payment_id, request, fx_quote)
         return _complete(
             session,
             now,
@@ -393,10 +407,29 @@ def _complete(
     return ChargeOutcome(201, response)
 
 
+def _settlement_quote(session: Session, now: datetime, request: ChargeRequest) -> FxQuote | None:
+    """None without FX. Raises FxRateNotFoundError / FxAmountTooSmallError."""
+    if request.settlement_currency is None or request.settlement_currency == request.currency:
+        return None
+    return quote(session, request.currency, request.settlement_currency, request.amount_minor, now)
+
+
 def _post_charge_journal(
-    session: Session, clock: Clock, merchant_id: uuid.UUID, payment_id: uuid.UUID, request: ChargeRequest
+    session: Session,
+    clock: Clock,
+    merchant_id: uuid.UUID,
+    payment_id: uuid.UUID,
+    request: ChargeRequest,
+    fx_quote: FxQuote | None,
 ) -> None:
     receivable = ensure_account(session, "platform", None, "provider_receivable", request.currency)
+    if fx_quote is not None:
+        payable = ensure_account(
+            session, "merchant", merchant_id, "merchant_payable", fx_quote.target_currency
+        )
+        lines = fx_lines(session, fx_quote, receivable, payable)
+        post_journal(session, clock, "payment", payment_id, lines, fx_rate_id=fx_quote.rate_id)
+        return
     payable = ensure_account(session, "merchant", merchant_id, "merchant_payable", request.currency)
     post_journal(
         session,

@@ -108,6 +108,7 @@ from gateway.payments.history import (
     get_payment,
     list_payments,
 )
+from gateway.payments.rails import RailPort, SimulatedRail
 from gateway.payments.refunds import refund_payment
 from gateway.payments.risk import get_payment_risk
 from gateway.payments.schemas import (
@@ -121,7 +122,15 @@ from gateway.payments.schemas import (
 )
 from gateway.payments.state import PaymentState
 from gateway.wallets.history import TransferHistoryItem, list_transfers
-from gateway.wallets.service import WalletBalanceView, list_wallets, transfer
+from gateway.wallets.payouts import PayoutDeps, PayoutNotFoundError, PayoutView, create_payout, get_payout
+from gateway.wallets.service import (
+    MAX_TOP_UP_MINOR,
+    WalletBalanceView,
+    create_wallet,
+    list_wallets,
+    top_up,
+    transfer,
+)
 
 LOGIN_CONCURRENCY = 4
 NO_STORE_HEADERS = {"Cache-Control": "no-store", "Pragma": "no-cache"}
@@ -143,6 +152,10 @@ class GatewayAppDeps:
     """X-Network-Token of the simulated card network; None → its routes answer 503."""
     ops_admin_token: str | None = field(default=None, repr=False)
     """Interim X-Ops-Admin-Token for ops dispute resolution; None → 503."""
+    rail: RailPort | None = None
+    """Payout rail; None → SimulatedRail."""
+    demo_top_up_enabled: bool = False
+    """POST /v1/me/top-ups exists only when True (demo funding source, never in production)."""
 
 
 class SignUpRequest(BaseModel):
@@ -205,6 +218,31 @@ class TransferRequest(BaseModel):
     """NUL would reach Postgres as a DataError (500)."""
     amount_minor: StrictInt = Field(gt=0, le=MAX_AMOUNT_MINOR)
     currency: Literal["USD", "EUR", "JPY", "INR"]
+    recipient_currency: Literal["USD", "EUR", "JPY", "INR"] | None = None
+    """Absent or equal to `currency` → same-currency transfer; otherwise FX at the current rate."""
+
+
+class CreateWalletRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    currency: Literal["USD", "EUR", "JPY", "INR"]
+
+
+class TopUpRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    currency: Literal["USD", "EUR", "JPY", "INR"]
+    amount_minor: StrictInt = Field(gt=0, le=MAX_TOP_UP_MINOR)
+
+
+class PayoutRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    method: Literal["bank_transfer", "upi"]
+    amount_minor: StrictInt = Field(gt=0, le=MAX_AMOUNT_MINOR)
+    currency: Literal["USD", "EUR", "JPY", "INR"]
+    destination: str = Field(min_length=4, max_length=64, pattern=r"^[A-Za-z0-9@._:-]+$")
+    """Account number / IBAN / UPI VPA. Only the masked last 4 is stored or returned."""
 
 
 @dataclass(frozen=True)
@@ -272,7 +310,17 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
       "otp" in amr, else 401 "mfa required".
     - POST /v1/me/transfers (Bearer session, Idempotency-Key required) body TransferRequest → TransferOutcome
       status/body (201 / 404 recipient_not_found / 409 insufficient_funds / 422 self_transfer or key
-      reused), all with Cache-Control: no-store. Same currency only; FX is Design.
+      reused / fx_rate_unavailable / fx_amount_too_small), all with Cache-Control: no-store. An optional
+      `recipient_currency` credits the recipient in that currency at the current FX rate.
+    - POST /v1/me/wallets (Bearer session) {currency} → 201 WalletBalanceView when created, 200 when it
+      already existed. No-store.
+    - POST /v1/me/top-ups (Bearer session, Idempotency-Key required) {currency, amount_minor} → 201
+      {top_up_id, currency, amount_minor, available_minor}; replay → same 201; key reused → 422. 404 unless
+      demo_top_up_enabled. No-store.
+    - POST /v1/me/payouts (Bearer session, Idempotency-Key required) PayoutRequest → 201 succeeded / failed,
+      202 pending / unknown (funds stay held), 409 insufficient_funds, 422 key reused. No-store.
+    - GET /v1/me/payouts/{payout_id} (Bearer session) → 200 PayoutView; another user's or unknown → 404
+      "payout not found". No-store.
     - GET /v1/me/transfers?limit&cursor (Bearer session) → 200 {items, next_cursor}: the user's sent and
       received transfers, newest first, counterparty email masked; invalid cursor → 400. All with
       Cache-Control: no-store.
@@ -308,6 +356,12 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     session_factory = deps.charge.session_factory
     login_slots = (
         threading.BoundedSemaphore(LOGIN_CONCURRENCY) if deps.login_slots is None else deps.login_slots
+    )
+    payout_deps = PayoutDeps(
+        session_factory=session_factory,
+        clock=deps.charge.clock,
+        rail=SimulatedRail() if deps.rail is None else deps.rail,
+        request_hash_key=deps.charge.card_fingerprint_key,
     )
 
     ops = OpsGuard(session_factory, deps.charge.clock, deps.jwt_private_key_pem)
@@ -596,6 +650,7 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
                     body.recipient_email,
                     body.amount_minor,
                     body.currency,
+                    body.recipient_currency,
                 )
         except OperationInProgressError:
             return JSONResponse(
@@ -604,6 +659,56 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
                 headers={**NO_STORE_HEADERS, "Retry-After": "1"},
             )
         return JSONResponse(outcome.body, status_code=outcome.status_code, headers=NO_STORE_HEADERS)
+
+    @app.post("/v1/me/wallets")
+    def create_my_wallet(
+        body: CreateWalletRequest, user_id: Annotated[uuid.UUID, Depends(session_user)]
+    ) -> JSONResponse:
+        with session_factory.begin() as session:
+            view, created = create_wallet(session, user_id, body.currency)
+        return JSONResponse(
+            view.model_dump(mode="json"),
+            status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+            headers=NO_STORE_HEADERS,
+        )
+
+    @app.post("/v1/me/top-ups")
+    def create_top_up(
+        body: TopUpRequest,
+        user_id: Annotated[uuid.UUID, Depends(session_user)],
+        idempotency_key: Annotated[str | None, Header(max_length=255)] = None,
+    ) -> JSONResponse:
+        if not deps.demo_top_up_enabled:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Not Found")
+        key = _no_store_idempotency_key(idempotency_key)
+        outcome = top_up(session_factory, deps.charge.clock, user_id, key, body.currency, body.amount_minor)
+        return JSONResponse(outcome.body, status_code=outcome.status_code, headers=NO_STORE_HEADERS)
+
+    @app.post("/v1/me/payouts")
+    def create_my_payout(
+        body: PayoutRequest,
+        user_id: Annotated[uuid.UUID, Depends(session_user)],
+        idempotency_key: Annotated[str | None, Header(max_length=255)] = None,
+    ) -> JSONResponse:
+        key = _no_store_idempotency_key(idempotency_key)
+        outcome = create_payout(
+            payout_deps, user_id, key, body.method, body.amount_minor, body.currency, body.destination
+        )
+        return JSONResponse(outcome.body, status_code=outcome.status_code, headers=NO_STORE_HEADERS)
+
+    @app.get("/v1/me/payouts/{payout_id}")
+    def my_payout(
+        payout_id: uuid.UUID, user_id: Annotated[uuid.UUID, Depends(session_user)], response: Response
+    ) -> PayoutView:
+        try:
+            with session_factory() as session:
+                view = get_payout(session, user_id, payout_id)
+        except PayoutNotFoundError:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, "payout not found", headers=NO_STORE_HEADERS
+            ) from None
+        response.headers.update(NO_STORE_HEADERS)
+        return view
 
     @app.post("/v1/signup", status_code=status.HTTP_201_CREATED)
     def signup(body: SignUpRequest) -> SignUpResponse:
@@ -903,6 +1008,13 @@ def _aware_datetime_param(value: str | None, name: str) -> datetime | None:
         return parsed.astimezone(UTC)
     except (ValueError, OverflowError):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"invalid {name}") from None
+
+
+def _no_store_idempotency_key(idempotency_key: str | None) -> str:
+    try:
+        return _require_idempotency_key(idempotency_key)
+    except HTTPException as exc:
+        raise HTTPException(exc.status_code, exc.detail, headers=NO_STORE_HEADERS) from None
 
 
 def _require_idempotency_key(idempotency_key: str | None) -> str:

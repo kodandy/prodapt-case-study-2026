@@ -21,6 +21,8 @@ class GatewaySettings(BaseSettings):
     """Unset → the simulated card-network routes answer 503."""
     ops_admin_token: SecretStr | None = Field(default=None, min_length=MIN_SECRET_LENGTH)
     """Unset → the ops dispute-resolution route answers 503 (interim until the RBAC OpsGuard)."""
+    demo_top_up_enabled: bool = False
+    """GATEWAY_DEMO_TOP_UP_ENABLED: exposes POST /v1/me/top-ups (demo funding only)."""
 
 
 def load_gateway_settings() -> GatewaySettings:

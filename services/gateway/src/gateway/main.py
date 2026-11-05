@@ -53,6 +53,7 @@ def build_app_from_env() -> FastAPI:
             readiness=lambda: check_ready(session_factory, redis),
             network_token=network_token,
             ops_admin_token=ops_admin_token,
+            demo_top_up_enabled=settings.demo_top_up_enabled,
         )
     )
 

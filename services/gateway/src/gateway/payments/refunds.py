@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from gateway.audit.models import AuditLog
 from gateway.clock import Clock
+from gateway.payments.fx.service import journal_fx_rate, reversal_lines
 from gateway.payments.ledger.service import PostingLine, ensure_account, post_journal
 from gateway.payments.models import Payment, Refund
 
@@ -129,18 +130,27 @@ def _refund_in_tx(
         ).scalar_one_or_none()
         if inserted is None:
             raise _KeyTakenConcurrentlyError
-        payable = ensure_account(session, "merchant", merchant_id, "merchant_payable", payment.currency)
         receivable = ensure_account(session, "platform", None, "provider_receivable", payment.currency)
-        post_journal(
-            session,
-            clock,
-            "refund",
-            refund_id,
-            [
-                PostingLine(payable, payment.currency, amount),
-                PostingLine(receivable, payment.currency, -amount),
-            ],
-        )
+        fx_rate = journal_fx_rate(session, "payment", payment.id)
+        if fx_rate is not None:
+            settled_payable = ensure_account(
+                session, "merchant", merchant_id, "merchant_payable", fx_rate.quote_currency
+            )
+            already_refunded = payment.refunded_minor - amount
+            lines = reversal_lines(session, fx_rate, already_refunded, amount, settled_payable, receivable)
+            post_journal(session, clock, "refund", refund_id, lines, fx_rate_id=fx_rate.id)
+        else:
+            payable = ensure_account(session, "merchant", merchant_id, "merchant_payable", payment.currency)
+            post_journal(
+                session,
+                clock,
+                "refund",
+                refund_id,
+                [
+                    PostingLine(payable, payment.currency, amount),
+                    PostingLine(receivable, payment.currency, -amount),
+                ],
+            )
         session.add(
             AuditLog(
                 actor_id=f"merchant:{merchant_id}",

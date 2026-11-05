@@ -40,6 +40,8 @@ class ChargeRequest(BaseModel):
     currency: Literal["USD", "EUR", "JPY", "INR"]
     method: Literal["card"] = "card"
     card: CardInput
+    settlement_currency: Literal["USD", "EUR", "JPY", "INR"] | None = None
+    """Currency the merchant is credited in; absent or equal to `currency` → no FX."""
 
 
 class CardSummary(BaseModel):

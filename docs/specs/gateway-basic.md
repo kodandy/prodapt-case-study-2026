@@ -506,3 +506,168 @@ read route, no transfer notifications (Design).
 - No CHECK constraints on `kind`, `recipient_type` and `channel`; parallel notifiers repeat each other's reads.
 - The recipient of the "was this you?" alert is the merchant, not the card holder (no payer account in Basic).
 - No compose service runs `python -m gateway.notifications.worker`, and there is no read route.
+
+## B1.4 / B2.3 / B2.5 / P0-2 / P0-3 — wallet routes, FX, external-rail payouts, ledger properties
+
+Source: worker brief `gw-wallets-fx` (11-05), `docs/architecture-detail.md` §3 (ledger and locking, funds hold,
+P2P / international transfer). This section supersedes B2 Decision 1 ("same currency only") and Decision 6 ("no
+top-up route"); everything else in B2 still holds. Supported currencies stay `USD | EUR | JPY | INR` on every
+route (`GBP` and others → 422). Minor-unit exponents: `JPY` 0, the others 2.
+
+### Decisions
+
+1. **Balances are proven equal to postings.** The `account_balances` row stays the lockable read model (B1
+   `list_wallets` is unchanged). A hold is booked on the ledger, so both numbers derive from postings:
+   `available_minor == -(sum of postings on the user's "wallet" account)` and
+   `held_minor == -(sum of postings on the user's "wallet_hold" account)` in that currency.
+   `ledger_wallet_balances(session, user_id)` computes them from postings in the same shape as `list_wallets`;
+   tests assert the two are equal after every operation (P0-2).
+2. **FX rate table.** `gateway.fx_rates`: `id` (string PK, e.g. `demo-USDEUR-v1`), `base_currency`,
+   `quote_currency`, `rate` (`Numeric(20, 10)`, CHECK `> 0`), `valid_from` (timestamptz). One row per ordered pair
+   of the four currencies (12 rows), seeded by the migration with fixed demo rates, `valid_from`
+   2026-01-01T00:00Z. Demo rates per 1 USD: EUR 0.92, JPY 151.5, INR 83.25; cross rates are derived from those
+   and rounded to 10 decimals. The rate in force at `now` is the row with the latest `valid_from <= now`.
+3. **Conversion.** `target_minor = floor(source_minor × rate × 10^(exp_target − exp_source))` (Decimal, never
+   float). A result of 0 → `FxAmountTooSmallError`. Rounding residue stays with the platform; each currency still
+   nets to zero because the clearing accounts absorb exactly the posted amounts.
+4. **FX journal shape.** One journal, four lines, `fx_rate_id` set on the journal row:
+   `debit_account (source ccy) +source`, `fx_clearing (source ccy) −source`, `fx_clearing (target ccy) +target`,
+   `credit_account (target ccy) −target`. `fx_clearing` is a platform account (`owner_type "platform"`,
+   `kind "fx_clearing"`), one per currency, append-only (no balance row). Same-currency journals have
+   `fx_rate_id NULL`.
+5. **Cross-currency P2P transfer.** `TransferRequest` gains optional `recipient_currency` (same literal set). Absent
+   or equal to `currency` → the B2 same-currency transfer, byte-for-byte unchanged (body, request hash, audit
+   summary, journal). Different → the sender's `currency` wallet is debited `amount_minor`, the recipient's
+   `recipient_currency` wallet (created if missing) is credited the converted amount, journal `ref_type
+   "transfer"` with the FX shape above (`debit = sender wallet`, `credit = recipient wallet`). Same locks, order,
+   idempotency and error rules as B2. Insufficient funds → 409 and nothing moves.
+6. **Cross-currency card charge.** `ChargeRequest` gains optional `settlement_currency` (same literal set). Absent
+   or equal to `currency` → unchanged. Different → the provider still charges `amount_minor` in `currency`; on
+   `succeeded` the payment journal uses the FX shape (`debit = provider_receivable (currency)`,
+   `credit = merchant_payable (settlement_currency)`). The pair and amount are checked before anything is
+   claimed: no rate → 422 `{"error": "fx_rate_unavailable"}`, converted amount 0 → 422
+   `{"error": "fx_amount_too_small"}`, in both cases no payment row and no provider call. The charge response body
+   is unchanged. A declined charge posts nothing.
+7. **Top-up (demo funding source).** `POST /v1/me/top-ups` credits a wallet from `topup_clearing` with the
+   existing `top_up` journal (`ref_id = top_up_id`). It is off unless `GatewayAppDeps.demo_top_up_enabled` is
+   true (env `GATEWAY_DEMO_TOP_UP_ENABLED`, default false; compose sets it true for the demo stack). Off → 404
+   `{"detail": "Not Found"}`. Max `amount_minor` per top-up `MAX_TOP_UP_MINOR = 10_000_000`. Idempotent per user
+   like transfers.
+8. **External-rail payouts (B2.5).** `bank_transfer` and `upi` payouts leave the platform through a rail, so they
+   hold first:
+   - tx1 (one transaction, balance row locked `FOR UPDATE`): replay check → balance check → `available −= A`,
+     `held += A`, payout row `pending`, journal `ref_type "payout_hold"`: `wallet +A`, `wallet_hold −A`, audit
+     `payout.created`.
+   - The rail is called outside any transaction with the payout id as its idempotency key. A raised
+     `TimeoutError` / `ConnectionError` counts as `unknown`.
+   - tx2 = `settle_payout(...)` (also the entry point a reconciler or rail callback would use later): locks the
+     payout row `FOR UPDATE`, then the balance row.
+     - `succeeded` → capture: `held −= A`, journal `"payout_capture"`: `wallet_hold +A`,
+       `payout_clearing (platform, currency) −A`; state `succeeded`.
+     - `failed` → release: `held −= A`, `available += A`, journal `"payout_release"`: `wallet_hold +A`,
+       `wallet −A`; state `failed`, `failure_code` stored.
+     - `unknown` → state `unknown`, no journal, funds stay held.
+     - A payout already `succeeded` or `failed` is not changed by any later settle (duplicate or contradictory
+       capture / release is a no-op: no journal, no balance change, the current view is returned).
+   - Capture never takes more than was held (it moves exactly `A` from `wallet_hold`).
+9. **Locking (P0-3).** Every operation that checks and debits a user balance (transfer, payout hold) locks the
+   user balance rows with `SELECT … FOR UPDATE` in ascending `account_id` order before the check, in the same
+   transaction as the journal. Platform accounts (`topup_clearing`, `fx_clearing`, `payout_clearing`,
+   `provider_receivable`) take append-only postings and are never locked. N parallel payouts (or transfers) from
+   one wallet never overdraw it.
+
+### Data
+
+- `gateway.fx_rates` (`gateway/payments/fx/models.py: FxRate`) as in Decision 2; unique
+  `(base_currency, quote_currency, valid_from)`.
+- `gateway.journal_entries.fx_rate_id` (string, nullable, FK `fx_rates.id`) (`JournalEntry.fx_rate_id`).
+- `gateway.transfers` gains nullable `recipient_currency` (3), `recipient_amount_minor` (bigint), `fx_rate_id`
+  (FK `fx_rates.id`); all NULL for same-currency transfers.
+- `gateway.wallet_top_ups` (`gateway/wallets/models.py: WalletTopUp`): `id` uuid PK, `user_id` FK users,
+  `account_id` FK ledger_accounts, `amount_minor` bigint CHECK `> 0`, `currency`, `idempotency_key` (255),
+  `request_hash` (64), `response_body` JSONB, `created_at`; unique `(user_id, idempotency_key)`.
+- `gateway.payouts` (`gateway/wallets/models.py: Payout`): `id` uuid PK, `user_id` FK users, `account_id` FK
+  ledger_accounts (the wallet), `method` (16), `amount_minor` bigint CHECK `> 0`, `currency`,
+  `destination_masked` (16), `state` (16: `pending | succeeded | failed | unknown`), `failure_code` (64, null),
+  `idempotency_key` (255), `request_hash` (64), `created_at`, `updated_at`; unique `(user_id, idempotency_key)`.
+  The raw destination is never stored: `destination_masked` is `"****"` + its last 4 characters.
+
+### `gateway/payments/fx/service.py`
+
+- `CURRENCY_EXPONENTS: dict[str, int]`, `FX_CLEARING_KIND = "fx_clearing"`.
+- `convert_minor(amount_minor, rate: Decimal, source_currency, target_currency) -> int` (Decision 3, pure; 0 is
+  returned, not raised).
+- `FxQuote(rate_id, source_currency, target_currency, rate: Decimal, source_minor, target_minor)` (frozen).
+- `quote(session, source_currency, target_currency, amount_minor, now) -> FxQuote`; same currency → `ValueError`;
+  no rate in force → `FxRateNotFoundError`; converted 0 → `FxAmountTooSmallError`.
+- `fx_lines(session, quote, debit_account_id, credit_account_id) -> list[PostingLine]` (Decision 4, four lines).
+- `post_journal(..., fx_rate_id: str | None = None)` in `gateway/payments/ledger/service.py` stores the id.
+
+### `gateway/wallets/service.py` (additions)
+
+- `SUPPORTED_CURRENCIES = ("EUR", "INR", "JPY", "USD")`, `HOLD_KIND = "wallet_hold"`.
+- `create_wallet(session, user_id, currency) -> tuple[WalletBalanceView, bool]` (`True` when created now).
+- `ledger_wallet_balances(session, user_id) -> list[WalletBalanceView]` (Decision 1, same ordering as
+  `list_wallets`, one item per wallet account that has a balance row).
+- `top_up(session_factory, clock, user_id, idempotency_key, currency, amount_minor) -> TopUpOutcome` → 201
+  `{"top_up_id", "currency", "amount_minor", "available_minor"}`; same key + same request → the stored 201 body;
+  same key + different request → 422 `{"error": "idempotency_key_reused"}`. Audit `wallet.top_up`.
+- `transfer(..., recipient_currency: str | None = None)`: Decision 5. A cross-currency 201 body adds
+  `"recipient_currency"`, `"recipient_amount_minor"`, `"fx_rate_id"`; 422 `{"error": "fx_amount_too_small"}` /
+  `{"error": "fx_rate_unavailable"}` before any lock. The request hash includes `recipient_currency` only when it
+  differs from `currency`. The audit summary adds the same three keys for a cross-currency transfer.
+- Transfer history (`list_transfers`): for the `received` side of a cross-currency transfer, `amount_minor` /
+  `currency` are the recipient's (credited) amount and currency; the `sent` side shows what the sender paid.
+
+### `gateway/payments/rails/`
+
+- `RailResult(status: Literal["succeeded", "failed", "unknown"], failure_code: str | None = None)` (frozen).
+- `RailPort` (Protocol): `name: str`; `submit(payout_id: str, method: str, amount_minor: int, currency: str,
+  destination: str) -> RailResult`.
+- `SimulatedRail`: destination containing `"fail"` → `failed` / `"rail_rejected"`; containing `"unknown"` →
+  `unknown`; otherwise `succeeded`. Repeating a payout id returns the first answer (keeps a dict).
+
+### `gateway/wallets/payouts.py`
+
+- `PayoutDeps(session_factory, clock, rail: RailPort)` (frozen).
+- `PayoutView(payout_id, state, method, amount_minor, currency, destination_masked, failure_code)` (pydantic).
+- `PayoutOutcome(status_code, body)`: 201 when the state is `succeeded` or `failed`, 202 when `pending` or
+  `unknown`; 409 `{"error": "insufficient_funds", "available_minor"}` (nothing stored, nothing moved); 422
+  `{"error": "idempotency_key_reused"}`. `body` is `PayoutView` dumped in JSON mode on success.
+- `create_payout(deps, user_id, idempotency_key, method, amount_minor, currency, destination) -> PayoutOutcome`
+  (Decision 8). A same-key same-request replay returns the payout's current view (no second hold, no second rail
+  call). The request hash covers method, amount, currency and destination.
+- `settle_payout(session_factory, clock, payout_id, result: RailResult) -> PayoutView` (Decision 8 tx2);
+  unknown id → `PayoutNotFoundError`.
+- `get_payout(session, user_id, payout_id) -> PayoutView`; another user's or unknown → `PayoutNotFoundError`.
+
+### Routes (all Bearer session via `session_user`, `Cache-Control: no-store` on every answer)
+
+- `POST /v1/me/wallets` `{currency}` `extra="forbid"` → 201 `WalletBalanceView` when created, 200 when it already
+  existed.
+- `POST /v1/me/top-ups` (Idempotency-Key required, same header rules as transfers) `{currency, amount_minor:
+  StrictInt 1..MAX_TOP_UP_MINOR}` `extra="forbid"` → `TopUpOutcome`; disabled → 404.
+- `POST /v1/me/transfers` body adds optional `recipient_currency`.
+- `POST /v1/me/payouts` (Idempotency-Key required) `{method: "bank_transfer" | "upi", amount_minor: StrictInt
+  1..10^12, currency, destination: str 4..64 matching ^[A-Za-z0-9@._:-]+$}` `extra="forbid"` → `PayoutOutcome`.
+- `GET /v1/me/payouts/{payout_id}` → 200 `PayoutView`; unknown or another user's → 404
+  `{"detail": "payout not found"}`.
+- `POST /v1/payments` body adds optional `settlement_currency` (Decision 6).
+- `GatewayAppDeps` gains `rail: RailPort | None = None` (None → `SimulatedRail()`) and
+  `demo_top_up_enabled: bool = False`.
+
+### P0-2 property test (`gateway/payments/ledger/__tests__/test_ledger_sequences.py`)
+
+Hypothesis generates sequences (up to ~12 steps) over 2–3 users and the four currencies of: top-up, same-currency
+and cross-currency transfer, card charge (approve / decline, with or without `settlement_currency`), partial
+refund of a succeeded charge, payout with a scripted rail answer (`succeeded | failed | unknown`) and a later
+settle of an `unknown` payout. After each sequence: every journal sums to zero per currency; every journal with
+postings in two currencies carries an `fx_rate_id`; for every user `list_wallets == ledger_wallet_balances`, all
+balances ≥ 0.
+
+### Known residuals
+
+- Refunds and dispute losses of a cross-currency card charge are booked in the charge currency on
+  `merchant_payable` (still balanced per currency); reversing the FX leg is Design.
+- No reconciler drives `unknown` payouts; `settle_payout` is the entry point it would call.
+- Demo rates are static; rate refresh, spreads and fees on FX are Design.
