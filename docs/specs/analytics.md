@@ -170,10 +170,22 @@ other merchant routes); the merchant comes from the token only, a `merchant_id` 
 
 Ops routes are guarded by one function, `ops_ai.analytics.access.require_ops_principal(principal: Principal)
 -> OpsAccess` (`OpsAccess(actor: str)`; raises `ForbiddenOpsError`), used through one FastAPI dependency
-`analytics_ops_access` in `app.py` (403 `{"detail": "forbidden"}`). Until the ops role lands (compliance-rbac
-workstream: `OpsScope(ops_user_id, role)` with roles `ops_agent`/`ops_lead` and `scope.require_ops_role`), it is
-fail-closed: every current principal (merchant `Scope`, `UserScope`) → 403. Rewiring it is a change to that one
-function: `return OpsAccess(actor=f"ops:{require_ops_role(principal).ops_user_id}")`.
+`analytics_ops_access` in `app.py`. It delegates to `ops_ai.scope.require_ops_role` with the default role set,
+so the ops analytics routes follow the same ops principal as the other `/v1/ops/*` routes:
+
+- an `OpsScope` with role `ops_agent` or `ops_lead` → `OpsAccess(actor=f"ops:{ops_user_id}")` and the route
+  answers 200. Ops staff are cross-tenant by design: `/v1/ops/analytics/alerts` lists every merchant's alerts
+  (each item names its `merchant_id`); `/v1/ops/analytics/forecast` and `/v1/ops/analytics/chargeback-risk`
+  read the merchant named by the explicit `merchant_id` query parameter (required; missing or not a UUID →
+  422, a merchant with no data → 200 with empty `currencies` / zero counts and empty `items`, the same shape
+  as the merchant route). The response for a given `merchant_id` equals what that merchant's own token gets
+  from the matching merchant route.
+- any other principal (merchant `Scope`, `UserScope`) → `ForbiddenOpsError` → 403 `{"detail": "forbidden"}`.
+  A merchant token never reaches another merchant's data through the ops routes.
+- missing, invalid or expired token → 401 `{"detail": "invalid token"}` (from `principal_from_token`, before
+  the guard runs).
+
+The merchant routes are unchanged: an ops token on `/v1/analytics/*` → 403 `{"detail": "forbidden"}`.
 
 ## 5. Web
 
