@@ -183,7 +183,7 @@ def test_new_models_are_registered_in_the_existing_metadata_modules() -> None:
     module_names = {module.__name__ for module in ALL_MODEL_MODULES}
 
     # Act
-    tables = (FraudRuleVersionActor.__table__, FraudAlertRuleVersion.__table__)
+    tables = tuple(TARGET_METADATA.tables[f"ops_ai.{name}"] for name in NEW_TABLES)
 
     # Assert
     assert {
@@ -193,7 +193,8 @@ def test_new_models_are_registered_in_the_existing_metadata_modules() -> None:
         "ops_ai.fraud_watch.models",
     }
     assert tuple(table.fullname for table in tables) == tuple(f"ops_ai.{name}" for name in NEW_TABLES)
-    assert tuple(TARGET_METADATA.tables[table.fullname] is table for table in tables) == (True, True)
+    assert tables[0] is FraudRuleVersionActor.__table__
+    assert tables[1] is FraudAlertRuleVersion.__table__
 
 
 @pytest.mark.parametrize("table", NEW_TABLES)

@@ -16,7 +16,14 @@ from ops_ai.feedback.service import (
     Verdict,
     record_feedback,
 )
-from ops_ai.feedback.thresholds import RuleVersion, active_rule_version, revert_rule, rule_history
+from ops_ai.feedback.thresholds import (
+    RuleAuditEntry,
+    RuleVersion,
+    active_rule_version,
+    revert_rule,
+    rule_audit,
+    rule_history,
+)
 from ops_ai.scope import Scope
 
 NO_STORE = {"Cache-Control": "no-store"}
@@ -94,6 +101,30 @@ class FraudRulesOut(BaseModel):
     history: list[RuleVersionOut]
 
 
+class RuleAuditEntryOut(BaseModel):
+    version: int
+    reason: str
+    feedback_id: uuid.UUID | None
+    actor: str | None
+    actor_role: str | None
+    created_at: datetime
+
+    @classmethod
+    def of(cls, entry: RuleAuditEntry) -> "RuleAuditEntryOut":
+        return cls(
+            version=entry.version,
+            reason=entry.reason,
+            feedback_id=entry.feedback_id,
+            actor=entry.actor,
+            actor_role=entry.actor_role,
+            created_at=entry.created_at,
+        )
+
+
+class FraudRuleAuditOut(BaseModel):
+    entries: list[RuleAuditEntryOut]
+
+
 def _rejected(reason: str) -> HTTPException:
     code, detail = _REJECTIONS[reason]
     return HTTPException(code, detail, headers=NO_STORE)
@@ -102,8 +133,8 @@ def _rejected(reason: str) -> HTTPException:
 def create_feedback_router(
     session_factory: sessionmaker[Session], clock: Clock, merchant_scope: Callable[..., Scope]
 ) -> APIRouter:
-    """POST /v1/feedback, GET /v1/feedback/fraud-rules, POST /v1/feedback/fraud-rules/revert (merchant token,
-    the merchant's own feedback and rules only)."""
+    """POST /v1/feedback, GET /v1/feedback/fraud-rules, GET /v1/feedback/fraud-rules/audit,
+    POST /v1/feedback/fraud-rules/revert (merchant token, the merchant's own feedback and rules only)."""
     router = APIRouter()
 
     @router.post("/v1/feedback", status_code=status.HTTP_201_CREATED)
@@ -141,6 +172,15 @@ def create_feedback_router(
         return FraudRulesOut(
             active=RuleVersionOut.of(active), history=[RuleVersionOut.of(rule) for rule in history]
         )
+
+    @router.get("/v1/feedback/fraud-rules/audit")
+    def get_fraud_rule_audit(
+        scope: Annotated[Scope, Depends(merchant_scope)], response: Response
+    ) -> FraudRuleAuditOut:
+        with session_factory() as session:
+            entries = rule_audit(session, scope)
+        response.headers["Cache-Control"] = "no-store"
+        return FraudRuleAuditOut(entries=[RuleAuditEntryOut.of(entry) for entry in entries])
 
     @router.post("/v1/feedback/fraud-rules/revert", status_code=status.HTTP_201_CREATED)
     def post_revert(
