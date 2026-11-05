@@ -1,10 +1,19 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, Float, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    Float,
+    ForeignKeyConstraint,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ops_ai.db import OpsAiBase
+from ops_ai.scope import MERCHANT_ROLES
 
 TARGET_KINDS = ("alert", "answer", "incident")
 VERDICTS = ("true_positive", "false_positive", "helpful", "not_helpful")
@@ -48,6 +57,26 @@ class FraudRuleVersion(OpsAiBase):
     min_distinct_cards: Mapped[int] = mapped_column(Integer)
     reason: Mapped[str] = mapped_column(String(64))
     feedback_id: Mapped[uuid.UUID | None]
+    created_at: Mapped[datetime]
+
+
+class FraudRuleVersionActor(OpsAiBase):
+    """Who wrote a `fraud_rule_versions` row: the token principal of the feedback or revert behind it."""
+
+    __tablename__ = "fraud_rule_version_actors"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["merchant_id", "version"],
+            ["ops_ai.fraud_rule_versions.merchant_id", "ops_ai.fraud_rule_versions.version"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(_one_of("actor_role", MERCHANT_ROLES), name="actor_role"),
+    )
+
+    merchant_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    actor: Mapped[str] = mapped_column(String(64))
+    actor_role: Mapped[str] = mapped_column(String(32))
     created_at: Mapped[datetime]
 
 

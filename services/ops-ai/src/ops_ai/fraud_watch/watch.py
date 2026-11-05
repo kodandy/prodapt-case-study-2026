@@ -3,14 +3,15 @@ import uuid
 from datetime import timedelta
 
 from contracts.events import PaymentEventV1
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from ops_ai.alerts import raise_ops_alert
 from ops_ai.clock import Clock
+from ops_ai.feedback import thresholds
 from ops_ai.fraud_watch.analysis import CardTestingEpisode, analyze_fraud
-from ops_ai.fraud_watch.models import FraudAlert
+from ops_ai.fraud_watch.models import FraudAlert, FraudAlertRuleVersion
 from ops_ai.fraud_watch.rules import LIVE_LOOKBACK_MINUTES, is_micro
 from ops_ai.scope import Scope
 from ops_ai.tickets import TicketSource, route_ticket
@@ -26,19 +27,54 @@ def watch_payment(session: Session, clock: Clock, event: PaymentEventV1) -> uuid
     """Raises or refreshes the card-testing alert for the episode that holds a live micro payment.
 
     Returns the alert id, or None when the event is not live, not micro, or its episode is not flagged.
-    The ticket is created only when the alert is first inserted. Does not commit.
+    The merchant's active rule version can only tighten the baseline flag; the version applied is recorded
+    per alert. The ticket is created only when the alert is first inserted. Does not commit.
     """
     if event.origin != "live" or not is_micro(event.amount_minor, event.currency):
         return None
+    scope = Scope(merchant_id=event.merchant_id)
     analysis = analyze_fraud(
         session,
-        Scope(merchant_id=event.merchant_id),
+        scope,
         event.occurred_at - timedelta(minutes=LIVE_LOOKBACK_MINUTES),
         event.occurred_at + timedelta(microseconds=1),
     )
     episode = next((e for e in analysis.episodes if event.payment_id in e.payment_ids), None)
     if episode is None or not episode.flagged:
         return None
+    rule = thresholds.active_rule_version(session, scope)
+    if not thresholds.is_flagged(episode, rule):
+        return None
+    alert_id = _upsert_alert(session, clock, event, episode)
+    _record_applied_version(session, clock, alert_id, event.merchant_id, rule.version)
+    return alert_id
+
+
+def applied_rule_version(session: Session, scope: Scope, alert_id: uuid.UUID) -> int | None:
+    return session.execute(
+        select(FraudAlertRuleVersion.rule_version).where(
+            FraudAlertRuleVersion.alert_id == alert_id, FraudAlertRuleVersion.merchant_id == scope.merchant_id
+        )
+    ).scalar_one_or_none()
+
+
+def _record_applied_version(
+    session: Session, clock: Clock, alert_id: uuid.UUID, merchant_id: uuid.UUID, rule_version: int
+) -> None:
+    applied_at = clock()
+    session.execute(
+        insert(FraudAlertRuleVersion)
+        .values(alert_id=alert_id, merchant_id=merchant_id, rule_version=rule_version, applied_at=applied_at)
+        .on_conflict_do_update(
+            index_elements=[FraudAlertRuleVersion.alert_id],
+            set_={"rule_version": rule_version, "applied_at": applied_at},
+        )
+    )
+
+
+def _upsert_alert(
+    session: Session, clock: Clock, event: PaymentEventV1, episode: CardTestingEpisode
+) -> uuid.UUID:
     window_key = f"{CARD_TESTING_KIND}:{event.merchant_id}:{episode.first_payment_id}"
     features = _features(episode)
     inserted = session.execute(

@@ -1,6 +1,7 @@
 """Per-merchant, versioned card-testing thresholds driven by ops feedback (R2-7).
 
 Every change is a new append-only row, so the history is the audit trail and any version can be restored.
+Each row also records the acting principal (the token scope that wrote it) in `fraud_rule_version_actors`.
 The ladder only tightens: no step is looser than the shipped baseline in `fraud_watch.rules`.
 """
 
@@ -12,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ops_ai.clock import Clock
-from ops_ai.feedback.models import FraudRuleVersion
+from ops_ai.feedback.models import FraudRuleVersion, FraudRuleVersionActor
 from ops_ai.fraud_watch.analysis import CardTestingEpisode
 from ops_ai.fraud_watch.rules import MIN_DISTINCT_CARDS, MIN_MICRO_PAYMENTS, MIN_MICRO_SHARE
 from ops_ai.scope import Scope
@@ -33,6 +34,17 @@ class RuleVersion:
     created_at: datetime | None
 
 
+@dataclass(frozen=True)
+class RuleAuditEntry:
+    version: int
+    reason: str
+    feedback_id: uuid.UUID | None
+    actor: str | None
+    """None only for a version row without an actor row (written before actors were recorded)."""
+    actor_role: str | None
+    created_at: datetime
+
+
 BASELINE = RuleVersion(
     version=0,
     steps=0,
@@ -43,6 +55,11 @@ BASELINE = RuleVersion(
     feedback_id=None,
     created_at=None,
 )
+
+
+def actor_of(scope: Scope) -> str:
+    """The token subject of a merchant principal; merchant tokens carry no per-user id."""
+    return f"merchant:{scope.merchant_id}"
 
 
 def clamp_steps(steps: int) -> int:
@@ -90,6 +107,37 @@ def rule_history(session: Session, scope: Scope) -> list[RuleVersion]:
     return [_to_rule(row) for row in rows]
 
 
+def rule_audit(session: Session, scope: Scope) -> list[RuleAuditEntry]:
+    rows = session.execute(
+        select(
+            FraudRuleVersion.version,
+            FraudRuleVersion.reason,
+            FraudRuleVersion.feedback_id,
+            FraudRuleVersion.created_at,
+            FraudRuleVersionActor.actor,
+            FraudRuleVersionActor.actor_role,
+        )
+        .outerjoin(
+            FraudRuleVersionActor,
+            (FraudRuleVersionActor.merchant_id == FraudRuleVersion.merchant_id)
+            & (FraudRuleVersionActor.version == FraudRuleVersion.version),
+        )
+        .where(FraudRuleVersion.merchant_id == scope.merchant_id)
+        .order_by(FraudRuleVersion.version.desc())
+    )
+    return [
+        RuleAuditEntry(
+            version=row.version,
+            reason=row.reason,
+            feedback_id=row.feedback_id,
+            actor=row.actor,
+            actor_role=row.actor_role,
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+
+
 def is_flagged(episode: CardTestingEpisode, rule: RuleVersion) -> bool:
     return (
         episode.micro_payments >= rule.min_micro_payments
@@ -107,7 +155,7 @@ def append_rule_version(
     reason: str,
     feedback_id: uuid.UUID | None,
 ) -> RuleVersion:
-    """Inserts the next version of the merchant's rule. Does not commit."""
+    """Inserts the next version of the merchant's rule and its actor (`scope`). Does not commit."""
     active = active_rule_version(session, scope)
     min_micro_payments, min_micro_share, min_distinct_cards = values
     row = FraudRuleVersion(
@@ -122,6 +170,16 @@ def append_rule_version(
         created_at=clock(),
     )
     session.add(row)
+    session.flush()
+    session.add(
+        FraudRuleVersionActor(
+            merchant_id=scope.merchant_id,
+            version=row.version,
+            actor=actor_of(scope),
+            actor_role=scope.role,
+            created_at=row.created_at,
+        )
+    )
     session.flush()
     return _to_rule(row)
 

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Integer, String, Text
+from sqlalchemy import CheckConstraint, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,3 +24,17 @@ class FraudAlert(OpsAiBase):
     payment_count: Mapped[int] = mapped_column(Integer)
     features: Mapped[dict[str, object]] = mapped_column(JSONB)
     created_at: Mapped[datetime]
+
+
+class FraudAlertRuleVersion(OpsAiBase):
+    """The merchant rule version the live watcher applied when it last raised or refreshed the alert."""
+
+    __tablename__ = "fraud_alert_rule_versions"
+    __table_args__ = (CheckConstraint("rule_version >= 0", name="rule_version"),)
+
+    alert_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("ops_ai.fraud_alerts.alert_id", ondelete="CASCADE"), primary_key=True
+    )
+    merchant_id: Mapped[uuid.UUID]
+    rule_version: Mapped[int] = mapped_column(Integer)
+    applied_at: Mapped[datetime]
