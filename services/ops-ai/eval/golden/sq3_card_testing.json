@@ -9,7 +9,7 @@
   "expect": {
     "status": 200,
     "fields": {"intent": "card_testing", "cause_label": "card_testing"},
-    "evidence_ref_prefixes": ["episode:", "payment:"],
+    "evidence_ref_prefixes": ["episode:", "alert:", "payment:"],
     "required_terms": [],
     "tool_calls": ["analyze_fraud"]
   },
