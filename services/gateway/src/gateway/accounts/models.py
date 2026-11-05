@@ -14,6 +14,21 @@ class User(GatewayBase):
     email: Mapped[str] = mapped_column(String(320), unique=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime]
+    full_name: Mapped[str | None] = mapped_column(String(200))
+    country: Mapped[str | None] = mapped_column(String(2))
+    kyc_status: Mapped[str] = mapped_column(
+        String(16), default="unverified", server_default=text("'unverified'")
+    )
+    kyc_verified_at: Mapped[datetime | None]
+    kyc_expires_at: Mapped[datetime | None]
+    erased_at: Mapped[datetime | None]
+
+    __table_args__ = (
+        CheckConstraint(
+            "kyc_status IN ('unverified', 'verified', 'pending', 'rejected')", name="kyc_status_valid"
+        ),
+        CheckConstraint("country ~ '^[A-Z]{2}$'", name="country_alpha2"),
+    )
 
 
 class Merchant(GatewayBase):
@@ -32,6 +47,11 @@ class ApiKey(GatewayBase):
     key_hash: Mapped[str] = mapped_column(String(64), unique=True)
     prefix: Mapped[str] = mapped_column(String(16))
     created_at: Mapped[datetime]
+    role: Mapped[str] = mapped_column(
+        String(32), default="merchant_admin", server_default=text("'merchant_admin'")
+    )
+
+    __table_args__ = (CheckConstraint("role IN ('merchant_admin', 'merchant_support')", name="role_valid"),)
 
 
 class UserTotp(GatewayBase):
@@ -61,3 +81,24 @@ class LoginThrottle(GatewayBase):
     window_started_at: Mapped[datetime | None]
     locked_until: Mapped[datetime | None]
     updated_at: Mapped[datetime]
+
+
+class OpsUser(GatewayBase):
+    """Ops staff principal (P0-9): argon2id password plus mandatory AES-GCM-encrypted TOTP secret."""
+
+    __tablename__ = "ops_users"
+    __table_args__ = (
+        CheckConstraint("role IN ('ops_agent', 'ops_lead')", name="role_valid"),
+        CheckConstraint("failed_attempts >= 0", name="failed_attempts_non_negative"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    email: Mapped[str] = mapped_column(String(320), unique=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(16))
+    totp_secret_ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
+    totp_last_used_step: Mapped[int | None] = mapped_column(BigInteger)
+    failed_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    locked_until: Mapped[datetime | None]
+    disabled_at: Mapped[datetime | None]
+    created_at: Mapped[datetime]

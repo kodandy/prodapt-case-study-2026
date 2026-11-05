@@ -1,7 +1,7 @@
 import re
 from typing import Literal
 
-TicketSource = Literal["card_testing", "assistant_escalation", "dispute", "unknown_payment"]
+TicketSource = Literal["card_testing", "assistant_escalation", "dispute", "unknown_payment", "kyc_review"]
 EscalationTopic = Literal["fraud", "settlement", "compliance", "payments"]
 Queue = Literal["fraud", "payments_ops", "settlement", "compliance"]
 Priority = Literal["high", "normal", "low"]
@@ -10,6 +10,7 @@ _ROUTES: dict[TicketSource, tuple[Queue, Priority]] = {
     "card_testing": ("fraud", "high"),
     "dispute": ("compliance", "high"),
     "unknown_payment": ("payments_ops", "normal"),
+    "kyc_review": ("compliance", "normal"),
 }
 _ESCALATION_ROUTES: dict[EscalationTopic, tuple[Queue, Priority]] = {
     "fraud": ("fraud", "normal"),

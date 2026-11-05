@@ -9,7 +9,7 @@ from ops_ai.db import OpsAiBase
 QUEUES = ("fraud", "payments_ops", "settlement", "compliance")
 PRIORITIES = ("high", "normal", "low")
 STATUSES = ("open", "assigned", "resolved")
-SOURCES = ("card_testing", "assistant_escalation", "dispute", "unknown_payment")
+SOURCES = ("card_testing", "assistant_escalation", "dispute", "unknown_payment", "kyc_review")
 
 
 def _one_of(column: str, values: tuple[str, ...]) -> str:

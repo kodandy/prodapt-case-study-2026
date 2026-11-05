@@ -15,6 +15,8 @@ class GatewaySettings(BaseSettings):
     card_fingerprint_key: SecretStr = Field(min_length=MIN_SECRET_LENGTH)
     jwt_private_key_pem: SecretStr | None = None
     totp_encryption_key: SecretStr | None = Field(default=None, min_length=MIN_SECRET_LENGTH)
+    db_role: str | None = None
+    """GATEWAY_DB_ROLE: least-privilege role every connection switches to (P0-10)."""
 
 
 def load_gateway_settings() -> GatewaySettings:
