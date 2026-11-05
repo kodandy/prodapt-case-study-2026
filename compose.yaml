@@ -96,6 +96,8 @@ services:
     environment:
       <<: *app-env
       GATEWAY_SECRETS_DIR: /run/secrets/gateway
+      PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-simulator}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
     command: ["uvicorn", "--factory", "gateway.main:build_app_from_env", "--host", "0.0.0.0", "--port", "8000"]
     restart: unless-stopped
     ports: ["127.0.0.1:${GATEWAY_PORT:-8080}:8000"]
@@ -105,6 +107,21 @@ services:
       demo-secrets: { condition: service_completed_successfully }
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
+
+  # Merchant gRPC API (B8.2): same image, settings and stores as gateway-api.
+  gateway-grpc:
+    image: payplat-app
+    environment:
+      <<: *app-env
+      GATEWAY_SECRETS_DIR: /run/secrets/gateway
+      GATEWAY_GRPC_PORT: "50051"
+      PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-simulator}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+    command: ["python", "-m", "gateway.merchant_api.grpc_server"]
+    restart: unless-stopped
+    ports: ["127.0.0.1:${GATEWAY_GRPC_PORT:-50051}:50051"]
+    volumes: [*gateway-secrets]
+    depends_on: *runtime-deps
 
   relay:
     image: payplat-app

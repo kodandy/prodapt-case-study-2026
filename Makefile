@@ -1,7 +1,7 @@
 DC := docker compose
 RUN := $(DC) run --rm dev
 
-.PHONY: up down build sync lint fmt type test migrate migrate-check ci demo demo-down web-install web-ci web-up web-smoke web-reresolve-check web-merchant-key docs-diagram
+.PHONY: up down build sync lint fmt type test migrate migrate-check ci demo demo-down web-install web-ci web-up web-smoke web-reresolve-check web-merchant-key docs-diagram proto proto-check
 
 up:
 	$(DC) up -d --wait postgres redis
@@ -43,7 +43,14 @@ migrate-check:
 test:
 	$(RUN) uv run --frozen pytest
 
-ci: up sync lint type migrate-check test web-ci
+# gateway gRPC code from services/gateway/proto, generated with the locked grpcio-tools in the dev image
+proto:
+	$(RUN) sh services/gateway/proto/generate.sh
+
+proto-check:
+	$(RUN) sh services/gateway/proto/generate.sh --check
+
+ci: up sync proto-check lint type migrate-check test web-ci
 
 # runs every service from the app image, then the end-to-end walkthrough (no .env, no OPENAI_API_KEY needed)
 demo:

@@ -1,0 +1,6 @@
+{
+  "error": {
+    "message": "An unknown error occurred",
+    "type": "api_error"
+  }
+}

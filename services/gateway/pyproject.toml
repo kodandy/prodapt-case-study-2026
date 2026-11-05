@@ -17,6 +17,9 @@ dependencies = [
   "pyotp>=2.9",
   "pyjwt[crypto]>=2.10.1",
   "cryptography>=43",
+  "grpcio>=1.66",
+  "grpcio-status>=1.66",
+  "protobuf>=7.35.1,<8",
 ]
 
 [tool.uv.sources]

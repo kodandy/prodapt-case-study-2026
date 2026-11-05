@@ -1,0 +1,7 @@
+{
+  "object": "search_result",
+  "url": "/v1/payment_intents/search",
+  "has_more": false,
+  "next_page": null,
+  "data": []
+}

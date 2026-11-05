@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "rate_limit",
+    "doc_url": "https://stripe.com/docs/error-codes/rate-limit",
+    "message": "Too many requests hit the API too quickly.",
+    "type": "invalid_request_error"
+  }
+}

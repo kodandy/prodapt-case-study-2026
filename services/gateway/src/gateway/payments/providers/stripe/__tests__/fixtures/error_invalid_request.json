@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "parameter_invalid_integer",
+    "doc_url": "https://stripe.com/docs/error-codes/parameter-invalid-integer",
+    "message": "Invalid integer: abc",
+    "param": "amount",
+    "type": "invalid_request_error"
+  }
+}

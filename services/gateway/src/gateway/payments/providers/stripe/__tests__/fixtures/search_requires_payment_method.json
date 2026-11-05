@@ -1,0 +1,38 @@
+{
+  "object": "search_result",
+  "url": "/v1/payment_intents/search",
+  "has_more": false,
+  "next_page": null,
+  "data": [
+    {
+      "id": "pi_3PqRxX2eZvKYlo2C8XyZaBcD",
+      "object": "payment_intent",
+      "amount": 1999,
+      "amount_capturable": 0,
+      "amount_received": 0,
+      "automatic_payment_methods": null,
+      "canceled_at": null,
+      "capture_method": "automatic",
+      "client_secret": "pi_3PqRxX2eZvKYlo2C8XyZaBcD_secret_REDACTEDtestfixture",
+      "confirmation_method": "automatic",
+      "created": 1793707200,
+      "currency": "eur",
+      "customer": null,
+      "description": null,
+      "last_payment_error": null,
+      "latest_charge": null,
+      "livemode": false,
+      "metadata": {
+        "provider_key": "gw-charge-7f3a9c1e"
+      },
+      "next_action": null,
+      "payment_method": null,
+      "payment_method_types": [
+        "card"
+      ],
+      "receipt_email": null,
+      "setup_future_usage": null,
+      "status": "requires_payment_method"
+    }
+  ]
+}

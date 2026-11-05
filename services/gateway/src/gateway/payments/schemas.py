@@ -1,3 +1,4 @@
+import re
 import unicodedata
 import uuid
 from datetime import datetime
@@ -7,6 +8,9 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictInt, field_v
 
 from gateway.payments.state import PaymentState
 from gateway.payments.tokenization.cards import TEST_PANS, luhn_valid
+
+MAX_PAN_LENGTH = 19
+CVC_PATTERN = re.compile(r"[0-9]{3,4}")
 
 
 class CardInput(BaseModel):
@@ -23,10 +27,19 @@ class CardInput(BaseModel):
     @classmethod
     def _test_card_only(cls, value: SecretStr) -> SecretStr:
         pan = value.get_secret_value()
+        if len(pan) > MAX_PAN_LENGTH:
+            raise ValueError("card number is too long")
         if not luhn_valid(pan):
             raise ValueError("card number fails the Luhn check")
         if pan not in TEST_PANS:
             raise ValueError("only test card numbers are accepted")
+        return value
+
+    @field_validator("cvc")
+    @classmethod
+    def _cvc_digits(cls, value: SecretStr) -> SecretStr:
+        if CVC_PATTERN.fullmatch(value.get_secret_value()) is None:
+            raise ValueError("cvc must be 3 or 4 digits")
         return value
 
 
