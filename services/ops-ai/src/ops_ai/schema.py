@@ -1,8 +1,8 @@
 """Imports every model so Alembic sees the full metadata."""
 
+from ops_ai.agents import models as agent_models
 from ops_ai.analytics import models as analytics_models
 from ops_ai.compliance import models as compliance_models
-from ops_ai.agents import models as agent_models
 from ops_ai.db import OpsAiBase
 from ops_ai.feedback import models as feedback_models
 from ops_ai.fraud_watch import models as fraud_watch_models

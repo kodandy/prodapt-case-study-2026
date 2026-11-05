@@ -67,7 +67,7 @@ class ConsumerPaymentListResponse(BaseModel):
 
 
 def consumer_payment_router(
-    charge: ChargeDeps, clock: Clock, user_auth: Callable[..., uuid.UUID]
+    charge: ChargeDeps, clock: Clock, user_auth: Callable[[str], Callable[..., uuid.UUID]]
 ) -> APIRouter:
     """Routes (Bearer session; every response carries Cache-Control: no-store):
     - POST /v1/me/payments (Idempotency-Key, visible ASCII, 1-200 chars) {merchant_id, amount_minor, currency,
@@ -83,7 +83,7 @@ def consumer_payment_router(
     @router.post("/v1/me/payments")
     def pay(
         body: ConsumerPayRequest,
-        user_id: Annotated[uuid.UUID, Depends(user_auth)],
+        user_id: Annotated[uuid.UUID, Depends(user_auth("me.transfer.create"))],
         idempotency_key: Annotated[str | None, Header(max_length=255)] = None,
     ) -> JSONResponse:
         if not idempotency_key:
@@ -102,7 +102,7 @@ def consumer_payment_router(
 
     @router.get("/v1/me/payments")
     def my_payments(
-        user_id: Annotated[uuid.UUID, Depends(user_auth)],
+        user_id: Annotated[uuid.UUID, Depends(user_auth("me.transfer.read"))],
         limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
         cursor: Annotated[str | None, Query(max_length=512)] = None,
         state: PaymentState | None = None,
@@ -127,7 +127,7 @@ def consumer_payment_router(
     def ask_for_refund(
         payment_id: uuid.UUID,
         body: RefundRequestBody,
-        user_id: Annotated[uuid.UUID, Depends(user_auth)],
+        user_id: Annotated[uuid.UUID, Depends(user_auth("me.transfer.create"))],
     ) -> JSONResponse:
         try:
             result = request_refund(session_factory, clock, user_id, payment_id, body.amount_minor, body.note)

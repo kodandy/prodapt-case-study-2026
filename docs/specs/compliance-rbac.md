@@ -20,25 +20,39 @@ on a merchant route is simply not a credential of that route (401).
 
 | action | roles | routes |
 |---|---|---|
-| public | anyone | GET /healthz, GET /readyz, POST /v1/signup, POST /v1/sessions, POST /v1/user-tokens, POST /v1/ops/sessions |
+| public | anyone (no user role) | GET /healthz, GET /readyz, POST /v1/signup, POST /v1/sessions, POST /v1/user-tokens, POST /v1/ops/sessions; simulated card network (guarded by `X-Network-Token`, not a user role): POST /v1/network/disputes, POST /v1/network/disputes/{dispute_id}/resolution |
 | me.mfa | consumer | POST /v1/me/mfa/totp, POST /v1/me/mfa/totp/verify |
-| me.wallet.read | consumer | GET /v1/me/wallets |
-| me.transfer.read / me.transfer.create | consumer | GET / POST /v1/me/transfers |
+| me.wallet.read | consumer | GET /v1/me/wallets, POST /v1/me/wallets |
+| me.transfer.read | consumer | GET /v1/me/transfers, GET /v1/me/payouts/{payout_id}, GET /v1/me/payments, GET /v1/me/disputes, GET /v1/me/notifications, POST /v1/me/notifications/{notification_id}/read |
+| me.transfer.create | consumer | POST /v1/me/transfers, POST /v1/me/top-ups, POST /v1/me/payouts, POST /v1/me/payments, POST /v1/me/payments/{payment_id}/refund-requests, POST /v1/me/payments/{payment_id}/disputes, POST /v1/me/notifications/{notification_id}/response |
 | me.profile.read / me.profile.rectify | consumer | GET / PATCH /v1/me/profile |
 | me.data.export / me.data.erase / me.data_requests.read | consumer | POST /v1/me/data-requests/export, POST /v1/me/data-requests/erasure, GET /v1/me/data-requests |
 | merchant.token.issue | merchant_admin, merchant_support | POST /v1/merchant-tokens |
 | payment.create | merchant_admin | POST /v1/payments |
-| payment.read | merchant_admin, merchant_support | GET /v1/payments, GET /v1/payments/{payment_id}, GET /v1/payments/{payment_id}/risk |
+| payment.read | merchant_admin, merchant_support | GET /v1/payments, GET /v1/payments/{payment_id}, GET /v1/payments/{payment_id}/risk, GET /v1/notifications, POST /v1/notifications/{notification_id}/read |
 | refund.create | merchant_admin | POST /v1/payments/{payment_id}/refunds |
-| merchant.dispute.read | merchant_admin, merchant_support | GET /v1/disputes/{dispute_id} |
+| merchant.dispute.read | merchant_admin, merchant_support | GET /v1/disputes/{dispute_id}, GET /v1/disputes |
 | merchant.dispute.evidence | merchant_admin, merchant_support | POST /v1/disputes/{dispute_id}/evidence |
-| dispute.read | ops_agent, ops_lead | (ops dispute routes, other branch) |
-| dispute.resolve | ops_lead | (ops dispute resolution, other branch) |
+| dispute.read | ops_agent, ops_lead | (no route yet) |
+| dispute.resolve | ops_lead | POST /v1/ops/disputes/{dispute_id}/resolution |
 | ops.token.issue | ops_agent, ops_lead | POST /v1/ops/ops-ai-tokens |
 | kyc.review.read | ops_agent, ops_lead | GET /v1/ops/kyc-reviews |
 | kyc.verify | ops_agent, ops_lead | POST /v1/ops/users/{user_id}/kyc/verify |
 | dsr.read | ops_agent, ops_lead | GET /v1/ops/data-requests |
 | audit.read | ops_lead | GET /v1/ops/audit |
+
+Routes merged after the policy table was fixed (wallet management, top-ups, payouts, consumer payments,
+disputes, notifications) reuse the existing action whose role set is the least privilege for them: consumer
+routes a `me.*` action (reads `me.transfer.read`, money-moving or dispute-opening writes `me.transfer.create`,
+wallet creation `me.wallet.read`), merchant reads `payment.read` / `merchant.dispute.read` (both merchant
+roles; marking a notification read changes only its read state). No new merchant money-moving route was added.
+Finer-grained action names (`me.wallet.create`, `me.payout.create`, `me.payment.create`, `me.dispute.open`,
+`me.notification.read`, `merchant.notification.read`, ...) need the policy table and its test extended.
+
+Ops dispute resolution: a Bearer credential must be an ops session whose role is allowed `dispute.resolve`
+(401 "invalid ops session" / 403 "forbidden", audited as `ops:<id>` with the session role); a request with no
+Bearer credential falls back to the interim `X-Ops-Admin-Token` (audited as `ops:admin`). The simulated card
+network routes carry no user role and accept only `X-Network-Token`; a user credential is not one (401, or 503 while no network token is configured).
 
 Enforcement: every credential dependency (merchant API key, consumer session, ops session) looks up the
 matched route's action via `ROUTE_ACTIONS` and answers 403 `{"detail": "forbidden"}` when the principal's
@@ -131,11 +145,11 @@ Rules (pure: `evaluate_kyc_rules(facts: KycFacts, now) -> tuple[KycRule, ...]`, 
 | rule | fires when |
 |---|---|
 | amount_threshold | amount_minor ≥ AMOUNT_THRESHOLD_MINOR[currency] (USD/EUR 1_000_000, INR 80_000_000, JPY 1_500_000) |
-| volume_24h | prior 24 h sent volume in that currency + amount ≥ 2 × amount threshold |
+| volume_24h | prior 24 h sent volume (succeeded transfers + non-failed payouts) in that currency + amount ≥ 2 × amount threshold |
 | high_risk_country_pair | sender or recipient country in HIGH_RISK_COUNTRIES (`KP`, `IR`, `MM`) and the two differ |
 | kyc_expired | status `verified` and kyc_expires_at ≤ now |
 | kyc_stale | status `verified` and kyc_verified_at + 365 d ≤ now |
-| velocity | ≥ 10 prior transfers sent in the last hour |
+| velocity | ≥ 10 prior transfers sent or non-failed payouts made in the last hour |
 | name_change | (not from facts) a rectification changed a non-null `full_name` |
 
 `screen_operation(session_factory, clock, user_id, OperationRequest(kind, amount_minor, currency,
@@ -144,9 +158,14 @@ its own committed transaction (user row locked): when a rule fires the user move
 `pending`), one open `kyc_reviews` row holds the union of fired rules, an audit row `kyc.review_opened`
 (summary: rules, operation kind; no amounts tied to names, no email) and an outbox event
 `compliance.kyc_review_required` are written. High-risk = cross-border transfer (both countries known and
-different) or a payout ≥ the amount threshold. `blocked` = high-risk and status after screening is not
-`verified`; a blocked attempt writes `kyc.operation_blocked`. `POST /v1/me/transfers` screens first and
-answers 403 `{"error": "kyc_reverification_required"}` (no-store) when blocked.
+different) or a payout whose amount plus the user's same-currency payouts of the last 24 h (pending, unknown or
+succeeded; failed ones do not count) reaches the amount threshold. `blocked` = high-risk and status after
+screening is not `verified`, or any payout by a `rejected` user. Non-failed payouts also count as sent volume
+(volume_24h) and as sent operations (velocity); a blocked attempt writes `kyc.operation_blocked`. `POST /v1/me/transfers` screens first and
+answers 403 `{"error": "kyc_reverification_required"}` (no-store) when blocked. `POST /v1/me/payouts` screens the same
+way (kind `payout`) under the same per-user operation lock: blocked → 403
+`{"error": "kyc_reverification_required"}`, no payout row and no funds held; the lock held by another
+operation of the user → 409 `{"error": "operation_in_progress"}` with Retry-After: 1 (no-store).
 
 `resolve_kyc(session_factory, clock, principal, user_id, outcome)`: `verified` → status verified,
 `kyc_verified_at = now`, `kyc_expires_at = now + 365 d`; `rejected` → status rejected; open reviews take the

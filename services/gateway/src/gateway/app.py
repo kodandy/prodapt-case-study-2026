@@ -319,6 +319,9 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
       demo_top_up_enabled. No-store.
     - POST /v1/me/payouts (Bearer session, Idempotency-Key required) PayoutRequest → 201 succeeded / failed,
       202 pending / unknown (funds stay held), 409 insufficient_funds, 422 key reused. No-store.
+      Screened like transfers (AML, R2-10): a payout at or above the amount threshold by a user who is not
+      KYC `verified` after screening → 403 {"error": "kyc_reverification_required"}; another screened
+      operation of the same user in flight → 409 {"error": "operation_in_progress"} with Retry-After: 1.
     - GET /v1/me/payouts/{payout_id} (Bearer session) → 200 PayoutView; another user's or unknown → 404
       "payout not found". No-store.
     - GET /v1/me/transfers?limit&cursor (Bearer session) → 200 {items, next_cursor}: the user's sent and
@@ -500,6 +503,17 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "mfa required", headers=NO_STORE_HEADERS)
         return claims.user_id
 
+    def consumer_for(action: str) -> Callable[..., uuid.UUID]:
+        """Consumer-session dependency for one policy action: 401 without a valid session, 403 when the
+        action is not a consumer action."""
+
+        def dependency(user_id: Annotated[uuid.UUID, Depends(session_user)]) -> uuid.UUID:
+            if not is_allowed("consumer", action):
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden", headers=NO_STORE_HEADERS)
+            return user_id
+
+        return dependency
+
     def totp_key() -> str:
         if deps.totp_encryption_key is None:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "mfa not configured")
@@ -555,7 +569,7 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
 
     @app.post("/v1/me/mfa/totp", status_code=status.HTTP_201_CREATED)
     def enrol_mfa_totp(
-        user_id: Annotated[uuid.UUID, Depends(session_user)],
+        user_id: Annotated[uuid.UUID, Depends(consumer_for("me.mfa"))],
         key: Annotated[str, Depends(totp_key)],
         response: Response,
     ) -> TotpEnrolResponse:
@@ -570,7 +584,7 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     @app.post("/v1/me/mfa/totp/verify")
     def verify_mfa_totp(
         body: TotpVerifyRequest,
-        user_id: Annotated[uuid.UUID, Depends(session_user)],
+        user_id: Annotated[uuid.UUID, Depends(consumer_for("me.mfa"))],
         key: Annotated[str, Depends(totp_key)],
     ) -> TotpVerifyResponse:
         try:
@@ -589,7 +603,7 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
 
     @app.get("/v1/me/wallets")
     def my_wallets(
-        user_id: Annotated[uuid.UUID, Depends(session_user)], response: Response
+        user_id: Annotated[uuid.UUID, Depends(consumer_for("me.wallet.read"))], response: Response
     ) -> WalletListResponse:
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
@@ -598,7 +612,7 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
 
     @app.get("/v1/me/transfers")
     def my_transfers(
-        user_id: Annotated[uuid.UUID, Depends(session_user)],
+        user_id: Annotated[uuid.UUID, Depends(consumer_for("me.transfer.read"))],
         response: Response,
         limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
         cursor: Annotated[str | None, Query(max_length=512)] = None,
@@ -616,7 +630,7 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     @app.post("/v1/me/transfers")
     def create_transfer(
         body: TransferRequest,
-        user_id: Annotated[uuid.UUID, Depends(session_user)],
+        user_id: Annotated[uuid.UUID, Depends(consumer_for("me.transfer.create"))],
         idempotency_key: Annotated[str | None, Header(max_length=255)] = None,
     ) -> JSONResponse:
         try:
@@ -637,11 +651,7 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
                     ),
                 )
                 if screening.blocked:
-                    return JSONResponse(
-                        {"error": "kyc_reverification_required"},
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        headers=NO_STORE_HEADERS,
-                    )
+                    return _kyc_reverification_required()
                 outcome = transfer(
                     session_factory,
                     deps.charge.clock,
@@ -653,16 +663,12 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
                     body.recipient_currency,
                 )
         except OperationInProgressError:
-            return JSONResponse(
-                {"error": "operation_in_progress"},
-                status_code=status.HTTP_409_CONFLICT,
-                headers={**NO_STORE_HEADERS, "Retry-After": "1"},
-            )
+            return _operation_in_progress()
         return JSONResponse(outcome.body, status_code=outcome.status_code, headers=NO_STORE_HEADERS)
 
     @app.post("/v1/me/wallets")
     def create_my_wallet(
-        body: CreateWalletRequest, user_id: Annotated[uuid.UUID, Depends(session_user)]
+        body: CreateWalletRequest, user_id: Annotated[uuid.UUID, Depends(consumer_for("me.wallet.read"))]
     ) -> JSONResponse:
         with session_factory.begin() as session:
             view, created = create_wallet(session, user_id, body.currency)
@@ -675,7 +681,7 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     @app.post("/v1/me/top-ups")
     def create_top_up(
         body: TopUpRequest,
-        user_id: Annotated[uuid.UUID, Depends(session_user)],
+        user_id: Annotated[uuid.UUID, Depends(consumer_for("me.transfer.create"))],
         idempotency_key: Annotated[str | None, Header(max_length=255)] = None,
     ) -> JSONResponse:
         if not deps.demo_top_up_enabled:
@@ -687,18 +693,32 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     @app.post("/v1/me/payouts")
     def create_my_payout(
         body: PayoutRequest,
-        user_id: Annotated[uuid.UUID, Depends(session_user)],
+        user_id: Annotated[uuid.UUID, Depends(consumer_for("me.transfer.create"))],
         idempotency_key: Annotated[str | None, Header(max_length=255)] = None,
     ) -> JSONResponse:
         key = _no_store_idempotency_key(idempotency_key)
-        outcome = create_payout(
-            payout_deps, user_id, key, body.method, body.amount_minor, body.currency, body.destination
-        )
+        try:
+            with user_operation_lock(session_factory, user_id):
+                screening = screen_operation(
+                    session_factory,
+                    deps.charge.clock,
+                    user_id,
+                    OperationRequest(kind="payout", amount_minor=body.amount_minor, currency=body.currency),
+                )
+                if screening.blocked:
+                    return _kyc_reverification_required()
+                outcome = create_payout(
+                    payout_deps, user_id, key, body.method, body.amount_minor, body.currency, body.destination
+                )
+        except OperationInProgressError:
+            return _operation_in_progress()
         return JSONResponse(outcome.body, status_code=outcome.status_code, headers=NO_STORE_HEADERS)
 
     @app.get("/v1/me/payouts/{payout_id}")
     def my_payout(
-        payout_id: uuid.UUID, user_id: Annotated[uuid.UUID, Depends(session_user)], response: Response
+        payout_id: uuid.UUID,
+        user_id: Annotated[uuid.UUID, Depends(consumer_for("me.transfer.read"))],
+        response: Response,
     ) -> PayoutView:
         try:
             with session_factory() as session:
@@ -821,7 +841,7 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
             raise HTTPException(status.HTTP_409_CONFLICT, "invalid dispute transition") from None
 
     @app.get("/v1/me/profile")
-    def my_profile(user_id: Annotated[uuid.UUID, Depends(session_user)]) -> JSONResponse:
+    def my_profile(user_id: Annotated[uuid.UUID, Depends(consumer_for("me.profile.read"))]) -> JSONResponse:
         try:
             with session_factory() as session:
                 view = read_profile(session, user_id)
@@ -833,7 +853,7 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
 
     @app.patch("/v1/me/profile")
     def rectify_my_profile(
-        body: ProfilePatch, user_id: Annotated[uuid.UUID, Depends(session_user)]
+        body: ProfilePatch, user_id: Annotated[uuid.UUID, Depends(consumer_for("me.profile.rectify"))]
     ) -> JSONResponse:
         try:
             view = rectify_profile(session_factory, deps.charge.clock, user_id, body.full_name, body.country)
@@ -844,7 +864,9 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         return JSONResponse(profile_json(view), headers=NO_STORE_HEADERS)
 
     @app.post("/v1/me/data-requests/export")
-    def export_my_data(user_id: Annotated[uuid.UUID, Depends(session_user)]) -> JSONResponse:
+    def export_my_data(
+        user_id: Annotated[uuid.UUID, Depends(consumer_for("me.data.export"))],
+    ) -> JSONResponse:
         try:
             exported = export_subject_data(session_factory, deps.charge.clock, user_id)
         except UnknownUserError:
@@ -854,7 +876,7 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         return JSONResponse(exported, headers=NO_STORE_HEADERS)
 
     @app.post("/v1/me/data-requests/erasure")
-    def erase_my_data(user_id: Annotated[uuid.UUID, Depends(session_user)]) -> JSONResponse:
+    def erase_my_data(user_id: Annotated[uuid.UUID, Depends(consumer_for("me.data.erase"))]) -> JSONResponse:
         try:
             request_id = erase_subject(session_factory, deps.charge.clock, user_id)
         except UnknownUserError:
@@ -868,7 +890,9 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         )
 
     @app.get("/v1/me/data-requests")
-    def my_data_requests(user_id: Annotated[uuid.UUID, Depends(session_user)]) -> JSONResponse:
+    def my_data_requests(
+        user_id: Annotated[uuid.UUID, Depends(consumer_for("me.data_requests.read"))],
+    ) -> JSONResponse:
         with session_factory() as session:
             items = [request_json(view) for view in list_own_requests(session, user_id)]
         return JSONResponse({"items": items}, headers=NO_STORE_HEADERS)
@@ -981,19 +1005,36 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         return JSONResponse({"items": items}, headers=NO_STORE_HEADERS)
 
     clock = deps.charge.clock
-    app.include_router(consumer_payment_router(deps.charge, clock, session_user))
+    app.include_router(consumer_payment_router(deps.charge, clock, consumer_for))
     app.include_router(
         dispute_router(
             session_factory,
             clock,
-            merchant_from_api_key,
-            session_user,
+            merchant_for,
+            consumer_for,
+            ops,
             deps.network_token,
             deps.ops_admin_token,
         )
     )
-    app.include_router(notification_router(session_factory, clock, merchant_from_api_key, session_user))
+    app.include_router(notification_router(session_factory, clock, merchant_for, consumer_for))
     return app
+
+
+def _kyc_reverification_required() -> JSONResponse:
+    return JSONResponse(
+        {"error": "kyc_reverification_required"},
+        status_code=status.HTTP_403_FORBIDDEN,
+        headers=NO_STORE_HEADERS,
+    )
+
+
+def _operation_in_progress() -> JSONResponse:
+    return JSONResponse(
+        {"error": "operation_in_progress"},
+        status_code=status.HTTP_409_CONFLICT,
+        headers={**NO_STORE_HEADERS, "Retry-After": "1"},
+    )
 
 
 def _aware_datetime_param(value: str | None, name: str) -> datetime | None:

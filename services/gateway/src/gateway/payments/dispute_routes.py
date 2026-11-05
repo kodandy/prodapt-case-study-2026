@@ -1,7 +1,8 @@
 """B3.3 dispute HTTP routes: consumer and simulated-network opening, lists, network / ops resolution.
 
-The ops route is guarded by the interim `X-Ops-Admin-Token` header until the RBAC OpsGuard
-(`dispute.resolve`) replaces it; the network routes stand in for a card network's API (`network.simulate`).
+The ops route takes an ops session allowed `dispute.resolve` (RBAC) or, without a Bearer credential, the
+interim `X-Ops-Admin-Token`. The network routes stand in for a card network's API: they carry no user role
+(`public` in the RBAC table) and are guarded by `X-Network-Token` alone.
 """
 
 import hmac
@@ -9,10 +10,13 @@ import uuid
 from collections.abc import Callable
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 from sqlalchemy.orm import Session, sessionmaker
 
+from gateway.accounts.rbac import is_allowed
+from gateway.admin import OpsGuard
 from gateway.clock import Clock
 from gateway.payments.dispute_lists import list_merchant_disputes, list_user_disputes
 from gateway.payments.disputes import (
@@ -32,6 +36,7 @@ from gateway.payments.schemas import MAX_AMOUNT_MINOR, DisputeState, DisputeView
 NETWORK_ACTOR = ("network", "card_network")
 OPS_ACTOR = ("ops:admin", "ops_lead")
 CONSUMER_ROLE = "consumer"
+OPS_RESOLVE_ACTION = "dispute.resolve"
 
 
 class _DisputeOpenFields(BaseModel):
@@ -73,8 +78,9 @@ class DisputeListResponse(BaseModel):
 def dispute_router(
     session_factory: sessionmaker[Session],
     clock: Clock,
-    merchant_auth: Callable[..., uuid.UUID],
-    user_auth: Callable[..., uuid.UUID],
+    merchant_auth: Callable[[str], Callable[..., uuid.UUID]],
+    user_auth: Callable[[str], Callable[..., uuid.UUID]],
+    ops_guard: OpsGuard,
     network_token: str | None,
     ops_admin_token: str | None,
 ) -> APIRouter:
@@ -86,21 +92,40 @@ def dispute_router(
     - GET /v1/disputes?limit&cursor&state (Bearer API key) → {items, next_cursor}: the merchant's disputes.
     - POST /v1/network/disputes (X-Network-Token) {payment_id, reason, amount_minor?} → 201 DisputeView.
     - POST /v1/network/disputes/{id}/resolution (X-Network-Token) {outcome} → 200 DisputeView.
-    - POST /v1/ops/disputes/{id}/resolution (X-Ops-Admin-Token) {outcome} → 200 DisputeView.
+    - POST /v1/ops/disputes/{id}/resolution (Bearer ops session with `dispute.resolve`, else the interim
+      X-Ops-Admin-Token) {outcome} → 200 DisputeView, audited as the ops user. An invalid ops session → 401
+      "invalid ops session"; an ops role outside the policy → 403 "forbidden".
       Resolution: unknown → 404; not `under_review` → 409. A missing or wrong token → 401; a token that is
       not configured → 503 for every request to those routes.
     """
     router = APIRouter()
+    bearer = HTTPBearer(auto_error=False)
 
     def network_caller(x_network_token: Annotated[str | None, Header(max_length=512)] = None) -> None:
         _check_token(network_token, x_network_token, "network")
 
-    def ops_caller(x_ops_admin_token: Annotated[str | None, Header(max_length=512)] = None) -> None:
+    def ops_caller(
+        request: Request,
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+        x_ops_admin_token: Annotated[str | None, Header(max_length=512)] = None,
+    ) -> tuple[str, str]:
+        """Any Authorization header (whatever its scheme) must carry an ops session allowed `dispute.resolve`,
+        with no fallback to the interim token; only a request without one is checked against the interim
+        X-Ops-Admin-Token."""
+        if request.headers.get("authorization") is not None:
+            principal = ops_guard.authenticate(None if credentials is None else credentials.credentials)
+            if not is_allowed(principal.role, OPS_RESOLVE_ACTION):
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
+            request.state.ops_principal = principal
+            return f"ops:{principal.ops_user_id}", principal.role
         _check_token(ops_admin_token, x_ops_admin_token, "ops")
+        return OPS_ACTOR
 
     @router.post("/v1/me/payments/{payment_id}/disputes", status_code=status.HTTP_201_CREATED)
     def consumer_open_dispute(
-        payment_id: uuid.UUID, body: ConsumerDisputeRequest, user_id: Annotated[uuid.UUID, Depends(user_auth)]
+        payment_id: uuid.UUID,
+        body: ConsumerDisputeRequest,
+        user_id: Annotated[uuid.UUID, Depends(user_auth("me.transfer.create"))],
     ) -> DisputeView:
         return _opened(
             lambda: open_dispute(
@@ -117,7 +142,7 @@ def dispute_router(
 
     @router.get("/v1/me/disputes")
     def my_disputes(
-        user_id: Annotated[uuid.UUID, Depends(user_auth)],
+        user_id: Annotated[uuid.UUID, Depends(user_auth("me.transfer.read"))],
         limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
         cursor: Annotated[str | None, Query(max_length=512)] = None,
     ) -> DisputeListResponse:
@@ -130,7 +155,7 @@ def dispute_router(
 
     @router.get("/v1/disputes")
     def merchant_disputes(
-        merchant_id: Annotated[uuid.UUID, Depends(merchant_auth)],
+        merchant_id: Annotated[uuid.UUID, Depends(merchant_auth("merchant.dispute.read"))],
         limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
         cursor: Annotated[str | None, Query(max_length=512)] = None,
         state: DisputeState | None = None,
@@ -163,9 +188,13 @@ def dispute_router(
     def network_resolution(dispute_id: uuid.UUID, body: ResolutionRequest) -> DisputeView:
         return _resolved(session_factory, clock, dispute_id, body, NETWORK_ACTOR)
 
-    @router.post("/v1/ops/disputes/{dispute_id}/resolution", dependencies=[Depends(ops_caller)])
-    def ops_resolution(dispute_id: uuid.UUID, body: ResolutionRequest) -> DisputeView:
-        return _resolved(session_factory, clock, dispute_id, body, OPS_ACTOR)
+    @router.post("/v1/ops/disputes/{dispute_id}/resolution")
+    def ops_resolution(
+        dispute_id: uuid.UUID,
+        body: ResolutionRequest,
+        actor: Annotated[tuple[str, str], Depends(ops_caller)],
+    ) -> DisputeView:
+        return _resolved(session_factory, clock, dispute_id, body, actor)
 
     return router
 

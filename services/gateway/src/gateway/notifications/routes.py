@@ -22,6 +22,12 @@ from gateway.notifications.inbox import (
 from gateway.notifications.records import RecipientType
 from gateway.payments.history import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, InvalidCursorError
 
+USER_READ = "me.transfer.read"
+USER_ANSWER = "me.transfer.create"
+"""Answering `not_me` may open a dispute as the user."""
+MERCHANT_READ = "payment.read"
+"""Listing and marking read: merchant_admin and merchant_support."""
+
 
 class NotificationListResponse(BaseModel):
     items: list[NotificationView]
@@ -43,8 +49,8 @@ class AnswerResponse(BaseModel):
 def notification_router(
     session_factory: sessionmaker[Session],
     clock: Clock,
-    merchant_auth: Callable[..., uuid.UUID],
-    user_auth: Callable[..., uuid.UUID],
+    merchant_auth: Callable[[str], Callable[..., uuid.UUID]],
+    user_auth: Callable[[str], Callable[..., uuid.UUID]],
 ) -> APIRouter:
     """Routes:
     - GET /v1/me/notifications?limit&cursor&unread_only (Bearer session), GET /v1/notifications?... (Bearer
@@ -81,7 +87,7 @@ def notification_router(
 
     @router.get("/v1/me/notifications")
     def my_notifications(
-        user_id: Annotated[uuid.UUID, Depends(user_auth)],
+        user_id: Annotated[uuid.UUID, Depends(user_auth(USER_READ))],
         limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
         cursor: Annotated[str | None, Query(max_length=512)] = None,
         unread_only: bool = False,
@@ -90,7 +96,7 @@ def notification_router(
 
     @router.get("/v1/notifications")
     def merchant_notifications(
-        merchant_id: Annotated[uuid.UUID, Depends(merchant_auth)],
+        merchant_id: Annotated[uuid.UUID, Depends(merchant_auth(MERCHANT_READ))],
         limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
         cursor: Annotated[str | None, Query(max_length=512)] = None,
         unread_only: bool = False,
@@ -99,19 +105,21 @@ def notification_router(
 
     @router.post("/v1/me/notifications/{notification_id}/read")
     def read_my_notification(
-        notification_id: uuid.UUID, user_id: Annotated[uuid.UUID, Depends(user_auth)]
+        notification_id: uuid.UUID, user_id: Annotated[uuid.UUID, Depends(user_auth(USER_READ))]
     ) -> NotificationView:
         return reading("user", user_id, notification_id)
 
     @router.post("/v1/notifications/{notification_id}/read")
     def read_merchant_notification(
-        notification_id: uuid.UUID, merchant_id: Annotated[uuid.UUID, Depends(merchant_auth)]
+        notification_id: uuid.UUID, merchant_id: Annotated[uuid.UUID, Depends(merchant_auth(MERCHANT_READ))]
     ) -> NotificationView:
         return reading("merchant", merchant_id, notification_id)
 
     @router.post("/v1/me/notifications/{notification_id}/response")
     def answer_notification(
-        notification_id: uuid.UUID, body: AnswerRequest, user_id: Annotated[uuid.UUID, Depends(user_auth)]
+        notification_id: uuid.UUID,
+        body: AnswerRequest,
+        user_id: Annotated[uuid.UUID, Depends(user_auth(USER_ANSWER))],
     ) -> AnswerResponse:
         try:
             result = answer_was_this_you(session_factory, clock, user_id, notification_id, body.answer)

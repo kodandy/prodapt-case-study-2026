@@ -77,6 +77,27 @@ ROUTE_ACTIONS: Mapping[str, str] = MappingProxyType(
         "POST /v1/ops/users/{user_id}/kyc/verify": "kyc.verify",
         "GET /v1/ops/data-requests": "dsr.read",
         "GET /v1/ops/audit": "audit.read",
+        # Routes merged after the policy table was frozen reuse the existing action with the same role set
+        # (least privilege by role); see docs/specs/compliance-rbac.md section 1.
+        "POST /v1/me/wallets": "me.wallet.read",
+        "POST /v1/me/top-ups": "me.transfer.create",
+        "POST /v1/me/payouts": "me.transfer.create",
+        "GET /v1/me/payouts/{payout_id}": "me.transfer.read",
+        "POST /v1/me/payments": "me.transfer.create",
+        "GET /v1/me/payments": "me.transfer.read",
+        "POST /v1/me/payments/{payment_id}/refund-requests": "me.transfer.create",
+        "POST /v1/me/payments/{payment_id}/disputes": "me.transfer.create",
+        "GET /v1/me/disputes": "me.transfer.read",
+        "GET /v1/me/notifications": "me.transfer.read",
+        "POST /v1/me/notifications/{notification_id}/read": "me.transfer.read",
+        "POST /v1/me/notifications/{notification_id}/response": "me.transfer.create",
+        "GET /v1/disputes": "merchant.dispute.read",
+        "GET /v1/notifications": "payment.read",
+        "POST /v1/notifications/{notification_id}/read": "payment.read",
+        "POST /v1/ops/disputes/{dispute_id}/resolution": "dispute.resolve",
+        # Simulated card network: no user role, guarded by X-Network-Token alone.
+        "POST /v1/network/disputes": PUBLIC,
+        "POST /v1/network/disputes/{dispute_id}/resolution": PUBLIC,
     }
 )
 

@@ -18,7 +18,7 @@ from gateway.audit.service import record_audit
 from gateway.clock import Clock
 from gateway.compliance.models import KycReview
 from gateway.outbox.models import OutboxEvent
-from gateway.wallets.models import Transfer
+from gateway.wallets.models import Payout, Transfer
 
 KycRule = KycRuleName
 OperationKind = Literal["transfer", "payout"]
@@ -41,6 +41,7 @@ REVERIFIED_ACTION = "kyc.reverified"
 REJECTED_ACTION = "kyc.rejected"
 
 _SUCCEEDED_TRANSFER = "succeeded"
+_FAILED_PAYOUT = "failed"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -128,19 +129,25 @@ def screen_operation(
 ) -> ScreeningResult:
     """Commits its own transaction (user row locked). Fired rules move the user to `pending` and open
     or extend the user's single open review; a high-risk operation by a user who is not `verified` is
-    blocked. Callers that act on the result must hold `user_operation_lock` across screening and the
-    operation, or concurrent operations are screened against the same stale history."""
+    blocked, and so is any payout by a `rejected` user. Payouts (not failed) count as sent volume and sent
+    operations, and a payout is high-risk once it and the same-currency payouts of the last 24 h reach the
+    amount threshold, so splitting a payout does not avoid the block. Callers that act on the result must
+    hold `user_operation_lock` across screening and the operation, or concurrent operations are screened
+    against the same stale history."""
     with session_factory.begin() as session:
         user = session.get(User, user_id, with_for_update=True)
         if user is None:
             raise UnknownUserError
         now = clock()
         recipient_country = _recipient_country(session, request)
+        payout_volume = _payout_volume(session, user_id, request.currency, now - VOLUME_WINDOW)
         facts = KycFacts(
             amount_minor=request.amount_minor,
             currency=request.currency,
-            volume_24h_minor=_sent_volume(session, user_id, request.currency, now - VOLUME_WINDOW),
-            transfers_last_hour=_sent_count(session, user_id, now - VELOCITY_WINDOW),
+            volume_24h_minor=_sent_volume(session, user_id, request.currency, now - VOLUME_WINDOW)
+            + payout_volume,
+            transfers_last_hour=_sent_count(session, user_id, now - VELOCITY_WINDOW)
+            + _payout_count(session, user_id, now - VELOCITY_WINDOW),
             sender_country=user.country,
             recipient_country=recipient_country,
             kyc_status=user.kyc_status,
@@ -156,9 +163,13 @@ def screen_operation(
             and recipient_country is not None
             and user.country != recipient_country
         )
-        large_payout = request.kind == "payout" and request.amount_minor >= amount_threshold(request.currency)
+        large_payout = request.kind == "payout" and (
+            request.amount_minor + payout_volume >= amount_threshold(request.currency)
+        )
         high_risk = cross_border or large_payout
-        blocked = high_risk and user.kyc_status != "verified"
+        blocked = (high_risk and user.kyc_status != "verified") or (
+            request.kind == "payout" and user.kyc_status == "rejected"
+        )
         if blocked:
             actor = f"user:{user.id}"
             record_audit(
@@ -352,6 +363,28 @@ def _sent_count(session: Session, user_id: uuid.UUID, since: datetime) -> int:
             Transfer.state == _SUCCEEDED_TRANSFER,
             Transfer.created_at > since,
         )
+    )
+    return int(count or 0)
+
+
+def _payout_volume(session: Session, user_id: uuid.UUID, currency: str, since: datetime) -> int:
+    """Payouts that left or may still leave the wallet (pending, unknown, succeeded) in the window."""
+    total = session.scalar(
+        select(func.coalesce(func.sum(Payout.amount_minor), 0)).where(
+            Payout.user_id == user_id,
+            Payout.currency == currency,
+            Payout.state != _FAILED_PAYOUT,
+            Payout.created_at > since,
+        )
+    )
+    return int(total or 0)
+
+
+def _payout_count(session: Session, user_id: uuid.UUID, since: datetime) -> int:
+    count = session.scalar(
+        select(func.count())
+        .select_from(Payout)
+        .where(Payout.user_id == user_id, Payout.state != _FAILED_PAYOUT, Payout.created_at > since)
     )
     return int(count or 0)
 

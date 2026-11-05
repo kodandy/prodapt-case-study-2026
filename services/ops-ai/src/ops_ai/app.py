@@ -14,10 +14,10 @@ from redis import Redis
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
-from ops_ai.analytics.access import ForbiddenOpsError, OpsAccess, require_ops_principal
-from ops_ai.analytics.routes import create_analytics_router
 from ops_ai.agents.bus import RedisStreamTransport
 from ops_ai.agents.routes import create_agents_router
+from ops_ai.analytics.access import ForbiddenOpsError, OpsAccess, require_ops_principal
+from ops_ai.analytics.routes import create_analytics_router
 from ops_ai.assistant.llm_port import LlmPort
 from ops_ai.assistant.service import AnswerMode, ask
 from ops_ai.auth import InvalidTokenError, verify_token
