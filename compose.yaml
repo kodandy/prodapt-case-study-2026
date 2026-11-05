@@ -115,6 +115,11 @@ services:
       <<: *app-env
       GATEWAY_SECRETS_DIR: /run/secrets/gateway
       GATEWAY_GRPC_PORT: "50051"
+      # Plaintext gRPC is for the local demo only: the host port below is bound to 127.0.0.1. Set the TLS
+      # paths (and GATEWAY_GRPC_INSECURE=false) for any deployment reachable beyond loopback.
+      GATEWAY_GRPC_INSECURE: ${GATEWAY_GRPC_INSECURE:-true}
+      GATEWAY_GRPC_TLS_CERT_PATH: ${GATEWAY_GRPC_TLS_CERT_PATH:-}
+      GATEWAY_GRPC_TLS_KEY_PATH: ${GATEWAY_GRPC_TLS_KEY_PATH:-}
       PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-simulator}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
     command: ["python", "-m", "gateway.merchant_api.grpc_server"]

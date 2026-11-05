@@ -9,7 +9,12 @@ import re
 
 import httpx
 
-from gateway.payments.providers.port import CardRef, ProviderResult, ProviderTimeoutError
+from gateway.payments.providers.port import (
+    CardRef,
+    ProviderRequestError,
+    ProviderResult,
+    ProviderTimeoutError,
+)
 
 STRIPE_API_BASE = "https://api.stripe.com"
 TEST_KEY_PREFIX = "sk_test_"
@@ -50,7 +55,7 @@ class LiveKeyRefusedError(ValueError):
         super().__init__("STRIPE_SECRET_KEY must be a test-mode secret key (sk_test_...)")
 
 
-class StripeRequestError(RuntimeError):
+class StripeRequestError(ProviderRequestError):
     """Stripe rejected the request itself (bad request, auth): a bug or misconfiguration, not a decline."""
 
 
@@ -122,7 +127,7 @@ class StripeProvider:
                 headers={**self._headers(), "Idempotency-Key": provider_key},
                 timeout=self._timeout,
             )
-        except httpx.TransportError:
+        except httpx.RequestError:
             raise ProviderTimeoutError from None
         return self._charge_result(response)
 
@@ -153,7 +158,7 @@ class StripeProvider:
                 headers=self._headers(),
                 timeout=self._timeout,
             )
-        except httpx.TransportError:
+        except httpx.RequestError:
             raise ProviderTimeoutError from None
         if response.status_code != 200:
             raise ProviderTimeoutError

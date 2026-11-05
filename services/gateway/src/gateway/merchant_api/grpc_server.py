@@ -1,15 +1,18 @@
 """Merchant gRPC API (B8.2): the same domain functions, idempotency store, validation and tenancy as REST.
 
-`python -m gateway.merchant_api.grpc_server` serves it on GATEWAY_GRPC_PORT (default 50051).
+`python -m gateway.merchant_api.grpc_server` serves it on GATEWAY_GRPC_PORT (default 50051) over TLS from
+GATEWAY_GRPC_TLS_CERT_PATH / GATEWAY_GRPC_TLS_KEY_PATH. Without them it refuses to start unless
+GATEWAY_GRPC_INSECURE=true, which is for loopback, dev and test only (compose publishes it on 127.0.0.1).
 """
 
 import functools
 import logging
 import os
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent import futures
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import NoReturn
 
 import grpc
@@ -38,6 +41,9 @@ MAX_CONCURRENT_RPCS = 64
 DEFAULT_GRPC_PORT = 50051
 IDEMPOTENCY_LABEL = "idempotency-key metadata"
 _BEARER_PREFIX = "Bearer "
+TLS_CERT_PATH_ENV = "GATEWAY_GRPC_TLS_CERT_PATH"
+TLS_KEY_PATH_ENV = "GATEWAY_GRPC_TLS_KEY_PATH"
+INSECURE_ENV = "GATEWAY_GRPC_INSECURE"
 
 _logger = logging.getLogger(__name__)
 
@@ -46,6 +52,30 @@ _logger = logging.getLogger(__name__)
 class GrpcDeps:
     charge: ChargeDeps
     api_key_pepper: str = field(repr=False)
+
+
+class GrpcTlsConfigError(RuntimeError):
+    """The TLS settings are missing or unusable. The message names settings, never file contents."""
+
+
+def resolve_server_credentials(environ: Mapping[str, str]) -> grpc.ServerCredentials | None:
+    """TLS credentials from the cert/key paths; None only when both are unset and insecure is opted in."""
+    cert_path = environ.get(TLS_CERT_PATH_ENV, "")
+    key_path = environ.get(TLS_KEY_PATH_ENV, "")
+    if cert_path and key_path:
+        try:
+            cert = Path(cert_path).read_bytes()
+            key = Path(key_path).read_bytes()
+        except OSError:
+            raise GrpcTlsConfigError(f"cannot read {TLS_CERT_PATH_ENV} or {TLS_KEY_PATH_ENV}") from None
+        return grpc.ssl_server_credentials([(key, cert)])
+    if cert_path or key_path:
+        raise GrpcTlsConfigError(f"set both {TLS_CERT_PATH_ENV} and {TLS_KEY_PATH_ENV}")
+    if environ.get(INSECURE_ENV) == "true":
+        return None
+    raise GrpcTlsConfigError(
+        f"set {TLS_CERT_PATH_ENV} and {TLS_KEY_PATH_ENV}, or {INSECURE_ENV}=true for loopback/dev/test only"
+    )
 
 
 class _RpcAbortedError(Exception):
@@ -236,9 +266,13 @@ class MerchantPaymentsServicer(payments_pb2_grpc.MerchantPaymentsServicer):
 
 
 def build_grpc_server(
-    deps: GrpcDeps, address: str = "[::]:50051", max_workers: int = 16
+    deps: GrpcDeps,
+    address: str = "[::]:50051",
+    max_workers: int = 16,
+    server_credentials: grpc.ServerCredentials | None = None,
 ) -> tuple[grpc.Server, int]:
-    """Returns the server (not started) and the bound port; port 0 in `address` picks a free one."""
+    """Returns the server (not started) and the bound port; port 0 in `address` picks a free one. Without
+    `server_credentials` the port is plaintext: callers opt in via `resolve_server_credentials`."""
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=max_workers),
         maximum_concurrent_rpcs=MAX_CONCURRENT_RPCS,
@@ -251,17 +285,25 @@ def build_grpc_server(
         ],
     )
     payments_pb2_grpc.add_MerchantPaymentsServicer_to_server(MerchantPaymentsServicer(deps), server)
-    port = server.add_insecure_port(address)
+    if server_credentials is None:
+        port = server.add_insecure_port(address)
+    else:
+        port = server.add_secure_port(address, server_credentials)
+        if port == 0:
+            raise GrpcTlsConfigError("cannot bind the TLS port with the configured certificate and key")
     return server, port
 
 
 def main() -> None:
+    server_credentials = resolve_server_credentials(os.environ)
+    if server_credentials is None:
+        _logger.warning("gRPC is serving PLAINTEXT (%s=true): loopback, dev and test only", INSECURE_ENV)
     settings = load_gateway_settings()
     deps = GrpcDeps(
         charge=build_charge_deps(settings), api_key_pepper=settings.api_key_pepper.get_secret_value()
     )
     port = int(os.environ.get("GATEWAY_GRPC_PORT", str(DEFAULT_GRPC_PORT)))
-    server, _bound = build_grpc_server(deps, f"[::]:{port}")
+    server, _bound = build_grpc_server(deps, f"[::]:{port}", server_credentials=server_credentials)
     server.start()
     server.wait_for_termination()
 

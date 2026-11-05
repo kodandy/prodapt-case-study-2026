@@ -24,6 +24,11 @@ class ProviderTimeoutError(Exception):
     """The provider did not answer in time: the outcome is unknown, never failed."""
 
 
+class ProviderRequestError(Exception):
+    """The provider rejected the request itself and it is not a card decline (bad request, auth). The charge
+    flow records the outcome as unknown rather than declaring a failure it cannot prove."""
+
+
 class ProviderPort(Protocol):
     name: str
 
