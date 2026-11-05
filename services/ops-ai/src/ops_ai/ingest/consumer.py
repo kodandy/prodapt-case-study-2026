@@ -7,8 +7,10 @@ from redis import Redis
 from redis.exceptions import ResponseError
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
+from ops_ai.analytics.anomaly import observe_payment
 from ops_ai.clock import Clock
 from ops_ai.fraud_watch.watch import watch_payment
 from ops_ai.ingest.models import PaymentFact, ProcessedEvent
@@ -93,7 +95,17 @@ def apply_payment_event(session: Session, clock: Clock, event: PaymentEventV1) -
         .on_conflict_do_update(index_elements=["kind", "ref_id"], set_=document)
     )
     watch_payment(session, clock, event)
+    _observe_isolated(session, clock, event)
     return True
+
+
+def _observe_isolated(session: Session, clock: Clock, event: PaymentEventV1) -> None:
+    """Anomaly detection is best effort: a failure rolls back its savepoint and never blocks ingest."""
+    try:
+        with session.begin_nested():
+            observe_payment(session, clock, event)
+    except (ArithmeticError, ValueError, SQLAlchemyError) as error:
+        logger.warning("anomaly observe skipped for event %s: %s", event.event_id, type(error).__name__)
 
 
 def _payment_body(event: PaymentEventV1) -> str:

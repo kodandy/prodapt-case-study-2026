@@ -5,6 +5,9 @@
   --bg: #ffffff;
   --accent: #1f5fbf;
   --danger: #b00020;
+  --chart-history: #5c5c5c;
+  --chart-forecast: #1f5fbf;
+  --chart-band: rgba(31, 95, 191, 0.16);
   color-scheme: light dark;
   font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
@@ -16,6 +19,9 @@
     --bg: #161616;
     --accent: #7aa7ff;
     --danger: #ff6b81;
+    --chart-history: #a6a6a6;
+    --chart-forecast: #7aa7ff;
+    --chart-band: rgba(122, 167, 255, 0.22);
   }
 }
 * { box-sizing: border-box; }
@@ -52,3 +58,14 @@ th, td { padding: 8px; border-bottom: 1px solid var(--line); }
 [role="alert"] { color: var(--danger); }
 code { font-size: 13px; overflow-wrap: anywhere; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.stack-tight { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.plain-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.alert-item { padding: 8px 0; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.banner { margin: 0; padding: 8px 16px; border-left: 4px solid var(--accent); }
+.row-actions { display: flex; gap: 8px; }
+.inline-field { flex-direction: row; align-items: center; gap: 8px; margin-bottom: 8px; }
+/* Series differ by stroke style as well as colour, so the chart does not rely on hue alone. */
+.chart { width: 100%; height: 160px; display: block; }
+.chart-band { fill: var(--chart-band); stroke: none; }
+.chart-history { fill: none; stroke: var(--chart-history); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.chart-forecast { fill: none; stroke: var(--chart-forecast); stroke-width: 2; stroke-dasharray: 6 4; vector-effect: non-scaling-stroke; }

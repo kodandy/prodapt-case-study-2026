@@ -14,6 +14,8 @@ from redis import Redis
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
+from ops_ai.analytics.access import ForbiddenOpsError, OpsAccess, require_ops_principal
+from ops_ai.analytics.routes import create_analytics_router
 from ops_ai.assistant.llm_port import LlmPort
 from ops_ai.assistant.service import AnswerMode, ask
 from ops_ai.auth import InvalidTokenError, verify_token
@@ -351,6 +353,12 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
         return principal
 
+    def analytics_ops_access(principal: Annotated[Principal, Depends(principal_from_token)]) -> OpsAccess:
+        try:
+            return require_ops_principal(principal)
+        except ForbiddenOpsError:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden") from None
+
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
@@ -496,6 +504,9 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
         )
 
     app.include_router(create_ticket_router(deps.session_factory, deps.clock, merchant_scope))
+    app.include_router(
+        create_analytics_router(deps.session_factory, deps.clock, merchant_scope, analytics_ops_access)
+    )
     return app
 
 
