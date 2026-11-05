@@ -13,6 +13,7 @@ from ops_ai.agents.supervisor import narrate_investigation, run_agents
 from ops_ai.assistant.evidence import EvidenceItem
 from ops_ai.assistant.llm_port import LlmPort
 from ops_ai.clock import Clock
+from ops_ai.judge.dispute_summary import DisputeRecordSource
 from ops_ai.scope import Scope, UserScope
 
 NO_STORE = "no-store"
@@ -131,6 +132,8 @@ def create_agents_router(
     merchant_scope: Callable[..., Scope],
     user_scope: Callable[..., UserScope],
     transport: MessageTransport | None = None,
+    *,
+    dispute_records: DisputeRecordSource | None = None,
 ) -> APIRouter:
     """POST /v1/agents/investigate and GET /v1/agents/messages/{id} (merchant token), POST
     /v1/agents/transfer-rca (user token)."""
@@ -141,7 +144,7 @@ def create_agents_router(
         body: AgentInvestigateRequest, scope: Annotated[Scope, Depends(merchant_scope)], response: Response
     ) -> AgentInvestigateResponse:
         with session_factory() as session:
-            found = run_agents(session, scope, body.question, clock(), transport)
+            found = run_agents(session, scope, body.question, clock(), transport, dispute_records)
             session.commit()
         result = narrate_investigation(found, body.question, llm)
         response.headers["Cache-Control"] = NO_STORE

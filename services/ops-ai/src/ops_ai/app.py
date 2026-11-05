@@ -33,6 +33,9 @@ from ops_ai.fraud_watch.service import FraudCause, FraudIntent, investigate_frau
 from ops_ai.investigation.playbook import Playbook, load_playbook
 from ops_ai.investigation.service import CauseLabel, Intent, investigate
 from ops_ai.investigation.tools import FailureAggregate
+from ops_ai.judge.dispute_summary import DisputeRecordSource
+from ops_ai.judge.root_cause import JUDGE_TIMEOUT_SECONDS, RootCauseAssessment, assess_root_cause
+from ops_ai.judge.schemas import LlmStatus
 from ops_ai.memory.routes import build_memory_router
 from ops_ai.memory.session import SessionStore
 from ops_ai.observability.http import install_observability
@@ -71,6 +74,11 @@ class OpsAiAppDeps:
     """Set → the B10 session and memory routes are mounted (docs/specs/memory.md)."""
     tool_llm: ToolCallingLlm | None = None
     playbook: Playbook = field(default_factory=load_playbook)
+    judge_llm: LlmPort | None = None
+    """Set → `/v1/assistant/investigate?judge=true` assesses the root cause (evaluation-judge.md 6.4.2)."""
+    judge_timeout_seconds: float = JUDGE_TIMEOUT_SECONDS
+    dispute_records: DisputeRecordSource | None = None
+    """Dispute workflow records for the dispute agent's judge (evaluation-judge.md 6.4.1)."""
 
 
 class AskRequest(BaseModel):
@@ -193,6 +201,32 @@ class InvestigateTransferResponse(BaseModel):
     evidence: list[EvidenceOut]
 
 
+class RootCauseJudgeOut(BaseModel):
+    status: str
+    reason: str | None
+    cause_code: str | None
+    score: float | None
+    passed: bool | None
+    rationale: str | None
+    resolution_steps: list[str]
+    llm_status: LlmStatus | None
+    model: str | None
+
+    @classmethod
+    def of(cls, assessment: RootCauseAssessment) -> "RootCauseJudgeOut":
+        return cls(
+            status=assessment.status,
+            reason=assessment.reason,
+            cause_code=assessment.cause_code,
+            score=assessment.score,
+            passed=assessment.passed,
+            rationale=assessment.rationale,
+            resolution_steps=list(assessment.resolution_steps),
+            llm_status=assessment.llm_status,
+            model=assessment.model,
+        )
+
+
 class InvestigateResponse(BaseModel):
     intent: Intent
     cause_label: CauseLabel
@@ -204,6 +238,8 @@ class InvestigateResponse(BaseModel):
     suggested_fixes: list[str]
     tool_calls: list[ToolCallOut]
     evidence: list[EvidenceOut]
+    judge: RootCauseJudgeOut | None = None
+    """Only with `?judge=true` (left unset otherwise, so the default response keeps its keys)."""
 
 
 EPISODE_PAYMENT_IDS_LIMIT = 100
@@ -408,13 +444,18 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
             evidence=[EvidenceOut(ref=item.ref, summary=item.summary) for item in answer.evidence],
         )
 
-    @app.post("/v1/assistant/investigate")
+    @app.post("/v1/assistant/investigate", response_model_exclude_unset=True)
     def assistant_investigate(
-        body: AskRequest, scope: Annotated[Scope, Depends(merchant_scope)]
+        body: AskRequest, scope: Annotated[Scope, Depends(merchant_scope)], judge: bool = False
     ) -> InvestigateResponse:
         with deps.session_factory() as session:
             result = investigate(session, scope, body.question, deps.clock(), deps.llm)
+        extra: dict[str, RootCauseJudgeOut] = {}
+        if judge:
+            assessment = assess_root_cause(result, deps.judge_llm, deps.judge_timeout_seconds)
+            extra["judge"] = RootCauseJudgeOut.of(assessment)
         return InvestigateResponse(
+            **extra,
             intent=result.intent,
             cause_label=result.cause_label,
             mode=result.mode,
@@ -548,6 +589,7 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
             merchant_scope,
             user_scope,
             None if deps.redis is None else RedisStreamTransport(deps.redis),
+            dispute_records=deps.dispute_records,
         )
     )
     install_observability(app)

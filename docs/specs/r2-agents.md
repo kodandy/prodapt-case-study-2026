@@ -229,6 +229,8 @@ budget is hit (`truncated=True`).
 - dispute on `investigate` or `check_disputes` (only the first is worked): `dispute_tickets`; sends
   `chargeback_impact` to settlement. On `chargeback_impact_result`: contribution (`finding` when there are dispute
   tickets or chargebacks, evidence `disputes:<merchant_id>`), `finding` to supervisor.
+  It also calls the dispute judge on the merchant's dispute workflow records (rubric only) and adds the verdict
+  to its contribution and `finding` payload: docs/specs/evaluation-judge.md §6.4.1.
 - settlement on `investigate`: `explain_settlement(latest)`; `finding` when gap ≠ 0, evidence `statement:<period>`;
   none → `no_finding`. On `chargeback_impact`: reads the same statement and replies `chargeback_impact_result` with
   `chargebacks_minor`, `chargeback_fees_minor`, `period` (0 / None without a statement).

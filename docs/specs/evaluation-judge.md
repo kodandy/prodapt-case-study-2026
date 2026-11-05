@@ -338,6 +338,103 @@ the judge puts in the prompt (agrees with the rubric, so CI is deterministic). M
 `services/ops-ai/eval/judge/hypotheses.json` (hypotheses + evidence + expected order) feed the suite metrics
 `judge_dispute_agreement` and `judge_ranking_agreement` (fraction matching, threshold 1.0).
 
+### 6.4 Judge wiring into the dispute agent and the investigation route (R2-1, R2-2)
+
+Additive only: no existing response field, message, evidence item or tool call changes; existing callers that
+pass nothing new get exactly the old output.
+
+#### 6.4.1 Dispute agent (`ops_ai.judge.dispute_summary`, called from `ops_ai.agents.supervisor`)
+
+No gateway dispute workflow (transitions, evidence, reason code) reaches ops-ai today; the only dispute signal is
+the settlement chargeback flag (`tickets/sources.py`). So records come from an injected port, and the default
+deployment has none (`skipped`). Fabricating transitions from the chargeback flag is ruled out.
+
+```python
+class DisputeRecordSource(Protocol):
+    def dispute_records(self, scope: Scope, limit: int) -> Sequence[DisputeWorkflowRecord]: ...
+
+DisputeJudgementStatus = Literal["judged", "skipped"]
+
+@dataclass(frozen=True)
+class DisputeJudgement:
+    status: DisputeJudgementStatus
+    reason: str | None          # why skipped; None when judged
+    disputes: int               # records judged (0 when skipped)
+    verdict: Verdict | None     # worst verdict: invalid > needs_review > valid; None when skipped
+    score: float | None         # mean over records of passed checks / total checks, rounded to 4 places
+    passed: bool | None         # every judged verdict is "valid"; None when skipped
+    rationale: str | None       # <= 300 characters
+    dispute_ids: tuple[uuid.UUID, ...]   # judged ids, in source order
+
+MAX_JUDGED_DISPUTES = 20
+def judge_merchant_disputes(scope: Scope, source: DisputeRecordSource | None) -> DisputeJudgement
+```
+- `source` None → `skipped`, reason `"no dispute workflow source is configured"`. The source raising any
+  exception → `skipped`, reason `"dispute workflow records unavailable"` (never propagates).
+- The source is called with `limit=MAX_JUDGED_DISPUTES`; records whose `merchant_id` is not
+  `scope.merchant_id` are dropped (tenant scoping does not trust the source), then at most
+  `MAX_JUDGED_DISPUTES` are kept. None left → `skipped`, reason `"no dispute workflow record for this merchant"`.
+- Otherwise each record goes through `judge_dispute(record)` with no LLM (rubric only: the agents run while the
+  DB session is held, and no LLM call may happen then). `rationale`: when `passed`,
+  `"<n> dispute workflow(s) pass the rubric"`; else `"dispute <id>: <detail>; <detail>..."` from the first
+  non-valid verdict's reasons, truncated to 300 characters.
+
+Agent wiring: `run_agents(..., dispute_records: DisputeRecordSource | None = None)`,
+`MerchantRun(..., dispute_records=None)`, `create_agents_router(..., dispute_records=None)` (keyword),
+`OpsAiAppDeps.dispute_records: DisputeRecordSource | None = None`. On `chargeback_impact_result` the dispute agent
+calls `judge_merchant_disputes(scope, dispute_records)` once (no tool call is recorded: the judge is not a
+data tool, and `AGENT_TOOLS` is unchanged). Then:
+- `AgentContribution` gains `judge: DisputeJudgement | None = None`; the dispute contribution carries the
+  judgement (other agents: None).
+- The dispute → supervisor `finding` payload gains `judge_status`, `judge_reason`, `judge_disputes`,
+  `judge_verdict`, `judge_score`, `judge_passed`, `judge_rationale` (JSON scalars; None when not applicable).
+  `status` keeps its meaning.
+- When `judged`: the contribution gets evidence `dispute_judge:<merchant_id>` (summary names the count, the worst
+  verdict and the score) after `disputes:<merchant_id>`, one summary sentence naming the verdict, and status
+  `finding` when `passed` is False. When `skipped`: no evidence, summary or status change.
+
+#### 6.4.2 Investigation route (`ops_ai.judge.root_cause`, `POST /v1/assistant/investigate`)
+
+Opt-in with the query parameter `judge=true` (default false: response unchanged, no judge work). With it the
+response gains `judge: RootCauseJudgeOut`; the route never fails because of the judge.
+
+```python
+RootCauseJudgeStatus = Literal["assessed", "skipped"]
+
+@dataclass(frozen=True)
+class RootCauseAssessment:
+    status: RootCauseJudgeStatus
+    reason: str | None                 # why skipped; None when assessed
+    cause_code: str | None             # the route's cause_label when assessed
+    score: float | None                # support_score of the hypothesis
+    passed: bool | None                # RankedHypothesis.supported
+    rationale: str | None              # llm_rationale
+    resolution_steps: tuple[str, ...]  # () when skipped
+    llm_status: LlmStatus | None       # None when skipped
+    model: str | None
+
+JUDGE_TIMEOUT_SECONDS = 5.0
+def root_cause_hypothesis(investigation: Investigation) -> Hypothesis | None
+def assess_root_cause(investigation: Investigation, judge_llm: LlmPort | None,
+                      timeout_seconds: float = JUDGE_TIMEOUT_SECONDS) -> RootCauseAssessment
+```
+- `root_cause_hypothesis`: None unless `cause_label` is `issuer_outage_on_bin` or `elevated_failures`.
+  `hypothesis_id` `"route_cause"`, `cause_code` = `cause_label`, `evidence_refs`: `aggregate:window`,
+  `aggregate:baseline`, then (issuer outage only) the `aggregate:bin:<bin>` ref present in the evidence.
+  `statement` is a fixed sentence per cause naming the BIN for the issuer outage.
+- `assess_root_cause` order: no hypothesis → `skipped`, `"no root-cause hypothesis to judge"`; `judge_llm`
+  None → `skipped`, `"no judge LLM configured"` (no work at all); else
+  `rank_hypotheses([hypothesis], investigation.evidence, judge_llm)` on a worker thread, waiting at most
+  `timeout_seconds`: timeout → `skipped`, `"judge timed out"`; any exception → `skipped`, `"judge failed"`.
+  `LlmUnavailableError` and rejected replies are handled inside `rank_hypotheses` and give `assessed` with
+  `llm_status` `unavailable` / `rejected` (the deterministic score still stands).
+- The judge runs after the investigation released its DB session (`investigate` closes it before the narration).
+- `OpsAiAppDeps` gains `judge_llm: LlmPort | None = None` and `judge_timeout_seconds: float = 5.0`.
+  `build_app_from_env` sets `judge_llm` to the same `OpenAiLlm` as the assistant when `OPENAI_API_KEY` is set,
+  else None.
+- `RootCauseJudgeOut` (JSON): `status`, `reason`, `cause_code`, `score`, `passed`, `rationale`,
+  `resolution_steps` (list), `llm_status`, `model`. All keys always present.
+
 ## 7. Make targets
 
 - `make eval`: runs the evaluation and judge test suites (golden SQ1–SQ4 E2E, custom metrics, leakage gate)
