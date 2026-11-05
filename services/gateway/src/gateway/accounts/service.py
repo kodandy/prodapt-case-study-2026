@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from gateway.accounts.models import ApiKey, Merchant, User
+from gateway.accounts.rbac import MERCHANT_ROLES, MerchantRole
 from gateway.clock import Clock
 from gateway.payments.ledger.service import ensure_account
 from gateway.wallets.models import AccountBalance
@@ -142,7 +143,12 @@ def _hash_api_key(api_key: str, pepper: str) -> str:
 
 
 def create_merchant(
-    session: Session, clock: Clock, name: str, api_key_pepper: str, merchant_id: uuid.UUID | None = None
+    session: Session,
+    clock: Clock,
+    name: str,
+    api_key_pepper: str,
+    merchant_id: uuid.UUID | None = None,
+    role: MerchantRole = "merchant_admin",
 ) -> MerchantCredentials:
     """Creates the merchant (under `merchant_id`, else a random id) and an API key `sk_test_...`.
 
@@ -152,12 +158,16 @@ def create_merchant(
     session.add(merchant)
     session.flush()
     return MerchantCredentials(
-        merchant_id=merchant.id, api_key=_add_api_key(session, clock, merchant.id, api_key_pepper)
+        merchant_id=merchant.id, api_key=_add_api_key(session, clock, merchant.id, api_key_pepper, role)
     )
 
 
 def issue_api_key(
-    session: Session, clock: Clock, merchant_id: uuid.UUID, api_key_pepper: str
+    session: Session,
+    clock: Clock,
+    merchant_id: uuid.UUID,
+    api_key_pepper: str,
+    role: MerchantRole = "merchant_admin",
 ) -> MerchantCredentials:
     """A new API key for an existing merchant; earlier keys keep working.
 
@@ -166,11 +176,15 @@ def issue_api_key(
     if session.get(Merchant, merchant_id) is None:
         raise UnknownMerchantError
     return MerchantCredentials(
-        merchant_id=merchant_id, api_key=_add_api_key(session, clock, merchant_id, api_key_pepper)
+        merchant_id=merchant_id, api_key=_add_api_key(session, clock, merchant_id, api_key_pepper, role)
     )
 
 
-def _add_api_key(session: Session, clock: Clock, merchant_id: uuid.UUID, api_key_pepper: str) -> str:
+def _add_api_key(
+    session: Session, clock: Clock, merchant_id: uuid.UUID, api_key_pepper: str, role: MerchantRole
+) -> str:
+    if role not in MERCHANT_ROLES:
+        raise ValueError("unknown merchant role")
     api_key = f"{API_KEY_PREFIX}{secrets.token_urlsafe(32)}"
     session.add(
         ApiKey(
@@ -179,6 +193,7 @@ def _add_api_key(session: Session, clock: Clock, merchant_id: uuid.UUID, api_key
             key_hash=_hash_api_key(api_key, api_key_pepper),
             prefix=api_key[: len(API_KEY_PREFIX) + 4],
             created_at=clock(),
+            role=role,
         )
     )
     session.flush()
@@ -192,3 +207,22 @@ def authenticate_api_key(session: Session, api_key: str, api_key_pepper: str) ->
     return session.scalar(
         select(ApiKey.merchant_id).where(ApiKey.key_hash == _hash_api_key(api_key, api_key_pepper))
     )
+
+
+def authenticate_api_key_role(
+    session: Session, api_key: str, api_key_pepper: str
+) -> tuple[uuid.UUID, MerchantRole] | None:
+    """The merchant id and the key's role for a valid key, else None. An unknown stored role is refused."""
+    if not api_key.startswith(API_KEY_PREFIX):
+        return None
+    row = session.execute(
+        select(ApiKey.merchant_id, ApiKey.role).where(
+            ApiKey.key_hash == _hash_api_key(api_key, api_key_pepper)
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    for role in MERCHANT_ROLES:
+        if role == row.role:
+            return row.merchant_id, role
+    return None

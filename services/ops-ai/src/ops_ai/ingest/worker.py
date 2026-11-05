@@ -11,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from ops_ai.clock import Clock, system_clock
+from ops_ai.compliance.consumer import consume_compliance
 from ops_ai.config import load_ops_ai_settings
 from ops_ai.db import make_engine, make_session_factory
 from ops_ai.ingest.consumer import consume_payments
@@ -32,7 +33,8 @@ def run_consumer(
     stop: threading.Event,
     block_ms: int = 500,
 ) -> int:
-    """Consumes gw.payments.v1 until `stop` is set; returns the number of entries read (re-reads included).
+    """Consumes gw.payments.v1 and gw.compliance.v1 until `stop` is set; returns the number of entries read
+    (re-reads included).
 
     Each iteration first re-reads this consumer's unacked entries, so an event whose apply failed is retried.
     Redis and DB errors are logged by class name only (messages can carry connection details) and retried.
@@ -53,6 +55,8 @@ def run_consumer(
         try:
             total += consume_payments(session_factory, redis, clock, consumer_name, start_id="0")
             total += consume_payments(session_factory, redis, clock, consumer_name, block_ms=block_ms)
+            total += consume_compliance(session_factory, redis, clock, consumer_name, start_id="0")
+            total += consume_compliance(session_factory, redis, clock, consumer_name)
         except (RedisError, SQLAlchemyError, OSError) as error:
             logger.warning("consumer iteration failed: %s", type(error).__name__)
             stop.wait(RETRY_BACKOFF_SECONDS)

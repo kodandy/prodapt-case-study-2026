@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from redis import Redis
 
 from gateway.app import GatewayAppDeps, create_app
+from gateway.audit.db_role import use_db_role
 from gateway.clock import system_clock
 from gateway.config import load_gateway_settings
 from gateway.db import make_engine, make_session_factory
@@ -18,7 +19,10 @@ def build_app_from_env() -> FastAPI:
     settings = load_gateway_settings()
     if settings.jwt_private_key_pem is None:
         raise RuntimeError("GATEWAY_JWT_PRIVATE_KEY_PEM is required")
-    session_factory = make_session_factory(make_engine(settings.database_url))
+    engine = make_engine(settings.database_url)
+    if settings.db_role:
+        use_db_role(engine, settings.db_role)
+    session_factory = make_session_factory(engine)
     redis = Redis.from_url(
         settings.redis_url,
         socket_connect_timeout=REDIS_CONNECT_TIMEOUT_SECONDS,

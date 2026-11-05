@@ -20,13 +20,14 @@ from ops_ai.assistant.llm_port import LlmPort
 from ops_ai.assistant.service import AnswerMode, ask
 from ops_ai.auth import InvalidTokenError, verify_token
 from ops_ai.clock import Clock
+from ops_ai.compliance.api import create_compliance_router
 from ops_ai.fraud_watch import FraudAnalysis
 from ops_ai.fraud_watch.service import FraudCause, FraudIntent, investigate_fraud
 from ops_ai.investigation.service import CauseLabel, Intent, investigate
 from ops_ai.investigation.tools import FailureAggregate
 from ops_ai.memory.routes import build_memory_router
 from ops_ai.memory.session import SessionStore
-from ops_ai.scope import Principal, Scope, UserScope
+from ops_ai.scope import ForbiddenPrincipalError, OpsScope, Principal, Scope, UserScope, require_ops_role
 from ops_ai.search.embedder import Embedder, LocalHashEmbedder
 from ops_ai.settlement.service import explain_payout
 from ops_ai.settlement.statement import LineKind
@@ -326,8 +327,10 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
     - /ask also opens an escalation ticket when the assistant abstains or a human is asked for (B12.1).
     - GET /v1/tickets, GET /v1/tickets/{id}, POST /v1/tickets/{id}/transition (merchant token):
       see ops_ai.tickets.api.
-    Missing/invalid/expired token → 401 {"detail": "invalid token"}. A valid token of the other kind
-    (user token on the merchant routes, merchant token on the transfer route) → 403 {"detail": "forbidden"}.
+    - GET /v1/ops/compliance/erasures (ops token): see ops_ai.compliance.api.
+    Missing/invalid/expired token → 401 {"detail": "invalid token"}. A valid token of another kind (user or
+    ops token on the merchant routes, merchant or ops token on the transfer route, a non-ops token on the ops
+    routes) → 403 {"detail": "forbidden"}.
     """
     app = FastAPI(title="ops-ai")
     app.add_exception_handler(RequestValidationError, _validation_error_without_input)
@@ -357,6 +360,12 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
         try:
             return require_ops_principal(principal)
         except ForbiddenOpsError:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden") from None
+
+    def ops_scope(principal: Annotated[Principal, Depends(principal_from_token)]) -> OpsScope:
+        try:
+            return require_ops_role(principal)
+        except ForbiddenPrincipalError:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden") from None
 
     @app.get("/healthz")
@@ -507,6 +516,7 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
     app.include_router(
         create_analytics_router(deps.session_factory, deps.clock, merchant_scope, analytics_ops_access)
     )
+    app.include_router(create_compliance_router(deps.session_factory, ops_scope))
     return app
 
 

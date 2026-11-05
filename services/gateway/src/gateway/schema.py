@@ -2,6 +2,7 @@
 
 from gateway.accounts import models as accounts_models
 from gateway.audit import models as audit_models
+from gateway.compliance import models as compliance_models
 from gateway.db import GatewayBase, SimulatorBase
 from gateway.notifications import models as notifications_models
 from gateway.outbox import models as outbox_models
@@ -15,6 +16,7 @@ from gateway.wallets import models as wallets_models
 ALL_MODEL_MODULES = (
     accounts_models,
     audit_models,
+    compliance_models,
     notifications_models,
     outbox_models,
     payments_models,
