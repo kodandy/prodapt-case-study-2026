@@ -7,6 +7,11 @@ Snapshot: this document describes `main` at commit `b5f7271` (2026-11-04). Sourc
 (the planned design), `docs/submission-outline.md` (the scope anchor), `docs/specs/*.md` and the code under
 `services/` and `web/`. Where the code differs from the planned design, the code wins and the difference is stated.
 
+Later merges into `main` (wallets/FX/payouts, RBAC/audit role/KYC/GDPR, observability and resilience, gRPC, hybrid
+search, the R2 agents) changed several statements; they were corrected on 2026-11-05 (D3.5, D5.6, D6.5, D6.6,
+sections 8 and 9). Current status per requirement is in `docs/requirements-traceability.md`, NFR status and open gaps
+in `docs/production-readiness.md`; where this document and those disagree, those win.
+
 How claims are labeled:
 
 - **Tested** — implemented, and a named test file under the repository asserts it.
@@ -231,19 +236,22 @@ Compose services: `postgres`, `redis`, `gateway-api`, `relay`, the gateway notif
   [`test_transfers.py`](../services/gateway/src/gateway/wallets/__tests__/test_transfers.py)
   (`test_transfer_keeps_available_plus_held_equal_to_minus_the_postings_for_every_wallet`).
 
-### D3.5 Per-currency wallets; FX conversion is design only
+### D3.5 Per-currency wallets; FX legs through per-currency clearing accounts
 
-- **Decision:** A user has one wallet per currency. A transfer debits only the wallet of the requested currency and
-  credits the recipient's wallet in the same currency (created on first receipt). Cross-currency conversion is not
-  implemented.
-- **Why:** A balanced multi-currency FX test did not fit the time left (`docs/submission-outline.md` §7.2).
-  Per-currency wallets already satisfy "multi-currency" without inventing rates.
-- **What we gave up:** Cross-currency P2P and FX legs.
-- **Alternatives / design only:** An FX transfer posts four lines through per-currency clearing accounts —
-  sender wallet (−, ccy A) against FX clearing A (+), FX clearing B (−) against recipient wallet (+, ccy B) — so each
-  currency still nets to zero; the rate snapshot id is stored on the journal; the FX spread is a separate fee line.
-- **Evidence (Tested, per-currency only):** [`gw/wallets/__tests__/test_transfers.py`](../services/gateway/src/gateway/wallets/__tests__/test_transfers.py)
-  (`test_transfer_debits_only_the_wallet_of_the_requested_currency`).
+- **Decision:** A user has one wallet per currency. A same-currency transfer debits only the wallet of the requested
+  currency. A cross-currency transfer or card charge posts FX legs through per-currency `fx_clearing` accounts —
+  sender side (ccy A) against FX clearing A, FX clearing B against the receiving side (ccy B) — so each currency
+  nets to zero, with the `fx_rate_id` stored on the journal. A refund of an FX-settled charge reverses at the charge's
+  own rate.
+- **Why:** Per-currency zero sums keep the ledger invariant (D3.4) unchanged when currencies are mixed.
+- **What we gave up:** Rates are 12 static demo rates seeded by a migration (no live feed). Chargebacks of FX-settled
+  charges post in the payment currency without FX legs. No FX spread fee line.
+- **Alternatives:** One cross-currency journal balanced in a base currency (breaks the per-currency invariant).
+- **Evidence (Tested):** [`gw/wallets/__tests__/test_transfers.py`](../services/gateway/src/gateway/wallets/__tests__/test_transfers.py)
+  (`test_transfer_debits_only_the_wallet_of_the_requested_currency`),
+  [`test_fx_transfers.py`](../services/gateway/src/gateway/wallets/__tests__/test_fx_transfers.py),
+  [`gw/payments/fx/__tests__/test_fx_service.py`](../services/gateway/src/gateway/payments/fx/__tests__/test_fx_service.py),
+  [`test_ledger_sequences.py`](../services/gateway/src/gateway/payments/ledger/__tests__/test_ledger_sequences.py).
 
 ### D3.6 Card data: tokenize at the edge of the domain, never store the PAN
 
@@ -371,14 +379,19 @@ Where each lock is, and what proves it:
   `/explain-settlement` (SQ4), plus `/ask`. The tools (`aggregate_failures`, `compare_baseline`, `search_incidents`,
   `get_payment_status`, `analyze_fraud`, `explain_settlement`) are read-only SQL over the projection. The route builds
   an evidence list (`[ref] summary`) and only then asks `LlmPort` to narrate it. **There is no tool-calling loop:** the
-  LLM request carries no tool definitions.
+  narration request carries no tool definitions. Added after the snapshot: `POST /v1/assistant/query`
+  (`ai/assistant/tool_assistant.py`) asks a planner once to pick tools from a read-only registry
+  (`ai/tools/catalog.py`), validates arguments, runs at most 4 calls in the caller's scope and falls back to a
+  rule-based planner when the LLM is unavailable; it is still one planning call, not a loop.
 - **Why:** Counts, rates, the rule that fired and settlement arithmetic are exact facts; an LLM should not produce
-  them. With no tools exposed, prompt injection cannot make the model call anything. This is a deliberate narrowing of
+  them. The narration model has no tools, and the `/query` planner can only choose read-only, scoped tools whose
+  arguments are validated, so prompt injection cannot make the model move money or read another tenant. This is a deliberate narrowing of
   `architecture-detail.md` §5 (a hand-rolled tool loop, up to 6 calls), which was not needed while every route
   computes its evidence first.
 - **What we gave up:** Free-form questions outside the four routes get only the `/ask` path (keyword search +
-  aggregates). The answer-contract checker (claims with evidence refs, slot rendering) is not built; the model is
-  instructed to cite `[ref]`s, but its text is not machine-checked.
+  aggregates). The answer-contract checker exists for `/query` and `/failures` (B5.2): `ground_claims` drops claims whose
+  refs are not evidence of the turn and `grounded_narration` keeps narration only when every cited `[ref]` is; the
+  SQ1–SQ4 routes still only instruct the model to cite `[ref]`s.
 - **Alternatives:** An agent loop with function calling (more flexible, harder to bound and to test); templated text
   only (no LLM at all; what T2 already shows).
 - **Evidence (Tested):** [`ai/investigation/__tests__/test_investigation_tools.py`](../services/ops-ai/src/ops_ai/investigation/__tests__/test_investigation_tools.py),
@@ -423,8 +436,9 @@ Where each lock is, and what proves it:
   rules only; `analyze_fraud` reports the episode with its features. Ticket routing sends card testing to the `fraud`
   queue at high priority by a deterministic rule.
 - **Why:** The block must be synchronous; the explanation needs a window of history and can lag.
-- **What we gave up:** No threshold tuning from human verdicts; no measured false-positive rate on legitimate
-  micro-payment groups beyond the golden fixture.
+- **What we gave up:** Threshold tuning from human verdicts exists only as the R2-7 feedback loop (false positives
+  tighten a versioned per-merchant rule that the live watch applies; the SQ3 assistant still uses the baseline); the
+  measured false-positive rate is on a synthetic labelled set, not production traffic.
 - **Alternatives:** One detector in the gateway only (no explanation); LLM-based detection (non-deterministic, and on
   the wrong side of the LLM-outage boundary).
 - **Evidence (Tested):** [`ai/fraud_watch/__tests__/test_analyze_fraud.py`](../services/ops-ai/src/ops_ai/fraud_watch/__tests__/test_analyze_fraud.py),
@@ -451,25 +465,30 @@ Where each lock is, and what proves it:
   [`ai/assistant/__tests__/test_openai_llm_hardening.py`](../services/ops-ai/src/ops_ai/assistant/__tests__/test_openai_llm_hardening.py).
   Without a key the adapter is tested only against a local fake HTTP server; that is not a test of the real API.
 
-### D5.6 Search is hybrid: Postgres full-text + pgvector, fused by RRF
+### D5.6 Hybrid search: Postgres full-text plus pgvector, fused by RRF
 
-- **Decision:** Keyword search uses a persisted `tsvector` column and `websearch_to_tsquery('english', …)`; the
-  vector leg uses one pgvector column + HNSW index per pinned embedder; `hybrid_search` fuses both by Reciprocal Rank
-  Fusion (k = 60) and degrades to the keyword leg when the embedder is unavailable. Both legs are restricted to the
-  caller's merchant. Incidents are indexed into `search_documents` (`kind = 'incident'`, by `python -m ops_ai.seed`
-  and the eval suite); platform-wide incidents are owned by the nil-UUID sentinel and are visible only through the
-  opt-in `include_platform` incident filter. SQ1's `search_incidents` uses `hybrid_search` when the app has an
-  embedder, re-checks every hit against `ops_ai.incidents` visibility (merchant's or platform-wide), appends
-  full-text hits not yet indexed, and ranks resolved incidents first. Without an embedder it is the full-text search
-  over `ops_ai.incidents`.
-- **Why:** It runs inside the existing Postgres with no new service; a stale search document can never widen
-  visibility because the incidents table is the authority.
-- **What we gave up:** The default `LocalHashEmbedder` is feature hashing (spelling-level, not semantic); real
-  paraphrase recall needs the OpenAI column filled by `python -m ops_ai.search backfill`. The failure assistant
-  (`ai/investigation/failures.py`) and the LLM tool catalog still call `search_incidents` without an embedder
-  (full-text). Hit→incident mapping scans the scope's visible incidents in Python.
-- **Alternatives:** Japanese text via a pg_bigm keyword backend behind the same interface.
-- **Evidence (Tested):** [`ai/search/__tests__/test_hybrid_search.py`](../services/ops-ai/src/ops_ai/search/__tests__/test_hybrid_search.py),
+- **Decision:** Keyword search uses a persisted `tsvector` column and `websearch_to_tsquery('english', …)`; the vector
+  leg is pgvector similarity with one column and HNSW index per embedder id; `hybrid_search` fuses both by Reciprocal
+  Rank Fusion (k = 60). Both legs are restricted to the caller's merchant. `/v1/assistant/ask` retrieves through
+  `hybrid_search`; `POST /v1/incidents/search` reranks hybrid incident hits (R2-4). Incidents are indexed into
+  `search_documents` (`kind = 'incident'`, `ai/search/indexing.py`, run by `python -m ops_ai.seed` and the eval
+  suite); platform-wide incidents are owned by the nil-UUID sentinel and are visible only through the opt-in
+  `include_platform` filter, which admits incident rows only. The SQ1 tool `search_incidents` uses `hybrid_search`
+  when the app has an embedder (`POST /v1/assistant/investigate` passes `deps.embedder`): every hit is re-checked
+  against `ops_ai.incidents` visibility (the merchant's or platform-wide), full-text hits not yet indexed are
+  appended, resolved incidents rank first. Without an embedder it is the full-text search over `ops_ai.incidents`.
+- **Why:** It runs inside the existing Postgres; per-embedder columns mean changing the model never mixes vector
+  spaces; the incidents table stays the authority, so a stale search document never widens visibility.
+- **What we gave up:** The default local embedder is feature hashing (spelling-level, not semantic); the OpenAI
+  column is filled by a backfill only. `POST /v1/assistant/failures` and the LLM tool catalog still call
+  `search_incidents` without an embedder (full-text). Hit-to-incident mapping scans the scope's visible incidents in
+  Python. Incidents are indexed at seed / eval time, not on write. `/v1/assistant/ask` (no kind filter) now also
+  returns the merchant's own incident documents, cited as `incident:<uuid>` refs (platform-wide incidents are not
+  included there). Japanese text (pg_bigm) is design only.
+- **Alternatives:** A separate vector database (a second store to keep consistent and scoped).
+- **Evidence (Tested):** [`ai/search/__tests__/test_search_service.py`](../services/ops-ai/src/ops_ai/search/__tests__/test_search_service.py),
+  [`test_hybrid_search.py`](../services/ops-ai/src/ops_ai/search/__tests__/test_hybrid_search.py),
+  [`ai/assistant/__tests__/test_assistant_hybrid.py`](../services/ops-ai/src/ops_ai/assistant/__tests__/test_assistant_hybrid.py),
   [`ai/search/__tests__/test_incident_indexing.py`](../services/ops-ai/src/ops_ai/search/__tests__/test_incident_indexing.py),
   [`ai/investigation/__tests__/test_search_incidents_hybrid.py`](../services/ops-ai/src/ops_ai/investigation/__tests__/test_search_incidents_hybrid.py),
   [`ai/investigation/__tests__/test_investigate_hybrid_golden.py`](../services/ops-ai/src/ops_ai/investigation/__tests__/test_investigate_hybrid_golden.py),
@@ -556,9 +575,10 @@ Where each lock is, and what proves it:
   routes resolve the merchant from the API key and return 404 for another merchant's payment or dispute (no existence
   oracle). The projection refuses an event that would move a payment to a different merchant.
 - **Why:** Cross-tenant leakage is the worst failure an ops assistant can have.
-- **What we gave up:** No Postgres row-level security; enforcement is in application code and tests. No `role ×
-  action` policy table: roles exist as token claims (`merchant_admin`, `consumer`) and routes check principal type and
-  scope, but the RBAC matrix of P0-9 is not built and there is no ops principal.
+- **What we gave up:** No Postgres row-level security; enforcement is in application code and tests. A `role × action`
+  policy table with default deny (`gw/accounts/rbac.py`) and a generated route × role matrix test cover the gateway,
+  and ops principals (`ops_agent`, `ops_lead`) exist; P0-9 stays Partial (later routes reuse existing action names,
+  the interim `X-Ops-Admin-Token` is still accepted for ops dispute resolution, ops roles read every merchant).
 - **Alternatives:** Postgres RLS with `SET LOCAL` per transaction and a non-owner role (stronger; design only).
 - **Evidence (Tested):** [`tests/e2e/test_runtime_contract.py`](../tests/e2e/test_runtime_contract.py),
   [`ai/assistant/__tests__/test_assistant_service.py`](../services/ops-ai/src/ops_ai/assistant/__tests__/test_assistant_service.py)
@@ -576,9 +596,10 @@ Where each lock is, and what proves it:
   written in the same transaction as the operation (charge, refund, transfer, dispute changes, TOTP changes, failed
   user-token passwords). A `BEFORE UPDATE OR DELETE` trigger raises `insufficient_privilege`.
 - **Why:** If the audit write fails, the operation rolls back, so there is no unaudited money movement.
-- **What we gave up:** The application connects as the schema owner, so the trigger stops accidental edits, not a
-  determined owner (who can drop it). There is no separate app role with revoked grants and no hash chain. We claim
-  "the application does not update or delete audit rows", not tamper detection.
+- **What we gave up:** The gateway API and gRPC server `SET ROLE gateway_app`, which has no UPDATE, DELETE or
+  TRUNCATE on `audit_log`, but the compose demo logs in as a superuser, so code with SQL access can `RESET ROLE`; the
+  relay and notifier do not use the role. There is no hash chain. We claim "the application does not update or
+  delete audit rows", not tamper detection.
 - **Alternatives:** A per-row hash chain with a verifier; an external WORM checkpoint (P2-8).
 - **Evidence:** Same-transaction audit rows are **Tested** in
   [`test_charge.py`](../services/gateway/src/gateway/payments/__tests__/test_charge.py)
@@ -587,9 +608,10 @@ Where each lock is, and what proves it:
   [`test_disputes.py`](../services/gateway/src/gateway/payments/__tests__/test_disputes.py),
   [`test_transfers.py`](../services/gateway/src/gateway/wallets/__tests__/test_transfers.py)
   (`test_a_created_transfer_writes_one_audit_row_without_any_email`),
-  [`test_mfa.py`](../services/gateway/src/gateway/accounts/__tests__/test_mfa.py). The trigger exists in the
-  initial migration (`services/gateway/migrations/versions/20261103_1feee27d0cd2_initial_gateway_schema.py`) but **no
-  test asserts that an UPDATE or DELETE is rejected**.
+  [`test_mfa.py`](../services/gateway/src/gateway/accounts/__tests__/test_mfa.py). The trigger and the
+  `gateway_app` grants are **Tested** in
+  [`test_audit_append_only.py`](../services/gateway/src/gateway/audit/__tests__/test_audit_append_only.py)
+  (UPDATE/DELETE/TRUNCATE rejected as `gateway_app`, rollback when the audit insert fails).
 
 ---
 
@@ -622,25 +644,25 @@ Where each lock is, and what proves it:
 
 ## 8. P0 evidence map
 
-Status vocabulary as at the top of this document. Every file named here exists at the snapshot commit.
+Status vocabulary as at the top of this document; statuses match `docs/requirements-traceability.md` (P0 section) on `main` as of 2026-11-05.
 
 | P0 | Item | Status | What is proved | Test files |
 |---|---|---|---|---|
-| P0-1 | Idempotency: DB unique + Redis | **Tested** | 20 concurrent same-key charges → 1 provider charge, with and without Redis; key reuse → 422; in flight → 409; unknown → stored 202 replay | [`gw/payments/__tests__/test_charge.py`](../services/gateway/src/gateway/payments/__tests__/test_charge.py), [`gw/wallets/__tests__/test_transfers.py`](../services/gateway/src/gateway/wallets/__tests__/test_transfers.py), [`gw/payments/__tests__/test_refunds.py`](../services/gateway/src/gateway/payments/__tests__/test_refunds.py) |
-| P0-2 | Balanced ledger | **Partial** | Hypothesis: any balanced multi-currency journal is accepted, any residual rejected; each operation's journal balances. Not built: property test over random *sequences* of operations; DB-level invariant | [`gw/payments/ledger/__tests__/test_ledger_service.py`](../services/gateway/src/gateway/payments/ledger/__tests__/test_ledger_service.py), [`test_refunds.py`](../services/gateway/src/gateway/payments/__tests__/test_refunds.py), [`test_disputes.py`](../services/gateway/src/gateway/payments/__tests__/test_disputes.py), [`test_transfers.py`](../services/gateway/src/gateway/wallets/__tests__/test_transfers.py) |
+| P0-1 | Idempotency: DB unique + Redis | **Partial** | 20 concurrent same-key charges → 1 provider charge, with and without Redis; key reuse → 422; in flight → 409; unknown → stored 202 replay. Not run: Redis flushed or lock expired mid-flight | [`gw/payments/__tests__/test_charge.py`](../services/gateway/src/gateway/payments/__tests__/test_charge.py), [`gw/wallets/__tests__/test_transfers.py`](../services/gateway/src/gateway/wallets/__tests__/test_transfers.py), [`gw/payments/__tests__/test_refunds.py`](../services/gateway/src/gateway/payments/__tests__/test_refunds.py) |
+| P0-2 | Balanced ledger | **Partial** | Hypothesis: any balanced multi-currency journal is accepted, any residual rejected; random sequences of top-ups, transfers (incl. FX), card charges, partial refunds and payout holds keep every journal balanced and wallet balances equal to postings. Not built: chargebacks in the generated sequences; DB-level invariant | [`gw/payments/ledger/__tests__/test_ledger_service.py`](../services/gateway/src/gateway/payments/ledger/__tests__/test_ledger_service.py), [`test_refunds.py`](../services/gateway/src/gateway/payments/__tests__/test_refunds.py), [`test_disputes.py`](../services/gateway/src/gateway/payments/__tests__/test_disputes.py), [`test_transfers.py`](../services/gateway/src/gateway/wallets/__tests__/test_transfers.py), [`test_ledger_sequences.py`](../services/gateway/src/gateway/payments/ledger/__tests__/test_ledger_sequences.py) |
 | P0-3 | Balance locking | **Tested** | Parallel debits never overdraw; opposite-direction transfers do not deadlock; concurrent refunds never exceed the amount; rationale in section 4 | [`test_transfers.py`](../services/gateway/src/gateway/wallets/__tests__/test_transfers.py), [`test_refunds.py`](../services/gateway/src/gateway/payments/__tests__/test_refunds.py), [`test_disputes.py`](../services/gateway/src/gateway/payments/__tests__/test_disputes.py), [`test_risk_in_flight.py`](../services/gateway/src/gateway/payments/__tests__/test_risk_in_flight.py) |
 | P0-4 | Crash safety | **Partial** | See crash matrix below. C2, C3, C4 tested with injected faults; C1, C5 need the reconciler (not built); no real process kill | [`test_charge.py`](../services/gateway/src/gateway/payments/__tests__/test_charge.py), [`gw/outbox/__tests__/test_relay.py`](../services/gateway/src/gateway/outbox/__tests__/test_relay.py), [`ai/ingest/__tests__/test_consumer.py`](../services/ops-ai/src/ops_ai/ingest/__tests__/test_consumer.py), [`ai/ingest/__tests__/test_worker.py`](../services/ops-ai/src/ops_ai/ingest/__tests__/test_worker.py) |
-| P0-5 | LLM outage isolation | **Tested** | LLM down: charges still succeed; risk scoring has no LLM; assistant returns T2 with the same evidence | [`tests/e2e/test_thin_slice.py`](../tests/e2e/test_thin_slice.py), [`ai/assistant/__tests__/test_assistant_service.py`](../services/ops-ai/src/ops_ai/assistant/__tests__/test_assistant_service.py), [`ai/__tests__/test_main_openai.py`](../services/ops-ai/src/ops_ai/__tests__/test_main_openai.py), [`ai/__tests__/test_llm_redteam_routes.py`](../services/ops-ai/src/ops_ai/__tests__/test_llm_redteam_routes.py), [`gw/payments/__tests__/test_risk.py`](../services/gateway/src/gateway/payments/__tests__/test_risk.py) |
+| P0-5 | LLM outage isolation | **Partial** | LLM down: charges still succeed; risk scoring has no LLM; assistant returns T2 with the same evidence. Not built: one test running charges, risk flags and the card-testing alert with `LlmPort` raising | [`tests/e2e/test_thin_slice.py`](../tests/e2e/test_thin_slice.py), [`ai/assistant/__tests__/test_assistant_service.py`](../services/ops-ai/src/ops_ai/assistant/__tests__/test_assistant_service.py), [`ai/__tests__/test_main_openai.py`](../services/ops-ai/src/ops_ai/__tests__/test_main_openai.py), [`ai/__tests__/test_llm_redteam_routes.py`](../services/ops-ai/src/ops_ai/__tests__/test_llm_redteam_routes.py), [`gw/payments/__tests__/test_risk.py`](../services/gateway/src/gateway/payments/__tests__/test_risk.py) |
 | P0-6 | PII / card masking before LLM | **Partial** | Card numbers (incl. split layouts) masked in every LLM payload; evidence carries BIN/last4 only. Not built: email/phone/name redaction, per-field allowlist DTO | [`test_openai_llm_hardening.py`](../services/ops-ai/src/ops_ai/assistant/__tests__/test_openai_llm_hardening.py), [`test_openai_llm_redteam.py`](../services/ops-ai/src/ops_ai/assistant/__tests__/test_openai_llm_redteam.py), [`test_openai_llm_redteam_order.py`](../services/ops-ai/src/ops_ai/assistant/__tests__/test_openai_llm_redteam_order.py) |
-| P0-7 | Read-only tools, human approval for money | **Tested (stronger form)** | The LLM gets no tools at all (request body has no `tools` key); no ops-ai route moves money; refunds exist only on the gateway API with an Idempotency-Key, and the web client needs an explicit confirmation | [`test_openai_llm.py`](../services/ops-ai/src/ops_ai/assistant/__tests__/test_openai_llm.py), [`test_refunds.py`](../services/gateway/src/gateway/payments/__tests__/test_refunds.py), [`web/src/components/__tests__/ConfirmButton.test.tsx`](../web/src/components/__tests__/ConfirmButton.test.tsx), [`web/src/features/merchant/__tests__/PaymentDetail.test.tsx`](../web/src/features/merchant/__tests__/PaymentDetail.test.tsx) |
+| P0-7 | Read-only tools, human approval for money | **Partial** | The narration LLM gets no tools (request body has no `tools` key); `POST /v1/assistant/query` offers the planner only the read-only `merchant_tools()` / `user_tools()` registry (schema-validated, scoped, at most 4 calls); no ops-ai route moves money; refunds exist only on the gateway API with an Idempotency-Key, and the web client needs an explicit confirmation. Not built: `suggestion_id` flow | [`test_openai_llm.py`](../services/ops-ai/src/ops_ai/assistant/__tests__/test_openai_llm.py), [`test_refunds.py`](../services/gateway/src/gateway/payments/__tests__/test_refunds.py), [`web/src/components/__tests__/ConfirmButton.test.tsx`](../web/src/components/__tests__/ConfirmButton.test.tsx), [`web/src/features/merchant/__tests__/PaymentDetail.test.tsx`](../web/src/features/merchant/__tests__/PaymentDetail.test.tsx) |
 | P0-8 | Prompt-injection defense | **Partial** | Structural: no tools, scope from token, evidence fenced as data in fixed instructions, input length caps, pathological-input time bounds. Not built: injection fixtures in incidents/memory, answer-contract checker | [`test_openai_llm.py`](../services/ops-ai/src/ops_ai/assistant/__tests__/test_openai_llm.py), [`test_openai_llm_redteam.py`](../services/ops-ai/src/ops_ai/assistant/__tests__/test_openai_llm_redteam.py), [`tests/e2e/test_runtime_contract.py`](../tests/e2e/test_runtime_contract.py) |
-| P0-9 | RBAC | **Partial** | Consumer ownership and merchant tenancy tested; tokens carry roles. Not built: `role × action` policy table and generated matrix test; ops roles | [`tests/e2e/test_runtime_contract.py`](../tests/e2e/test_runtime_contract.py), [`gw/accounts/__tests__/test_tokens.py`](../services/gateway/src/gateway/accounts/__tests__/test_tokens.py), [`gw/accounts/__tests__/test_b1_routes.py`](../services/gateway/src/gateway/accounts/__tests__/test_b1_routes.py), [`test_refunds.py`](../services/gateway/src/gateway/payments/__tests__/test_refunds.py), [`test_disputes.py`](../services/gateway/src/gateway/payments/__tests__/test_disputes.py) |
-| P0-10 | Append-only audit | **Partial** | Audit row in the same tx as charge, refund, transfer, dispute and MFA changes. Trigger exists in the migration, no test of rejection; no separate DB role | [`test_charge.py`](../services/gateway/src/gateway/payments/__tests__/test_charge.py), [`test_transfers.py`](../services/gateway/src/gateway/wallets/__tests__/test_transfers.py), [`test_mfa.py`](../services/gateway/src/gateway/accounts/__tests__/test_mfa.py), [`test_disputes.py`](../services/gateway/src/gateway/payments/__tests__/test_disputes.py) |
-| P0-11 | No secrets / PII in logs | **Partial** | Canary OpenAI key absent from responses and log records; SQL parameters hidden; secret generator prints no secret; workers log class names only. Not built: canary run over captured logs of a full E2E flow | [`ai/__tests__/test_main_openai.py`](../services/ops-ai/src/ops_ai/__tests__/test_main_openai.py), [`gw/__tests__/test_db.py`](../services/gateway/src/gateway/__tests__/test_db.py), [`scripts/__tests__/test_demo_secrets.py`](../scripts/__tests__/test_demo_secrets.py), [`ai/ingest/__tests__/test_consumer_dead_letter.py`](../services/ops-ai/src/ops_ai/ingest/__tests__/test_consumer_dead_letter.py), [`ai/ingest/__tests__/test_worker.py`](../services/ops-ai/src/ops_ai/ingest/__tests__/test_worker.py) |
-| P0-12 | Correlation id + OTel traces | **Design only** | Audit rows carry a correlation id; no request-wide id, no OpenTelemetry | — |
-| P0-13 | Metrics | **Design only** | No `/metrics` endpoint. `/healthz` and `/readyz` exist and are tested ([`gw/__tests__/test_health.py`](../services/gateway/src/gateway/__tests__/test_health.py), [`ai/__tests__/test_health.py`](../services/ops-ai/src/ops_ai/__tests__/test_health.py)) | — |
-| P0-14 | Alert rules | **Design only** | No `ops/alerts.yml` | — |
-| P0-15 | CI with eval gate | **Partial** | `.github/workflows/ci.yml` runs `make ci`: ruff, ruff format, mypy, Alembic upgrade + downgrade per service, pytest, web `npm run ci`. The deterministic golden tests for SQ1–SQ4 run inside pytest and fail CI on a wrong count or cause. Not built: DeepEval metrics, LLM-judge metrics | `.github/workflows/ci.yml`, `Makefile`, [`test_investigate_golden.py`](../services/ops-ai/src/ops_ai/investigation/__tests__/test_investigate_golden.py), [`test_investigate_transfer_golden.py`](../services/ops-ai/src/ops_ai/transfers/__tests__/test_investigate_transfer_golden.py), [`test_fraud_golden.py`](../services/ops-ai/src/ops_ai/fraud_watch/__tests__/test_fraud_golden.py), [`test_settlement_golden.py`](../services/ops-ai/src/ops_ai/settlement/__tests__/test_settlement_golden.py) |
+| P0-9 | RBAC | **Partial** | `role × action` policy table with default deny, five roles, ops principals (`ops_agent`, `ops_lead`), generated route × role matrix test; consumer ownership and merchant tenancy tested. Open: later routes reuse existing action names; interim `X-Ops-Admin-Token` still accepted for ops dispute resolution | [`tests/e2e/test_runtime_contract.py`](../tests/e2e/test_runtime_contract.py), [`gw/accounts/__tests__/test_tokens.py`](../services/gateway/src/gateway/accounts/__tests__/test_tokens.py), [`gw/accounts/__tests__/test_b1_routes.py`](../services/gateway/src/gateway/accounts/__tests__/test_b1_routes.py), [`test_refunds.py`](../services/gateway/src/gateway/payments/__tests__/test_refunds.py), [`test_disputes.py`](../services/gateway/src/gateway/payments/__tests__/test_disputes.py), [`gw/__tests__/test_rbac_matrix.py`](../services/gateway/src/gateway/__tests__/test_rbac_matrix.py) |
+| P0-10 | Append-only audit | **Partial** | Audit row in the same tx as charge, refund, transfer, dispute, MFA and KYC/GDPR changes; trigger and `gateway_app` grants reject UPDATE/DELETE/TRUNCATE; rollback when the audit insert fails. Open: demo logs in as superuser and only `SET ROLE`s; no hash chain | [`test_charge.py`](../services/gateway/src/gateway/payments/__tests__/test_charge.py), [`test_transfers.py`](../services/gateway/src/gateway/wallets/__tests__/test_transfers.py), [`test_mfa.py`](../services/gateway/src/gateway/accounts/__tests__/test_mfa.py), [`test_disputes.py`](../services/gateway/src/gateway/payments/__tests__/test_disputes.py), [`test_audit_append_only.py`](../services/gateway/src/gateway/audit/__tests__/test_audit_append_only.py) |
+| P0-11 | No secrets / PII in logs | **Partial** | Canary values through signup/login/payment → relay → consumer → assistant never appear in in-process Python logs; SQL parameters hidden; secret generator prints no secret. Not built: captured container logs of every service | [`ai/__tests__/test_main_openai.py`](../services/ops-ai/src/ops_ai/__tests__/test_main_openai.py), [`gw/__tests__/test_db.py`](../services/gateway/src/gateway/__tests__/test_db.py), [`scripts/__tests__/test_demo_secrets.py`](../scripts/__tests__/test_demo_secrets.py), [`ai/ingest/__tests__/test_consumer_dead_letter.py`](../services/ops-ai/src/ops_ai/ingest/__tests__/test_consumer_dead_letter.py), [`ai/ingest/__tests__/test_worker.py`](../services/ops-ai/src/ops_ai/ingest/__tests__/test_worker.py), [`tests/test_log_canary.py`](../tests/test_log_canary.py) |
+| P0-12 | Correlation id + OTel traces | **Partial** | One W3C trace id from the API span through the outbox header and stream to the consumer span; the LLM span joins it. Not built: tool spans, production exporter | [`tests/e2e/test_trace_propagation.py`](../tests/e2e/test_trace_propagation.py) |
+| P0-13 | Metrics | **Partial** | `/metrics` on both APIs: HTTP rate/errors/latency, payment events, provider calls, circuit state, fraud flags, consumer lag, LLM latency/fallback and estimated tokens. Not built: LLM cost and eval score metrics | [`gw/observability/__tests__/test_metrics_http.py`](../services/gateway/src/gateway/observability/__tests__/test_metrics_http.py), [`ai/observability/__tests__/test_llm_instrumentation.py`](../services/ops-ai/src/ops_ai/observability/__tests__/test_llm_instrumentation.py) |
+| P0-14 | Alert rules | **Partial** | `ops/prometheus/alerts.yml` (card failure spike, provider errors/circuit, outbox/consumer lag, LLM fallback, limiter fail-open, scrape down) with promtool fixtures via `make alerts-test` (outside `make ci`). Not built: reconciler-unknown rule, external paging | `ops/prometheus/alerts.test.yml` |
+| P0-15 | CI with eval gate | **Partial** | `.github/workflows/ci.yml` runs `make ci`: ruff, ruff format, mypy, Alembic upgrade + downgrade per service, pytest, `make eval` (SQ1–SQ4 goldens, in-repo custom metrics, cross-tenant leakage gate), web `npm run ci`. Not built: LLM-judged metrics run with a key in CI | `.github/workflows/ci.yml`, `Makefile`, [`test_investigate_golden.py`](../services/ops-ai/src/ops_ai/investigation/__tests__/test_investigate_golden.py), [`test_investigate_transfer_golden.py`](../services/ops-ai/src/ops_ai/transfers/__tests__/test_investigate_transfer_golden.py), [`test_fraud_golden.py`](../services/ops-ai/src/ops_ai/fraud_watch/__tests__/test_fraud_golden.py), [`test_settlement_golden.py`](../services/ops-ai/src/ops_ai/settlement/__tests__/test_settlement_golden.py), [`test_eval_suite.py`](../services/ops-ai/src/ops_ai/evaluation/__tests__/test_eval_suite.py) |
 
 ### Crash matrix (P0-4)
 
@@ -658,22 +680,23 @@ No test kills a real process; all faults are injected in-process.
 
 ## 9. What was cut, and how it would be built
 
-Each cut was made to keep a Basic item or a P0 proof. Order of the list: closest to the money first.
+Each cut was made to keep a Basic item or a P0 proof. Order of the list: closest to the money first. The "Status on main" note records cuts that later merges built (2026-11-05); the traceability matrix has the detail.
 
 | Cut | Why it was cut | How it would be built |
 |---|---|---|
 | Reconciler and lease reclaim | Needs a provider lookup API and a scheduler; the 202-unknown replay (D3.3) already stops double charges from client retries | D3.3 "Design only" paragraph; a periodic worker with `FOR UPDATE SKIP LOCKED` over expired leases |
-| External-rail holds (`bank_transfer`, `upi`) | No external rail in scope; `held_minor` exists on wallet balance rows and is respected by transfers, but nothing places a hold | hold in tx1 (`available −= x`, `held += x`); capture / release in tx2 with `WHERE state = 'held'` so duplicates are no-ops; `unknown` stays held |
-| FX conversion | Time (D3.5) | D3.5 four-line journal through per-currency clearing accounts |
+| External-rail holds (`bank_transfer`, `upi`) | No external rail in scope; `held_minor` exists on wallet balance rows and is respected by transfers, but nothing places a hold | hold in tx1 (`available −= x`, `held += x`); capture / release in tx2 with `WHERE state = 'held'` so duplicates are no-ops; `unknown` stays held Status on main: **Built:** `bank_transfer` / `upi` payouts hold in tx1 and capture / release in tx2 against a simulated rail (B2.5); no payout reconciler. |
+| FX conversion | Time (D3.5) | D3.5 four-line journal through per-currency clearing accounts Status on main: **Built:** FX legs through per-currency clearing accounts (D3.5, B2.3); chargebacks are not FX-aware. |
 | DB-level ledger invariant | Application check is tested; a trigger needed careful testing | deferred constraint trigger summing postings per `(journal_id, currency)` at commit |
-| Separate DB roles, audit rejection test | One owner role in compose | app role without `UPDATE`/`DELETE` on `audit_log`, migrations by an owner role; a test as the app role |
-| RBAC policy table, ops principal | No ops user flow in the demo | `role × action` table; route dependency checks it; matrix test generated from the table |
-| gRPC merchant API | REST covers the demo; gRPC adds codegen and a second transport | `CreatePayment` / `GetPayment` / `ListPayments` calling the same domain functions and the same validation module; `idempotency-key` metadata |
-| Session memory (Redis) and long-term merchant memory | Not landed at this snapshot | Redis hash keyed `(merchant_id, user_id, session_id)` with TTL and ownership check; long-term memory only via a confirmed write with the source turn id |
-| Answer-contract checker | Tools-first routes made it less urgent | claims with `evidence_refs`, slots rendered from tool output, reject digits outside slots, regenerate once then T2 |
-| Rate limits, circuit breaker | P1, after correctness | Redis token bucket per API key and per user, 429 + `Retry-After`, fail-open with a metric; breaker per route that never reroutes an `unknown` attempt |
-| OTel, metrics, alert rules, Grafana | P0-12–14 lost to Basic items | OTel SDK with FastAPI/SQLAlchemy/Redis/httpx instrumentation, trace context in outbox headers; Prometheus `/metrics`; `promtool test rules` in CI |
-| Load test | P1-5 not run | k6 on `POST /v1/payments` at a stated load, p50/p95/p99 with the error rate |
+| Separate DB roles, audit rejection test | One owner role in compose | app role without `UPDATE`/`DELETE` on `audit_log`, migrations by an owner role; a test as the app role Status on main: **Built (partial):** `gateway_app` via `SET ROLE` and append-only tests (D6.6, P0-10); the demo still logs in as superuser. |
+| RBAC policy table, ops principal | No ops user flow in the demo | `role × action` table; route dependency checks it; matrix test generated from the table Status on main: **Built (partial):** policy table, matrix test, ops principals (D6.5, P0-9). |
+| gRPC merchant API | REST covers the demo; gRPC adds codegen and a second transport | `CreatePayment` / `GetPayment` / `ListPayments` calling the same domain functions and the same validation module; `idempotency-key` metadata Status on main: **Built:** merchant gRPC with TLS (plaintext only with `GATEWAY_GRPC_INSECURE=true`, used by the loopback demo) (B8.2). |
+| pgvector + RRF hybrid search | The B6 session did not land | D5.6 Status on main: **Built:** D5.6, B6; the SQ1 `search_incidents` tool is on hybrid search over indexed incidents (B5.1); the failure assistant and tool catalog still call it full-text. |
+| Session memory (Redis) and long-term merchant memory | Not landed at this snapshot | Redis hash keyed `(merchant_id, user_id, session_id)` with TTL and ownership check; long-term memory only via a confirmed write with the source turn id Status on main: **Built:** `ai/memory/` (B10.1–B10.3). |
+| Answer-contract checker | Tools-first routes made it less urgent | claims with `evidence_refs`, slots rendered from tool output, reject digits outside slots, regenerate once then T2 Status on main: **Built for `/query` and `/failures`:** `ai/assistant/grounding.py` (B5.2, D5.1). |
+| Rate limits, circuit breaker | P1, after correctness | Redis token bucket per API key and per user, 429 + `Retry-After`, fail-open with a metric; breaker per route that never reroutes an `unknown` attempt Status on main: **Built:** Redis token buckets and a per-route breaker ([production-readiness](production-readiness.md#resilience)); the breaker counts non-decline provider rejections as failures. |
+| OTel, metrics, alert rules, Grafana | P0-12–14 lost to Basic items | OTel SDK with FastAPI/SQLAlchemy/Redis/httpx instrumentation, trace context in outbox headers; Prometheus `/metrics`; `promtool test rules` in CI Status on main: **Built (partial):** P0-12–P0-14; no production exporter, `make alerts-test` is outside `make ci`. |
+| Load test | P1-5 not run | k6 on `POST /v1/payments` at a stated load, p50/p95/p99 with the error rate Status on main: **Run:** k6 at 2 and 40 req/s on a laptop; the p99 < 2 s target was not met ([docs/perf](perf/README.md)). |
 | Key revocation | JWTs are short-lived (≤ 900 s) | `jti` denylist in Redis checked by ops-ai; API-key revocation flag checked on lookup |
 
 ---
@@ -694,7 +717,7 @@ Nothing in this section is implemented or measured. Numbers are design targets o
 | Secrets in env / files | Secret Manager + Cloud KMS | |
 | Vault table | Separate project + VPC, Cloud HSM keys (P2-3) | |
 | nginx `web` | Cloud Storage + Cloud CDN for the bundle, external HTTPS LB + Cloud Armor in front of the APIs | Cloudflare (Pages + Workers routes + WAF) is a written alternative edge. It adds a vendor in series, so it does not help 99.999 %, and if it terminates TLS it **processes** card data and PII in transit, which puts it in PCI scope even though it stores nothing |
-| (not built) OTel / Prometheus | Cloud Trace, Managed Service for Prometheus | instrumentation code would not change |
+| OTel SDK, Prometheus `/metrics`, Grafana (local) | Cloud Trace, Managed Service for Prometheus | instrumentation code would not change; no production exporter is configured yet |
 
 ### P2-1 Multi-region active-active
 

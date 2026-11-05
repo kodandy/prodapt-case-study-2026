@@ -40,7 +40,8 @@ make ci          # the same command the GitHub Actions workflow runs (.github/wo
 history upgrade → downgrade one step → upgrade → `alembic check`), `test` (pytest), `eval` (golden SQ1–SQ4 E2E cases,
 custom metrics, cross-tenant leakage gate and judge goldens; LLM-judged metrics are reported as skipped without a key)
 and `web-ci` (`npm ci`, then typecheck, lint, unit tests and build in the pinned node image). No `.env` and no
-`OPENAI_API_KEY` are needed.
+`OPENAI_API_KEY` are needed, here or for `make up`, `make demo`, the sample queries and the e2e tests: compose has
+defaults for every setting and the demo secrets are generated into the `demo-secrets` volume.
 
 Last full run (2026-11-05, on a laptop running several other compose stacks): every step passed except one
 timing-sensitive test, `test_complete_gives_the_fallback_only_the_remaining_budget` in
@@ -333,6 +334,9 @@ Writes `transactions.csv`, `transactions.json` and `incidents.json` (git-ignored
 
 Settings come from environment variables. Copy `.env.example` to `.env` and fill in the values.
 
+A `.env` is optional: `make up`, `make demo`, the sample queries and the e2e tests run without one (compose defaults
+plus the generated `demo-secrets` volume). Use it only to override the values below.
+
 | Variable | Purpose |
 |---|---|
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_PORT` | Local Postgres (ports bind to 127.0.0.1 only) |
@@ -359,19 +363,24 @@ Secrets are never logged. SQL errors hide bound parameters, and settings validat
 
 ### Known gaps
 
-These were found by the Day 1 audit and are planned:
+The platform-level open gaps (reconciler, k6 p99, gRPC TLS in the demo, `/metrics` exposure, the interim ops admin
+token, provider breaker accounting, FX chargebacks, R2 partials, a load-sensitive test) are collected in
+[docs/production-readiness.md](docs/production-readiness.md#known-gaps). The list below started from the Day 1 audit
+and is kept current per item:
 
 - A reconciler that resolves `unknown` payments with `provider.lookup` and reclaims expired attempt leases. Until then, a
   crash between the provider call and finalization leaves that key answering 409.
-- Separate migration and app database roles. Today `audit_log` append-only is enforced by a trigger, not by grants, and
-  TRUNCATE is not blocked.
+- Database roles: the gateway API and gRPC server run as `gateway_app` through `SET ROLE` (`GATEWAY_DB_ROLE`), which
+  has no UPDATE, DELETE or TRUNCATE on `audit_log` (P0-10). The compose demo still logs in as the Postgres superuser,
+  so code with SQL access can `RESET ROLE`; the relay, notifier and ops-ai do not use a restricted role.
 - DB-level ledger invariants (unique journal per reference, balanced postings per currency).
 - API key revocation, `maxlen` on the stream, and structured logging. (Rate limiting exists: token buckets per API
   key and per user, see P1-4 in the traceability matrix.)
 - The consumer dead-letters a malformed entry (see "Stream" below) but has no retry with backoff for other failures.
 - Merchant tokens cannot be revoked before they expire (15 minutes), and there is no key rotation (`kid`) yet.
 - `demo-secrets` recreates only missing files. If only the private key is deleted, the old public key stays and tokens
-  stop verifying; delete the volume (`make demo-down` then `docker volume rm payplat_demo-secrets`) to start over.
+  stop verifying; drop the volumes (`make demo-down && docker compose --profile demo down -v`, which also drops the
+  demo database) to start over.
 - The ops-ai engine does not set `hide_parameters` yet.
 - Redis has no ACL and every process uses the same Postgres superuser. Anyone who can reach Redis can append forged
   payment events. The consumer refuses to move a payment to another merchant, but it can still record payments that
@@ -411,13 +420,15 @@ These were found by the Day 1 audit and are planned:
   than that. It has been tested against a local fake server only, not the real API.
 - Card masking is a heuristic: a card number written with separators other than space, tab, `-`, `.`, `/` or `_`
   (such as `,`, `:` or `|`), or with more than three of them between digits, reaches the model unmasked.
-- LLM failures are silent: the route falls back to the deterministic answer with no reason-code log or counter.
+- LLM failures fall back to the deterministic answer and increment `ops_ai_llm_fallback_total`, but the counter has no
+  reason-code label and no reason is logged.
 - `decline_code`, `provider` and `card_bin` have no format pattern in the event contract.
 - `OPENAI_API_KEY` reaches the container as a plain environment variable, and `database_url` is a plain string in the
   ops-ai settings (not a secret type).
 - User tokens cannot be revoked before they expire (15 minutes).
-- The transfer system is a fixture (`scripts/transfer_fixture.py`) loaded by the seed. There is no transfer execution,
-  no stream event for transfers, and no FX.
+- SQ2's transfer records in ops-ai are a fixture (`scripts/transfer_fixture.py`) loaded by the seed. The gateway does
+  execute transfers (`POST /v1/me/transfers`, with FX legs), but publishes no stream event for them, so ops-ai never
+  sees a live transfer.
 - Base images are pinned by tag, not by digest, and CI does not run osv-scanner yet.
 - The relay loads the full gateway settings, so it mounts the gateway secrets (JWT private key, HMAC keys) although it
   needs only the database and Redis URLs. Fix: a relay-only settings loader.
@@ -429,15 +440,18 @@ These were found by the Day 1 audit and are planned:
   `(merchant_id, method, occurred_at)` index since SQ3).
 - API keys have no `revoked_at`; every `make demo` adds one more key to the demo merchant.
 - The seed is not re-anchored: run more than 6 hours after the first seed, SQ1 answers `no_anomaly`. Start over with
-  `make demo-down` and `docker volume rm payplat_pgdata` (or truncate `ops_ai`). The seeded SQ3 burst leaves the
+  `make demo-down && docker compose --profile demo down -v` (or truncate `ops_ai`). The seeded SQ3 burst leaves the
   24-hour window about 9 hours after the first seed.
-- Card testing (SQ3): no gateway-side risk score or real-time block yet (B7.1, B7.3 gateway half); the watch only
+- Card testing (SQ3): the gateway blocks on its synchronous card-velocity rule (B7.1, B7.3); the ops-ai watch only
   raises an alert and a ticket after the payment.
 - Card testing: an earlier payment arriving after the alert (out-of-order delivery) can start a second alert for one
   burst.
 - Card testing: seeded payments carry no card identity, so seeded episodes report distinct cards as unknown.
-- Card testing: the thresholds are fixed constants; tuning them from human verdicts is Design.
-- Tickets: the lifecycle (`assigned`, `resolved`) and ops-staff routes are not in this slice (B12 Thin).
+- Card testing: false-positive feedback raises versioned per-merchant thresholds (R2-7) that the live watch applies,
+  falling back to the baseline; the SQ3 `investigate-fraud` assistant still uses the baseline rule, and the rule
+  actor is the merchant principal and role, not a person.
+- Tickets: the lifecycle (`open → assigned → resolved`) exists on merchant-token routes; ops-staff principals are not
+  wired to the ticket routes.
 - Card testing: the rule is easy to evade once known (amounts just above 1.00, gaps over 120 s, or diluting with
   larger card payments). A burst of more than 5000 micro payments in the window is analysed on its newest 5000 only.
 - Card testing: alerts and tickets are not capped per merchant, and an alert refresh from an older event can move
