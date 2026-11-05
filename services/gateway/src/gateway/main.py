@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from pydantic import SecretStr
 from redis import Redis
 
 from gateway.app import GatewayAppDeps, create_app
@@ -31,6 +32,10 @@ def build_app_from_env() -> FastAPI:
         clock=system_clock,
         card_fingerprint_key=settings.card_fingerprint_key.get_secret_value(),
     )
+    network_token = _secret_or_none(settings.network_token)
+    ops_admin_token = _secret_or_none(settings.ops_admin_token)
+    if network_token is not None and network_token == ops_admin_token:
+        raise RuntimeError("GATEWAY_NETWORK_TOKEN and GATEWAY_OPS_ADMIN_TOKEN must differ")
     return create_app(
         GatewayAppDeps(
             charge=charge,
@@ -42,5 +47,11 @@ def build_app_from_env() -> FastAPI:
                 else settings.totp_encryption_key.get_secret_value()
             ),
             readiness=lambda: check_ready(session_factory, redis),
+            network_token=network_token,
+            ops_admin_token=ops_admin_token,
         )
     )
+
+
+def _secret_or_none(value: SecretStr | None) -> str | None:
+    return None if value is None else value.get_secret_value()

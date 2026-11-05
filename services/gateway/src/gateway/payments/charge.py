@@ -22,7 +22,7 @@ from gateway.payments.idempotency.models import IdempotencyRecord
 from gateway.payments.ledger.service import PostingLine, ensure_account, post_journal
 from gateway.payments.models import Payment, PaymentAttempt
 from gateway.payments.providers.port import CardRef, ProviderPort, ProviderResult, ProviderTimeoutError
-from gateway.payments.risk import RISK_BLOCKED_DECLINE_CODE, assess_charge_risk
+from gateway.payments.risk import RISK_BLOCKED_DECLINE_CODE, RISK_UNAVAILABLE_DECLINE_CODE, assess_charge_risk
 from gateway.payments.schemas import CardSummary, ChargeRequest, ChargeResponse
 from gateway.payments.state import ATTEMPT_LEASE_SECONDS as ATTEMPT_LEASE_SECONDS
 from gateway.payments.state import FINALIZABLE_STATES, PaymentState
@@ -78,7 +78,11 @@ IN_PROGRESS = ChargeOutcome(409, {"error": "idempotency_in_progress"})
 
 
 def charge_card(
-    deps: ChargeDeps, merchant_id: uuid.UUID, idempotency_key: str, request: ChargeRequest
+    deps: ChargeDeps,
+    merchant_id: uuid.UUID,
+    idempotency_key: str,
+    request: ChargeRequest,
+    payer_user_id: uuid.UUID | None = None,
 ) -> ChargeOutcome:
     """Sync card charge (architecture-detail §3 "Sync charge path").
 
@@ -95,7 +99,7 @@ def charge_card(
     if lock_token is False:
         return _await_stored(deps, merchant_id, idempotency_key, request_hash)
     try:
-        claim = _claim(deps, merchant_id, idempotency_key, request_hash, request, pan)
+        claim = _claim(deps, merchant_id, idempotency_key, request_hash, request, pan, payer_user_id)
         if claim is None:
             return _await_stored(deps, merchant_id, idempotency_key, request_hash)
         if isinstance(claim, ChargeOutcome):
@@ -155,6 +159,7 @@ def _claim(
     request_hash: str,
     request: ChargeRequest,
     pan: str,
+    payer_user_id: uuid.UUID | None,
 ) -> _Claim | ChargeOutcome | None:
     """tx1: idempotency row + token + payment + attempt. None if the key is already taken.
 
@@ -193,6 +198,7 @@ def _claim(
             risk_score=risk.score,
             risk_reasons=list(risk.reasons),
             risk_flagged=risk.flagged,
+            payer_user_id=payer_user_id,
             entity_version=1,
             created_at=now,
             updated_at=now,
@@ -200,7 +206,7 @@ def _claim(
         card_ref = CardRef(token=card.token, bin=card.bin, last4=card.last4)
         if risk.blocked:
             payment.state = "declined"
-            payment.decline_code = RISK_BLOCKED_DECLINE_CODE
+            payment.decline_code = risk.decline_code
             payment.risk_blocked = True
             session.add(payment)
             session.flush()
@@ -215,7 +221,7 @@ def _claim(
                 "declined",
                 payment.entity_version,
                 None,
-                RISK_BLOCKED_DECLINE_CODE,
+                risk.decline_code,
                 derive_card_ref(card.fingerprint, merchant_id, deps.card_fingerprint_key),
             )
         session.add(payment)
@@ -366,7 +372,7 @@ def _complete(
         "amount_minor": request.amount_minor,
         "currency": request.currency,
     }
-    if decline_code == RISK_BLOCKED_DECLINE_CODE:
+    if decline_code in (RISK_BLOCKED_DECLINE_CODE, RISK_UNAVAILABLE_DECLINE_CODE):
         summary["decline_code"] = decline_code
     session.add(
         AuditLog(

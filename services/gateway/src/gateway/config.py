@@ -15,6 +15,10 @@ class GatewaySettings(BaseSettings):
     card_fingerprint_key: SecretStr = Field(min_length=MIN_SECRET_LENGTH)
     jwt_private_key_pem: SecretStr | None = None
     totp_encryption_key: SecretStr | None = Field(default=None, min_length=MIN_SECRET_LENGTH)
+    network_token: SecretStr | None = Field(default=None, min_length=MIN_SECRET_LENGTH)
+    """Unset → the simulated card-network routes answer 503."""
+    ops_admin_token: SecretStr | None = Field(default=None, min_length=MIN_SECRET_LENGTH)
+    """Unset → the ops dispute-resolution route answers 503 (interim until the RBAC OpsGuard)."""
 
 
 def load_gateway_settings() -> GatewaySettings:

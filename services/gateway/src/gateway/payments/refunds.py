@@ -31,15 +31,21 @@ def refundable_minor(payment: Payment) -> int:
 
 
 def lock_payment(
-    session: Session, payment_id: uuid.UUID, merchant_id: uuid.UUID | None = None
+    session: Session,
+    payment_id: uuid.UUID,
+    merchant_id: uuid.UUID | None = None,
+    *,
+    payer_user_id: uuid.UUID | None = None,
 ) -> Payment | None:
     """`SELECT … FOR UPDATE` on the payment row: refunds and dispute changes serialize here.
 
-    With `merchant_id`, another merchant's payment is neither returned nor locked.
+    With `merchant_id` (or `payer_user_id`), another owner's payment is neither returned nor locked.
     """
     query = select(Payment).where(Payment.id == payment_id)
     if merchant_id is not None:
         query = query.where(Payment.merchant_id == merchant_id)
+    if payer_user_id is not None:
+        query = query.where(Payment.payer_user_id == payer_user_id)
     return session.scalars(query.with_for_update().execution_options(populate_existing=True)).one_or_none()
 
 
