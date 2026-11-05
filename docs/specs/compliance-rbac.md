@@ -160,12 +160,28 @@ its own committed transaction (user row locked): when a rule fires the user move
 `compliance.kyc_review_required` are written. High-risk = cross-border transfer (both countries known and
 different) or a payout whose amount plus the user's same-currency payouts of the last 24 h (pending, unknown or
 succeeded; failed ones do not count) reaches the amount threshold. `blocked` = high-risk and status after
-screening is not `verified`, or any payout by a `rejected` user. Non-failed payouts also count as sent volume
+screening is not `verified`, or any operation (transfer or payout) by a `rejected` user. Non-failed payouts also count as sent volume
 (volume_24h) and as sent operations (velocity); a blocked attempt writes `kyc.operation_blocked`. `POST /v1/me/transfers` screens first and
 answers 403 `{"error": "kyc_reverification_required"}` (no-store) when blocked. `POST /v1/me/payouts` screens the same
 way (kind `payout`) under the same per-user operation lock: blocked → 403
 `{"error": "kyc_reverification_required"}`, no payout row and no funds held; the lock held by another
 operation of the user → 409 `{"error": "operation_in_progress"}` with Retry-After: 1 (no-store).
+
+A `rejected` user moves no money at all (M3: otherwise a rejected user could transfer to another account and
+pay out from there). `ensure_not_rejected(session_factory, clock, user_id, operation)` → `True` when the user may
+proceed; for a `rejected` user it writes `kyc.operation_blocked` (summary: operation, kyc_status) and returns
+`False`. `POST /v1/me/payments` calls it (operation `payment`) after the Idempotency-Key checks and before
+charging: rejected → 403 `{"error": "kyc_reverification_required"}` (no-store), no payment row, provider not
+called. `pending` and unverified users keep paying merchants as before (no amount screening on card payments).
+Receiving a transfer, top-ups, reads, refund requests and disputes are not blocked.
+
+Known residuals of M3 (accepted for this release, from the security audit):
+- Check-then-act: the check commits before the charge, transfer or payout runs, so an operation already past the
+  check when ops commits `rejected` still completes; requests arriving after that commit are refused. Closing it
+  means re-reading the user row `FOR SHARE` inside the charge's claim transaction.
+- Each blocked attempt writes one `kyc.operation_blocked` row, and a rule-triggering transfer or payout by a
+  rejected user still opens a review; only the per-user rate limit bounds this (and it fails open without Redis).
+- The block is per account, not per person: a rejected user can sign up again with another email.
 
 `resolve_kyc(session_factory, clock, principal, user_id, outcome)`: `verified` → status verified,
 `kyc_verified_at = now`, `kyc_expires_at = now + 365 d`; `rejected` → status rejected; open reviews take the

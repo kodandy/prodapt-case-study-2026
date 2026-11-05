@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
 from gateway.clock import Clock
+from gateway.compliance.kyc import ensure_not_rejected
 from gateway.payments.charge import ChargeDeps
 from gateway.payments.consumer import (
     ConsumerPayment,
@@ -93,6 +94,12 @@ def consumer_payment_router(
         if USER_IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key) is None:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST, "invalid Idempotency-Key header", headers=NO_STORE_HEADERS
+            )
+        if not ensure_not_rejected(session_factory, clock, user_id, "payment"):
+            return JSONResponse(
+                {"error": "kyc_reverification_required"},
+                status_code=status.HTTP_403_FORBIDDEN,
+                headers=NO_STORE_HEADERS,
             )
         request = ChargeRequest(
             amount_minor=body.amount_minor, currency=body.currency, method=body.method, card=body.card

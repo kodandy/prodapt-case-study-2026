@@ -129,7 +129,7 @@ def screen_operation(
 ) -> ScreeningResult:
     """Commits its own transaction (user row locked). Fired rules move the user to `pending` and open
     or extend the user's single open review; a high-risk operation by a user who is not `verified` is
-    blocked, and so is any payout by a `rejected` user. Payouts (not failed) count as sent volume and sent
+    blocked, and so is any operation by a `rejected` user. Payouts (not failed) count as sent volume and sent
     operations, and a payout is high-risk once it and the same-currency payouts of the last 24 h reach the
     amount threshold, so splitting a payout does not avoid the block. Callers that act on the result must
     hold `user_operation_lock` across screening and the operation, or concurrent operations are screened
@@ -167,9 +167,7 @@ def screen_operation(
             request.amount_minor + payout_volume >= amount_threshold(request.currency)
         )
         high_risk = cross_border or large_payout
-        blocked = (high_risk and user.kyc_status != "verified") or (
-            request.kind == "payout" and user.kyc_status == "rejected"
-        )
+        blocked = (high_risk and user.kyc_status != "verified") or user.kyc_status == "rejected"
         if blocked:
             actor = f"user:{user.id}"
             record_audit(
@@ -193,6 +191,29 @@ def screen_operation(
             blocked=blocked,
             kyc_status=user.kyc_status,
         )
+
+
+def ensure_not_rejected(
+    session_factory: sessionmaker[Session], clock: Clock, user_id: uuid.UUID, operation: str
+) -> bool:
+    """False for a `rejected` user, after auditing `kyc.operation_blocked`: such a user moves no money."""
+    with session_factory.begin() as session:
+        user = session.get(User, user_id)
+        if user is None:
+            raise UnknownUserError
+        if user.kyc_status != "rejected":
+            return True
+        actor = f"user:{user.id}"
+        record_audit(
+            session,
+            clock,
+            actor,
+            "consumer",
+            OPERATION_BLOCKED_ACTION,
+            actor,
+            {"operation": operation, "kyc_status": user.kyc_status},
+        )
+        return False
 
 
 class OperationInProgressError(Exception):
