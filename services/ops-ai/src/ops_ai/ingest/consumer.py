@@ -17,8 +17,7 @@ from ops_ai.fraud_watch.watch import watch_payment
 from ops_ai.ingest.models import PaymentFact, ProcessedEvent
 from ops_ai.observability.metrics import EVENTS_CONSUMED, FRAUD_FLAGS, PAYMENT_FAILURES
 from ops_ai.observability.tracing import PROPAGATOR, TRACEPARENT, configure_tracing
-from ops_ai.search.embedder import LocalHashEmbedder, document_text, is_zero
-from ops_ai.search.models import SearchDocument
+from ops_ai.search.indexing import upsert_search_document
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +26,6 @@ PAYMENTS_DEAD_LETTER_TOPIC = "gw.payments.v1.dead"
 DEAD_LETTER_MAXLEN = 10_000
 CONSUME_SPAN_NAME = f"consume {PAYMENTS_TOPIC}"
 FAILURE_STATES = frozenset({"declined", "failed", "unknown"})
-_LOCAL_EMBEDDER = LocalHashEmbedder()
 
 
 def ensure_group(redis: Redis, stream: str, group: str) -> None:
@@ -82,22 +80,14 @@ def apply_payment_event(session: Session, clock: Clock, event: PaymentEventV1) -
     session.execute(
         insert(PaymentFact).values(**fact).on_conflict_do_update(index_elements=["payment_id"], set_=fact)
     )
-    title = f"Card payment {event.state}"
-    body = _payment_body(event)
-    [embedding] = _LOCAL_EMBEDDER.embed([document_text(title, body)])
-    document = {
-        "kind": "payment",
-        "ref_id": event.payment_id,
-        "merchant_id": event.merchant_id,
-        "title": title,
-        "body": body,
-        "occurred_at": event.occurred_at,
-        "embedding_local_hash_v1": None if is_zero(embedding) else embedding,
-    }
-    session.execute(
-        insert(SearchDocument)
-        .values(**document)
-        .on_conflict_do_update(index_elements=["kind", "ref_id"], set_=document)
+    upsert_search_document(
+        session,
+        kind="payment",
+        ref_id=event.payment_id,
+        merchant_id=event.merchant_id,
+        title=f"Card payment {event.state}",
+        body=_payment_body(event),
+        occurred_at=event.occurred_at,
     )
     if watch_payment(session, clock, event) is not None:
         FRAUD_FLAGS.labels("card_testing").inc()

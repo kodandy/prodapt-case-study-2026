@@ -450,7 +450,7 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
         body: AskRequest, scope: Annotated[Scope, Depends(merchant_scope)], judge: bool = False
     ) -> InvestigateResponse:
         with deps.session_factory() as session:
-            result = investigate(session, scope, body.question, deps.clock(), deps.llm)
+            result = investigate(session, scope, body.question, deps.clock(), deps.llm, deps.embedder)
         extra: dict[str, RootCauseJudgeOut] = {}
         if judge:
             assessment = assess_root_cause(result, deps.judge_llm, deps.judge_timeout_seconds)

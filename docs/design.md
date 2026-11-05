@@ -451,18 +451,29 @@ Where each lock is, and what proves it:
   [`ai/assistant/__tests__/test_openai_llm_hardening.py`](../services/ops-ai/src/ops_ai/assistant/__tests__/test_openai_llm_hardening.py).
   Without a key the adapter is tested only against a local fake HTTP server; that is not a test of the real API.
 
-### D5.6 Search is Postgres full-text today; hybrid search is designed, not built
+### D5.6 Search is hybrid: Postgres full-text + pgvector, fused by RRF
 
-- **Decision:** Keyword search uses a persisted `tsvector` column and `websearch_to_tsquery('english', …)`, always
-  restricted to the caller's merchant (plus platform-wide incidents for `search_incidents`). Resolved incidents rank
-  before unresolved ones.
-- **Why:** It runs inside the existing Postgres with no new dependency and is enough for the planted SQ1 incidents.
-- **What we gave up:** **pgvector similarity and Reciprocal Rank Fusion (B6.2, B6.3) are not in the code at this
-  snapshot.** Synonyms and paraphrases that share no keyword are missed.
-- **Alternatives / design:** One embeddings table per pinned embedder (so changing the model never mixes vector
-  spaces), cosine top-k with pgvector, fused with the FTS ranking by RRF (k = 60), behind the same scoped search
-  interface; Japanese text via a pg_bigm keyword backend behind that interface.
-- **Evidence (Tested, FTS only):** [`ai/search/__tests__/test_search_service.py`](../services/ops-ai/src/ops_ai/search/__tests__/test_search_service.py),
+- **Decision:** Keyword search uses a persisted `tsvector` column and `websearch_to_tsquery('english', …)`; the
+  vector leg uses one pgvector column + HNSW index per pinned embedder; `hybrid_search` fuses both by Reciprocal Rank
+  Fusion (k = 60) and degrades to the keyword leg when the embedder is unavailable. Both legs are restricted to the
+  caller's merchant. Incidents are indexed into `search_documents` (`kind = 'incident'`, by `python -m ops_ai.seed`
+  and the eval suite); platform-wide incidents are owned by the nil-UUID sentinel and are visible only through the
+  opt-in `include_platform` incident filter. SQ1's `search_incidents` uses `hybrid_search` when the app has an
+  embedder, re-checks every hit against `ops_ai.incidents` visibility (merchant's or platform-wide), appends
+  full-text hits not yet indexed, and ranks resolved incidents first. Without an embedder it is the full-text search
+  over `ops_ai.incidents`.
+- **Why:** It runs inside the existing Postgres with no new service; a stale search document can never widen
+  visibility because the incidents table is the authority.
+- **What we gave up:** The default `LocalHashEmbedder` is feature hashing (spelling-level, not semantic); real
+  paraphrase recall needs the OpenAI column filled by `python -m ops_ai.search backfill`. The failure assistant
+  (`ai/investigation/failures.py`) and the LLM tool catalog still call `search_incidents` without an embedder
+  (full-text). Hit→incident mapping scans the scope's visible incidents in Python.
+- **Alternatives:** Japanese text via a pg_bigm keyword backend behind the same interface.
+- **Evidence (Tested):** [`ai/search/__tests__/test_hybrid_search.py`](../services/ops-ai/src/ops_ai/search/__tests__/test_hybrid_search.py),
+  [`ai/search/__tests__/test_incident_indexing.py`](../services/ops-ai/src/ops_ai/search/__tests__/test_incident_indexing.py),
+  [`ai/investigation/__tests__/test_search_incidents_hybrid.py`](../services/ops-ai/src/ops_ai/investigation/__tests__/test_search_incidents_hybrid.py),
+  [`ai/investigation/__tests__/test_investigate_hybrid_golden.py`](../services/ops-ai/src/ops_ai/investigation/__tests__/test_investigate_hybrid_golden.py),
+  [`ai/__tests__/test_investigate_route_hybrid.py`](../services/ops-ai/src/ops_ai/__tests__/test_investigate_route_hybrid.py),
   [`ai/investigation/__tests__/test_investigation_tools.py`](../services/ops-ai/src/ops_ai/investigation/__tests__/test_investigation_tools.py).
 
 ---
@@ -658,7 +669,6 @@ Each cut was made to keep a Basic item or a P0 proof. Order of the list: closest
 | Separate DB roles, audit rejection test | One owner role in compose | app role without `UPDATE`/`DELETE` on `audit_log`, migrations by an owner role; a test as the app role |
 | RBAC policy table, ops principal | No ops user flow in the demo | `role × action` table; route dependency checks it; matrix test generated from the table |
 | gRPC merchant API | REST covers the demo; gRPC adds codegen and a second transport | `CreatePayment` / `GetPayment` / `ListPayments` calling the same domain functions and the same validation module; `idempotency-key` metadata |
-| pgvector + RRF hybrid search | The B6 session did not land | D5.6 |
 | Session memory (Redis) and long-term merchant memory | Not landed at this snapshot | Redis hash keyed `(merchant_id, user_id, session_id)` with TTL and ownership check; long-term memory only via a confirmed write with the source turn id |
 | Answer-contract checker | Tools-first routes made it less urgent | claims with `evidence_refs`, slots rendered from tool output, reject digits outside slots, regenerate once then T2 |
 | Rate limits, circuit breaker | P1, after correctness | Redis token bucket per API key and per user, 429 + `Retry-After`, fail-open with a metric; breaker per route that never reroutes an `unknown` attempt |

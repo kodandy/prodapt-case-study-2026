@@ -1,13 +1,14 @@
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from ops_ai.scope import Scope
 from ops_ai.search.embedder import Embedder, EmbedderUnavailableError, is_zero
+from ops_ai.search.indexing import INCIDENT_KIND, PLATFORM_MERCHANT_ID
 from ops_ai.search.models import EMBEDDING_DIMENSIONS, SearchDocument, embedding_column
 from ops_ai.search.vector_type import cosine_distance
 
@@ -26,8 +27,32 @@ class SearchHit:
     rank: float
 
 
-def search_documents(session: Session, scope: Scope, query: str, limit: int = 10) -> list[SearchHit]:
-    """Full-text search (websearch_to_tsquery, english) restricted to scope.merchant_id, best rank first."""
+def _visible(
+    scope: Scope, kinds: Collection[str] | None, include_platform: bool
+) -> list[ColumnElement[bool]]:
+    """scope.merchant_id's rows; include_platform adds platform-wide incident rows, never other kinds."""
+    owner: ColumnElement[bool] = SearchDocument.merchant_id == scope.merchant_id
+    if include_platform:
+        owner = or_(
+            owner,
+            and_(SearchDocument.merchant_id == PLATFORM_MERCHANT_ID, SearchDocument.kind == INCIDENT_KIND),
+        )
+    if kinds is None:
+        return [owner]
+    return [owner, SearchDocument.kind.in_(list(kinds))]
+
+
+def search_documents(
+    session: Session,
+    scope: Scope,
+    query: str,
+    limit: int = 10,
+    *,
+    kinds: Collection[str] | None = None,
+    include_platform: bool = False,
+) -> list[SearchHit]:
+    """Full-text search (websearch_to_tsquery, english) restricted to scope.merchant_id (plus platform-wide
+    incidents when include_platform) and to `kinds` (None = all kinds), best rank first."""
     tsquery = func.websearch_to_tsquery("english", query)
     rank = func.ts_rank(SearchDocument.tsv, tsquery).label("rank")
     rows = session.execute(
@@ -39,7 +64,7 @@ def search_documents(session: Session, scope: Scope, query: str, limit: int = 10
             SearchDocument.occurred_at,
             rank,
         )
-        .where(SearchDocument.merchant_id == scope.merchant_id, SearchDocument.tsv.op("@@")(tsquery))
+        .where(*_visible(scope, kinds, include_platform), SearchDocument.tsv.op("@@")(tsquery))
         .order_by(rank.desc(), SearchDocument.occurred_at.desc())
         .limit(limit)
     ).all()
@@ -63,8 +88,11 @@ def vector_search(
     embedder: Embedder,
     limit: int = 10,
     min_similarity: float = DEFAULT_MIN_SIMILARITY,
+    *,
+    kinds: Collection[str] | None = None,
+    include_platform: bool = False,
 ) -> list[SearchHit]:
-    """Cosine similarity over the embedder's own column, restricted to scope.merchant_id and to rows that
+    """Cosine similarity over the embedder's own column, scoped like search_documents, restricted to rows that
     have a vector for that embedder; hits below `min_similarity` are dropped. rank = cosine similarity.
 
     Raises ValueError for an embedder without a column; EmbedderUnavailableError propagates.
@@ -88,7 +116,7 @@ def vector_search(
             similarity,
         )
         .where(
-            SearchDocument.merchant_id == scope.merchant_id,
+            *_visible(scope, kinds, include_platform),
             column.is_not(None),
             distance <= 1.0 - min_similarity,
         )
@@ -140,15 +168,27 @@ def hybrid_search(
     limit: int = 10,
     k: int = RRF_K,
     min_similarity: float = DEFAULT_MIN_SIMILARITY,
+    *,
+    kinds: Collection[str] | None = None,
+    include_platform: bool = False,
 ) -> list[SearchHit]:
-    """Keyword (FTS) + vector legs, both scoped to scope.merchant_id, fused with RRF.
+    """Keyword (FTS) + vector legs, both scoped like search_documents, fused with RRF.
     An unavailable embedder degrades to the keyword leg alone.
     """
     candidates = max(limit * 3, MIN_LEG_CANDIDATES)
-    keyword = search_documents(session, scope, query, limit=candidates)
+    keyword = search_documents(
+        session, scope, query, limit=candidates, kinds=kinds, include_platform=include_platform
+    )
     try:
         vector = vector_search(
-            session, scope, query, embedder, limit=candidates, min_similarity=min_similarity
+            session,
+            scope,
+            query,
+            embedder,
+            limit=candidates,
+            min_similarity=min_similarity,
+            kinds=kinds,
+            include_platform=include_platform,
         )
     except EmbedderUnavailableError:
         vector = []

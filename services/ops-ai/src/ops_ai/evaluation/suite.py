@@ -28,6 +28,7 @@ from ops_ai.judge.dispute import judge_dispute
 from ops_ai.judge.fake import FakeJudgeLlm
 from ops_ai.judge.hypotheses import rank_hypotheses
 from ops_ai.judge.schemas import DisputeWorkflowRecord, Hypothesis, Verdict
+from ops_ai.search.indexing import index_incidents
 from ops_ai.seed import merchant_uuid, seed_dataset
 from ops_ai.settlement.seed import seed_settlement
 from ops_ai.transfers.seed import seed_transfers
@@ -271,6 +272,8 @@ def run_full_eval(
     metrics. `judge_llm` None → LLM-judged case metrics are skipped and the judge goldens use the fake."""
     log = generate(seed=DATASET_SEED, records=DATASET_RECORDS)
     seed_dataset(session_factory, lambda: anchor, log, anchor)
+    with session_factory.begin() as session:
+        index_incidents(session)
     seed_transfers(session_factory, log, anchor)
     seed_settlement(session_factory, log, anchor, lambda: anchor)
 

@@ -21,6 +21,7 @@ from ops_ai.investigation.tools import (
     search_incidents,
 )
 from ops_ai.scope import Scope
+from ops_ai.search.embedder import Embedder
 
 Intent = Literal["failure_spike", "unsupported"]
 CauseLabel = Literal["issuer_outage_on_bin", "elevated_failures", "no_anomaly", "unsupported"]
@@ -74,8 +75,16 @@ def classify_intent(question: str) -> Intent:
     return "failure_spike" if about_failures and about_payments else "unsupported"
 
 
-def investigate(session: Session, scope: Scope, question: str, now: datetime, llm: LlmPort) -> Investigation:
-    """Tools first: the last 6 hours against the 7 days before, then incident search on the top failing BIN.
+def investigate(
+    session: Session,
+    scope: Scope,
+    question: str,
+    now: datetime,
+    llm: LlmPort,
+    embedder: Embedder | None = None,
+) -> Investigation:
+    """Tools first: the last 6 hours against the 7 days before, then incident search on the top failing BIN
+    (hybrid when an embedder is given, full-text otherwise).
 
     The cause label and every number come from the tools; the LLM only narrates the evidence
     (LlmUnavailableError → t2_fallback with the same fields). Unsupported questions call no tool and no LLM.
@@ -88,7 +97,7 @@ def investigate(session: Session, scope: Scope, question: str, now: datetime, ll
     baseline = compare_baseline(session, scope, window_start, days=BASELINE_DAYS)
     top_bin = window.by_bin[0] if window.by_bin else None
     query = f"BIN {top_bin.card_bin} issuer" if top_bin else FALLBACK_INCIDENT_QUERY
-    incidents = search_incidents(session, scope, query)
+    incidents = search_incidents(session, scope, query, embedder=embedder)
     tool_calls = (
         ToolCall("aggregate_failures", {"start": window_start.isoformat(), "end": now.isoformat()}),
         ToolCall("compare_baseline", {"window_start": window_start.isoformat(), "days": str(BASELINE_DAYS)}),

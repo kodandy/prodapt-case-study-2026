@@ -15,6 +15,7 @@ from ops_ai.db import make_engine, make_session_factory
 from ops_ai.ingest.consumer import apply_payment_event
 from ops_ai.investigation.models import IncidentRecord
 from ops_ai.investigation.taxonomy import failure_code
+from ops_ai.search.indexing import index_incidents
 from scripts.generate_dataset import CanonicalTransaction, Incident, PlantedScenarios, ScenarioLog, generate
 
 MERCHANT_NAMESPACE = uuid.UUID("acc393ed-647c-4a3b-8adc-f53e5d7b1fe3")
@@ -110,9 +111,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     anchor: datetime = args.anchor or system_clock()
     engine = make_engine(load_ops_ai_settings().database_url)
     try:
+        session_factory = make_session_factory(engine)
         result = seed_dataset(
-            make_session_factory(engine), system_clock, generate(seed=args.seed, records=args.records), anchor
+            session_factory, system_clock, generate(seed=args.seed, records=args.records), anchor
         )
+        with session_factory.begin() as session:
+            index_incidents(session)
     finally:
         engine.dispose()
     print(

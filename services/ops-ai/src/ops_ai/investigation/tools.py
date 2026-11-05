@@ -8,6 +8,10 @@ from sqlalchemy.orm import Session
 from ops_ai.ingest.models import PaymentFact
 from ops_ai.investigation.models import IncidentRecord
 from ops_ai.scope import Scope
+from ops_ai.search.embedder import Embedder
+from ops_ai.search.indexing import INCIDENT_KIND, incident_ref_id
+from ops_ai.search.models import SearchDocument
+from ops_ai.search.service import MIN_LEG_CANDIDATES, hybrid_search
 
 FAILED_STATES = ("declined", "failed")
 CARD_METHOD = "card"
@@ -101,40 +105,81 @@ def compare_baseline(
     return aggregate_failures(session, scope, window_start - timedelta(days=days), window_start)
 
 
-def search_incidents(session: Session, scope: Scope, query: str, limit: int = 5) -> list[IncidentHit]:
-    """Full-text search (websearch_to_tsquery, english) over the merchant's and platform-wide incidents.
+def _incident_visible_to(scope: Scope) -> ColumnElement[bool]:
+    return or_(IncidentRecord.merchant_id == scope.merchant_id, IncidentRecord.merchant_id.is_(None))
 
-    Resolved incidents first, then best rank.
-    """
+
+def _incident_hit(incident: IncidentRecord) -> IncidentHit:
+    return IncidentHit(
+        incident_id=incident.incident_id,
+        title=incident.title,
+        root_cause=incident.root_cause,
+        fix_applied=incident.fix_applied,
+        resolved_at=incident.resolved_at,
+        recurrence_within_7d=incident.recurrence_within_7d,
+    )
+
+
+def _full_text_incidents(session: Session, scope: Scope, query: str, limit: int) -> list[IncidentRecord]:
+    """Full-text search (websearch_to_tsquery, english) over the merchant's and platform-wide incidents.
+    Resolved incidents first, then best rank."""
     tsquery = func.websearch_to_tsquery("english", query)
     rank = func.ts_rank(IncidentRecord.tsv, tsquery)
-    rows = session.execute(
-        select(
-            IncidentRecord.incident_id,
-            IncidentRecord.title,
-            IncidentRecord.root_cause,
-            IncidentRecord.fix_applied,
-            IncidentRecord.resolved_at,
-            IncidentRecord.recurrence_within_7d,
+    return list(
+        session.scalars(
+            select(IncidentRecord)
+            .where(_incident_visible_to(scope), IncidentRecord.tsv.op("@@")(tsquery))
+            .order_by(IncidentRecord.resolved_at.is_(None), rank.desc(), IncidentRecord.incident_id)
+            .limit(limit)
         )
-        .where(
-            or_(IncidentRecord.merchant_id == scope.merchant_id, IncidentRecord.merchant_id.is_(None)),
-            IncidentRecord.tsv.op("@@")(tsquery),
-        )
-        .order_by(IncidentRecord.resolved_at.is_(None), rank.desc(), IncidentRecord.incident_id)
-        .limit(limit)
-    ).all()
-    return [
-        IncidentHit(
-            incident_id=row.incident_id,
-            title=row.title,
-            root_cause=row.root_cause,
-            fix_applied=row.fix_applied,
-            resolved_at=row.resolved_at,
-            recurrence_within_7d=row.recurrence_within_7d,
-        )
-        for row in rows
+    )
+
+
+def _hybrid_incidents(
+    session: Session, scope: Scope, query: str, limit: int, embedder: Embedder
+) -> list[IncidentRecord]:
+    candidates = max(limit * 3, MIN_LEG_CANDIDATES)
+    hits = hybrid_search(
+        session, scope, query, embedder, limit=candidates, kinds=(INCIDENT_KIND,), include_platform=True
+    )
+    visible = {
+        incident_ref_id(incident.incident_id): incident
+        for incident in session.scalars(select(IncidentRecord).where(_incident_visible_to(scope)))
+    }
+    found = [visible[hit.ref_id] for hit in hits if hit.ref_id in visible]
+    seen = {incident.incident_id for incident in found}
+    keyword_extras = [
+        incident
+        for incident in _full_text_incidents(session, scope, query, candidates)
+        if incident.incident_id not in seen
     ]
+    indexed = set(
+        session.scalars(
+            select(SearchDocument.ref_id).where(
+                SearchDocument.kind == INCIDENT_KIND,
+                SearchDocument.ref_id.in_([incident_ref_id(i.incident_id) for i in keyword_extras]),
+            )
+        )
+    )
+    found.extend(i for i in keyword_extras if incident_ref_id(i.incident_id) not in indexed)
+    found.sort(key=lambda incident: incident.resolved_at is None)
+    return found[:limit]
+
+
+def search_incidents(
+    session: Session, scope: Scope, query: str, limit: int = 5, embedder: Embedder | None = None
+) -> list[IncidentHit]:
+    """Incidents of the merchant and platform-wide ones matching `query`, resolved first.
+
+    Without an embedder: full-text search over ops_ai.incidents. With one: hybrid search over the indexed
+    incident documents, each re-checked against ops_ai.incidents visibility, plus full-text hits
+    not yet indexed.
+    """
+    if embedder is None:
+        incidents = _full_text_incidents(session, scope, query, limit)
+    else:
+        incidents = _hybrid_incidents(session, scope, query, limit, embedder)
+    return [_incident_hit(incident) for incident in incidents]
 
 
 MIN_ELEVATED_FAILURES = 10
