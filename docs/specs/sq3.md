@@ -289,3 +289,56 @@ card_ref = HMAC-SHA256(subkey, f"{merchant_id}:{fingerprint}").hexdigest()[:32]
 6. `EPISODE_PAYMENT_IDS_LIMIT` lives in `ops_ai.app`; only `EpisodeOut` is capped. `payment:` and `episode:` evidence
    are unchanged.
 7. The index is a plain btree, declared on the model under the same name.
+
+## Feedback-adjusted thresholds in the assistant and a live tail in the seed (11-06)
+
+Closes two gaps recorded in `requirements-traceability.md`: R2-7 "the SQ3 `investigate-fraud` assistant still flags
+with the baseline" and SQ3 "seeded events raise no alert, so the E2E golden checks episode + payment refs only".
+
+### Root cause of "seeded events raise no alert"
+
+`seed.to_payment_event` stamps every seeded event `origin = "backfill"`, and `watch_payment` returns at once for any
+event that is not `live` (decision 5). The planted burst therefore lands in `payment_facts` and is found by
+`analyze_fraud`, but the watcher never sees it. The detection rules are not the cause: `analyze_fraud` already flags
+the planted episode (`card_identity_unknown` passes the card rule). The seed is what is unrealistic: in production
+the recent history reaches ops-ai on the live stream after the backfill cut-over, so it does go through the watcher.
+
+### S-1. Live tail in `seed_dataset` — `ops_ai/seed/dataset.py`
+
+```python
+def seed_dataset(session_factory, clock, log, anchor, *, live_since: datetime | None = None) -> SeedResult
+def to_payment_event(tx, shift, origin: Literal["live", "backfill"] = "backfill") -> PaymentEventV1 | None
+```
+
+- `live_since` None (default) → unchanged: every event is `backfill`, no alert, ticket or ops alert (decision 5 and
+  the existing golden stay true for `make demo` and the CLI).
+- `live_since` set → kept events with shifted `occurred_at >= live_since` are delivered with `origin = "live"`, after
+  every backfill event and in `(occurred_at, payment_id)` order, through the same `apply_payment_event`, so
+  `watch_payment` (and the active rule version) runs on them exactly as for the consumer. Events before it stay
+  `backfill`. `event_id`, ids and every other field are the same as in a backfill seed.
+- With `generate(seed=42)`, anchor `A` and `live_since = A - 24 h`: exactly one `fraud_alerts` row, for
+  `merchant_uuid("mch_0002")`, `first_payment_id` = the first planted SQ3 id, `payment_count` = 40,
+  `features.distinct_cards` None; exactly one ticket (`fraud`, `high`, `open`) linked to it; one ops alert; applied
+  rule version 0. No other merchant gets an alert. A second run with the same arguments adds nothing (dedupe on
+  `event_id`).
+- `live_since` after the burst (e.g. `A`) → no alert: the burst stayed backfill.
+- `run_full_eval` seeds with `live_since = anchor - 24 h` (the assistant's window). The `sq3_card_testing` golden
+  additionally requires an `alert:` evidence ref.
+
+### S-2. `investigate_fraud` uses the merchant's active rule version (R2-7)
+
+- After `analyze_fraud`, it reads `rule = active_rule_version(session, scope)` in the same session. An episode counts
+  as flagged iff `episode.flagged and is_flagged(episode, rule)` (same rule as the live watcher, r2-agents.md §6.2:
+  the active version can only tighten the baseline). Episodes that the rule unflags are returned with
+  `flagged = False` and `reasons = ()`; the rest of the analysis is unchanged.
+- `cause_label`, `alerts`, `suggested_fixes` and evidence follow those flags.
+- New last field `FraudInvestigation.rule_version: int | None = None`: the applied version (0 = baseline) for the
+  `card_testing` intent; None for `unsupported` (no tool, no DB read).
+- Each `episode:` evidence summary ends with `, fraud rule v<version>`.
+- The tool list stays `["analyze_fraud"]`; one merchant's version never changes another merchant's result.
+- Route: the JSON body keys are unchanged (pinned by the existing route tests); the applied version is returned in the
+  response header `X-Fraud-Rule-Version: <n>` when it is not None, and in the episode evidence summary.
+
+Examples (12 micro USD payments 10 s apart, 4 distinct cards, 6 declined): baseline → `card_testing`, version 0;
+steps 1 (12, 0.83, 4) → `card_testing`, version 1; steps 2 (14, 0.86, 5) → `no_card_testing`, the episode returned
+unflagged with `reasons == ()`, no alert, no fixes, no evidence, version 2.

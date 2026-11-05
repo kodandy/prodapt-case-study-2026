@@ -48,6 +48,7 @@ FAILURE_DATASET_THRESHOLD = 0.99
 FAILURE_PARAPHRASE_THRESHOLD = 0.75
 JUDGE_AGREEMENT_THRESHOLD = 1.0
 TOKEN_TTL = timedelta(minutes=15)
+LIVE_TAIL = timedelta(hours=24)
 _FROZEN = ConfigDict(extra="forbid", frozen=True)
 
 
@@ -271,7 +272,8 @@ def run_full_eval(
     """Seeds the dataset at `anchor`, runs every golden case through the real API and computes the suite
     metrics. `judge_llm` None → LLM-judged case metrics are skipped and the judge goldens use the fake."""
     log = generate(seed=DATASET_SEED, records=DATASET_RECORDS)
-    seed_dataset(session_factory, lambda: anchor, log, anchor)
+    # The last day arrives on the live stream, so the planted SQ3 burst raises its alert and ticket.
+    seed_dataset(session_factory, lambda: anchor, log, anchor, live_since=anchor - LIVE_TAIL)
     with session_factory.begin() as session:
         index_incidents(session)
     seed_transfers(session_factory, log, anchor)
