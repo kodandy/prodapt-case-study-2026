@@ -1,0 +1,17 @@
+{
+  "case_id": "isolation_quiet_merchant",
+  "sample_query": "SQ1",
+  "route": "/v1/assistant/investigate",
+  "principal": "quiet_merchant",
+  "body": {
+    "question": "15% of my card payments are failing this afternoon — what is the root cause and how do we fix it?"
+  },
+  "expect": {
+    "status": 200,
+    "fields": {},
+    "evidence_ref_prefixes": [],
+    "required_terms": [],
+    "tool_calls": ["aggregate_failures", "compare_baseline", "search_incidents"]
+  },
+  "thresholds": {"faithfulness": 0.9, "answer_relevancy": 1.0, "evidence_ref_coverage": 1.0}
+}

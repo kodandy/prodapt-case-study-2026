@@ -1,0 +1,40 @@
+{
+  "case_id": "sq1_bin_outage",
+  "sample_query": "SQ1",
+  "route": "/v1/assistant/investigate",
+  "principal": "sq1_merchant",
+  "body": {
+    "question": "15% of my card payments are failing this afternoon — what is the root cause and how do we fix it?"
+  },
+  "expect": {
+    "status": 200,
+    "fields": {"intent": "failure_spike", "cause_label": "issuer_outage_on_bin"},
+    "evidence_ref_prefixes": ["aggregate:window", "aggregate:baseline", "aggregate:bin:400000", "incident:", "payment:"],
+    "required_terms": ["400000"],
+    "tool_calls": ["aggregate_failures", "compare_baseline", "search_incidents"]
+  },
+  "thresholds": {"faithfulness": 0.9, "answer_relevancy": 1.0, "evidence_ref_coverage": 1.0},
+  "hypotheses": {
+    "items": [
+      {
+        "hypothesis_id": "h_integration",
+        "cause_code": "merchant_integration_error",
+        "statement": "A checkout release broke the card form, so payments fail before authorisation.",
+        "evidence_refs": ["aggregate:baseline", "incident:inc_9999"]
+      },
+      {
+        "hypothesis_id": "h_acquirer",
+        "cause_code": "acquirer_outage",
+        "statement": "The acquirer is degraded for every BIN during the window.",
+        "evidence_refs": ["aggregate:window"]
+      },
+      {
+        "hypothesis_id": "h_bin",
+        "cause_code": "issuer_outage_on_bin",
+        "statement": "The issuer behind BIN 400000 timed out during the window; other BINs are normal.",
+        "evidence_refs": ["aggregate:bin:400000", "aggregate:window", "incident:inc_0001"]
+      }
+    ],
+    "expected_order": ["h_bin", "h_acquirer", "h_integration"]
+  }
+}

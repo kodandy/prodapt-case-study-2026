@@ -1,0 +1,226 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "case_id": "won_with_compelling_evidence",
+      "expected_verdict": "valid",
+      "record": {
+        "dispute_id": "00000000-0000-4000-8000-000000000101",
+        "payment_id": "00000000-0000-4000-8000-000000000201",
+        "merchant_id": "00000000-0000-4000-8000-000000000301",
+        "network_reason_code": "13.1",
+        "currency": "USD",
+        "payment_amount_minor": 12000,
+        "refunded_minor": 0,
+        "dispute_amount_minor": 12000,
+        "transitions": [
+          {"from_state": null, "to_state": "opened", "actor_role": "card_network", "at": "2026-10-01T09:00:00Z"},
+          {"from_state": "opened", "to_state": "under_review", "actor_role": "merchant", "at": "2026-10-02T10:00:00Z"},
+          {"from_state": "under_review", "to_state": "won", "actor_role": "card_network", "at": "2026-10-10T12:00:00Z"}
+        ],
+        "evidence": [
+          {"evidence_id": "ev_1", "kind": "proof_of_delivery", "submitted_at": "2026-10-02T10:00:00Z"}
+        ],
+        "evidence_considered": ["ev_1"],
+        "outcome": "won",
+        "chargeback_minor": 0,
+        "chargeback_fee_minor": 0
+      }
+    },
+    {
+      "case_id": "lost_without_compelling_evidence",
+      "expected_verdict": "valid",
+      "record": {
+        "dispute_id": "00000000-0000-4000-8000-000000000102",
+        "payment_id": "00000000-0000-4000-8000-000000000202",
+        "merchant_id": "00000000-0000-4000-8000-000000000301",
+        "network_reason_code": "10.4",
+        "currency": "USD",
+        "payment_amount_minor": 5000,
+        "refunded_minor": 0,
+        "dispute_amount_minor": 5000,
+        "transitions": [
+          {"from_state": null, "to_state": "opened", "actor_role": "card_network", "at": "2026-10-01T09:00:00Z"},
+          {"from_state": "opened", "to_state": "under_review", "actor_role": "merchant", "at": "2026-10-03T09:00:00Z"},
+          {"from_state": "under_review", "to_state": "lost", "actor_role": "ops_lead", "at": "2026-10-09T09:00:00Z"}
+        ],
+        "evidence": [
+          {"evidence_id": "ev_2", "kind": "customer_email", "submitted_at": "2026-10-03T09:00:00Z"}
+        ],
+        "evidence_considered": ["ev_2"],
+        "outcome": "lost",
+        "chargeback_minor": 5000,
+        "chargeback_fee_minor": 1500
+      }
+    },
+    {
+      "case_id": "open_dispute_in_review",
+      "expected_verdict": "valid",
+      "record": {
+        "dispute_id": "00000000-0000-4000-8000-000000000103",
+        "payment_id": "00000000-0000-4000-8000-000000000203",
+        "merchant_id": "00000000-0000-4000-8000-000000000301",
+        "network_reason_code": "13.3",
+        "currency": "EUR",
+        "payment_amount_minor": 8000,
+        "refunded_minor": 2000,
+        "dispute_amount_minor": 6000,
+        "transitions": [
+          {"from_state": null, "to_state": "opened", "actor_role": "card_network", "at": "2026-10-01T09:00:00Z"},
+          {"from_state": "opened", "to_state": "under_review", "actor_role": "merchant", "at": "2026-10-02T09:00:00Z"}
+        ],
+        "evidence": [
+          {"evidence_id": "ev_3", "kind": "product_description", "submitted_at": "2026-10-02T09:00:00Z"}
+        ],
+        "evidence_considered": [],
+        "outcome": null,
+        "chargeback_minor": 0,
+        "chargeback_fee_minor": 0
+      }
+    },
+    {
+      "case_id": "won_without_compelling_evidence",
+      "expected_verdict": "needs_review",
+      "record": {
+        "dispute_id": "00000000-0000-4000-8000-000000000104",
+        "payment_id": "00000000-0000-4000-8000-000000000204",
+        "merchant_id": "00000000-0000-4000-8000-000000000301",
+        "network_reason_code": "13.1",
+        "currency": "USD",
+        "payment_amount_minor": 9000,
+        "refunded_minor": 0,
+        "dispute_amount_minor": 9000,
+        "transitions": [
+          {"from_state": null, "to_state": "opened", "actor_role": "card_network", "at": "2026-10-01T09:00:00Z"},
+          {"from_state": "opened", "to_state": "under_review", "actor_role": "merchant", "at": "2026-10-02T09:00:00Z"},
+          {"from_state": "under_review", "to_state": "won", "actor_role": "card_network", "at": "2026-10-08T09:00:00Z"}
+        ],
+        "evidence": [
+          {"evidence_id": "ev_4", "kind": "customer_email", "submitted_at": "2026-10-02T09:00:00Z"}
+        ],
+        "evidence_considered": ["ev_4"],
+        "outcome": "won",
+        "chargeback_minor": 0,
+        "chargeback_fee_minor": 0
+      }
+    },
+    {
+      "case_id": "skipped_review_state",
+      "expected_verdict": "invalid",
+      "record": {
+        "dispute_id": "00000000-0000-4000-8000-000000000105",
+        "payment_id": "00000000-0000-4000-8000-000000000205",
+        "merchant_id": "00000000-0000-4000-8000-000000000301",
+        "network_reason_code": "13.1",
+        "currency": "USD",
+        "payment_amount_minor": 7000,
+        "refunded_minor": 0,
+        "dispute_amount_minor": 7000,
+        "transitions": [
+          {"from_state": null, "to_state": "opened", "actor_role": "card_network", "at": "2026-10-01T09:00:00Z"},
+          {"from_state": "opened", "to_state": "won", "actor_role": "card_network", "at": "2026-10-05T09:00:00Z"}
+        ],
+        "evidence": [],
+        "evidence_considered": [],
+        "outcome": "won",
+        "chargeback_minor": 0,
+        "chargeback_fee_minor": 0
+      }
+    },
+    {
+      "case_id": "lost_without_chargeback",
+      "expected_verdict": "invalid",
+      "record": {
+        "dispute_id": "00000000-0000-4000-8000-000000000106",
+        "payment_id": "00000000-0000-4000-8000-000000000206",
+        "merchant_id": "00000000-0000-4000-8000-000000000301",
+        "network_reason_code": "12.6.1",
+        "currency": "USD",
+        "payment_amount_minor": 4000,
+        "refunded_minor": 0,
+        "dispute_amount_minor": 4000,
+        "transitions": [
+          {"from_state": null, "to_state": "opened", "actor_role": "card_network", "at": "2026-10-01T09:00:00Z"},
+          {"from_state": "opened", "to_state": "under_review", "actor_role": "merchant", "at": "2026-10-02T09:00:00Z"},
+          {"from_state": "under_review", "to_state": "lost", "actor_role": "card_network", "at": "2026-10-06T09:00:00Z"}
+        ],
+        "evidence": [],
+        "evidence_considered": [],
+        "outcome": "lost",
+        "chargeback_minor": 0,
+        "chargeback_fee_minor": 0
+      }
+    },
+    {
+      "case_id": "evidence_ignored",
+      "expected_verdict": "invalid",
+      "record": {
+        "dispute_id": "00000000-0000-4000-8000-000000000107",
+        "payment_id": "00000000-0000-4000-8000-000000000207",
+        "merchant_id": "00000000-0000-4000-8000-000000000301",
+        "network_reason_code": "10.4",
+        "currency": "USD",
+        "payment_amount_minor": 6000,
+        "refunded_minor": 0,
+        "dispute_amount_minor": 6000,
+        "transitions": [
+          {"from_state": null, "to_state": "opened", "actor_role": "card_network", "at": "2026-10-01T09:00:00Z"},
+          {"from_state": "opened", "to_state": "under_review", "actor_role": "merchant", "at": "2026-10-02T09:00:00Z"},
+          {"from_state": "under_review", "to_state": "lost", "actor_role": "card_network", "at": "2026-10-07T09:00:00Z"}
+        ],
+        "evidence": [
+          {"evidence_id": "ev_7a", "kind": "3ds_authentication", "submitted_at": "2026-10-02T09:00:00Z"},
+          {"evidence_id": "ev_7b", "kind": "customer_email", "submitted_at": "2026-10-02T09:05:00Z"}
+        ],
+        "evidence_considered": ["ev_7b"],
+        "outcome": "lost",
+        "chargeback_minor": 6000,
+        "chargeback_fee_minor": 1500
+      }
+    },
+    {
+      "case_id": "dispute_exceeds_refundable",
+      "expected_verdict": "invalid",
+      "record": {
+        "dispute_id": "00000000-0000-4000-8000-000000000108",
+        "payment_id": "00000000-0000-4000-8000-000000000208",
+        "merchant_id": "00000000-0000-4000-8000-000000000301",
+        "network_reason_code": "13.6",
+        "currency": "USD",
+        "payment_amount_minor": 10000,
+        "refunded_minor": 4000,
+        "dispute_amount_minor": 10000,
+        "transitions": [
+          {"from_state": null, "to_state": "opened", "actor_role": "card_network", "at": "2026-10-01T09:00:00Z"}
+        ],
+        "evidence": [],
+        "evidence_considered": [],
+        "outcome": null,
+        "chargeback_minor": 0,
+        "chargeback_fee_minor": 0
+      }
+    },
+    {
+      "case_id": "unknown_reason_code",
+      "expected_verdict": "needs_review",
+      "record": {
+        "dispute_id": "00000000-0000-4000-8000-000000000109",
+        "payment_id": "00000000-0000-4000-8000-000000000209",
+        "merchant_id": "00000000-0000-4000-8000-000000000301",
+        "network_reason_code": "99.9",
+        "currency": "USD",
+        "payment_amount_minor": 3000,
+        "refunded_minor": 0,
+        "dispute_amount_minor": 3000,
+        "transitions": [
+          {"from_state": null, "to_state": "opened", "actor_role": "card_network", "at": "2026-10-01T09:00:00Z"}
+        ],
+        "evidence": [],
+        "evidence_considered": [],
+        "outcome": null,
+        "chargeback_minor": 0,
+        "chargeback_fee_minor": 0
+      }
+    }
+  ]
+}

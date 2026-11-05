@@ -1,0 +1,15 @@
+{
+  "case_id": "isolation_user_on_merchant_route",
+  "sample_query": "SQ4",
+  "route": "/v1/assistant/explain-settlement",
+  "principal": "sq2_user",
+  "body": {"question": "Why is my October payout lower than expected?", "period": "2026-10"},
+  "expect": {
+    "status": 403,
+    "fields": {},
+    "evidence_ref_prefixes": [],
+    "required_terms": [],
+    "tool_calls": []
+  },
+  "thresholds": {}
+}

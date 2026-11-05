@@ -1,0 +1,15 @@
+{
+  "case_id": "sq4_settlement_gap",
+  "sample_query": "SQ4",
+  "route": "/v1/assistant/explain-settlement",
+  "principal": "sq4_merchant",
+  "body": {"question": "Why is my October payout lower than expected?", "period": "2026-10"},
+  "expect": {
+    "status": 200,
+    "fields": {"period": "2026-10", "verified": true},
+    "evidence_ref_prefixes": ["statement:2026-10", "line:refunds", "line:chargebacks", "line:fx", "contract:", "fx:", "crosscheck:2026-10"],
+    "required_terms": [],
+    "tool_calls": ["explain_settlement"]
+  },
+  "thresholds": {"faithfulness": 0.9, "answer_relevancy": 1.0, "evidence_ref_coverage": 1.0}
+}

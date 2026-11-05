@@ -1,0 +1,17 @@
+{
+  "case_id": "sq3_card_testing",
+  "sample_query": "SQ3",
+  "route": "/v1/assistant/investigate-fraud",
+  "principal": "sq3_merchant",
+  "body": {
+    "question": "We're seeing a series of tiny card payments — is this card testing, and what should we do?"
+  },
+  "expect": {
+    "status": 200,
+    "fields": {"intent": "card_testing", "cause_label": "card_testing"},
+    "evidence_ref_prefixes": ["episode:", "payment:"],
+    "required_terms": [],
+    "tool_calls": ["analyze_fraud"]
+  },
+  "thresholds": {"faithfulness": 0.9, "answer_relevancy": 1.0, "evidence_ref_coverage": 1.0}
+}

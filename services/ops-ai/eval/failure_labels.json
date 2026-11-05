@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "reason_catalog": {
+    "Issuer declined: do_not_honor": "do_not_honor",
+    "Insufficient funds on card": "insufficient_funds",
+    "Card expired": "expired_card",
+    "Incorrect CVC": "incorrect_cvc",
+    "Issuer unavailable (timeout)": "issuer_unavailable",
+    "Issuer unavailable (timeout) for BIN 400000": "issuer_unavailable",
+    "Flagged by fraud model: velocity anomaly": "fraud_flagged",
+    "Flagged by fraud model: device mismatch": "fraud_flagged",
+    "Flagged by fraud model: unusual geography": "fraud_flagged",
+    "Flagged by fraud model: card-testing pattern (micro-amount burst)": "fraud_flagged"
+  },
+  "cases": [
+    {"text": "Issuer unavailable, please retry later", "expected": "issuer_unavailable"},
+    {"text": "Gateway timeout while waiting for the issuer", "expected": "issuer_unavailable"},
+    {"text": "Issuer timeout (response code 91)", "expected": "issuer_unavailable"},
+    {"text": "Authorization request timed out at the issuer", "expected": "issuer_unavailable"},
+    {"text": "issuer down / not responding", "expected": "issuer_unavailable"},
+    {"text": "Response code 05 do_not_honor from issuer", "expected": "do_not_honor"},
+    {"text": "Declined by bank: DO_NOT_HONOR", "expected": "do_not_honor"},
+    {"text": "Insufficient funds", "expected": "insufficient_funds"},
+    {"text": "Insufficient funds (response code 51)", "expected": "insufficient_funds"},
+    {"text": "Customer has insufficient funds on the card", "expected": "insufficient_funds"},
+    {"text": "Not enough balance on card", "expected": "insufficient_funds"},
+    {"text": "Card is expired", "expected": "expired_card"},
+    {"text": "Card has expired", "expected": "expired_card"},
+    {"text": "Expired card (exp 09/26)", "expected": "expired_card"},
+    {"text": "The card expiry date has passed", "expected": "expired_card"},
+    {"text": "CVC check failed", "expected": "incorrect_cvc"},
+    {"text": "Invalid CVC", "expected": "incorrect_cvc"},
+    {"text": "Wrong CVC entered", "expected": "incorrect_cvc"},
+    {"text": "Security code (CVV) mismatch", "expected": "incorrect_cvc"},
+    {"text": "Blocked: suspected fraud", "expected": "fraud_flagged"},
+    {"text": "Fraud screening rejected the payment", "expected": "fraud_flagged"},
+    {"text": "Risk engine blocked the payment", "expected": "fraud_flagged"},
+    {"text": "Merchant category not allowed for this card", "expected": "other"},
+    {"text": "Currency not supported by acquirer", "expected": "other"},
+    {"text": "Duplicate transaction rejected", "expected": "other"},
+    {"text": "Amount exceeds the card's per-transaction limit", "expected": "other"}
+  ]
+}
