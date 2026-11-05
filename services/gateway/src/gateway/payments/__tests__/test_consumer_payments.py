@@ -129,12 +129,15 @@ def _pay(
     env: Env,
     user_id: uuid.UUID,
     body: dict[str, object] | None = None,
-    key: str | None = None,
+    key: str | bytes | None = None,
     send_key: bool = True,
 ) -> Response:
-    headers = _user_auth(env, user_id)
+    headers: dict[bytes, bytes] = {
+        name.encode(): value.encode() for name, value in _user_auth(env, user_id).items()
+    }
     if send_key:
-        headers["Idempotency-Key"] = key or uuid.uuid4().hex
+        raw_key = key or uuid.uuid4().hex
+        headers[b"Idempotency-Key"] = raw_key.encode() if isinstance(raw_key, str) else raw_key
     response: Response = env.client.post(
         "/v1/me/payments", json=_pay_body(env) if body is None else body, headers=headers
     )
@@ -354,10 +357,12 @@ def test_paying_without_an_idempotency_key_returns_400_and_creates_nothing(
 
 
 @pytest.mark.parametrize(
-    "key", ["has space", "tab\tkey", "x" * 201, "ключ"], ids=["space", "control", "too-long", "non-ascii"]
+    "key",
+    ["has space", "tab\tkey", "x" * 201, "ключ".encode()],
+    ids=["space", "control", "too-long", "non-ascii"],
 )
 def test_paying_with_an_invalid_idempotency_key_returns_400(
-    session_factory: sessionmaker[Session], clock: FixedClock, private_pem: str, key: str
+    session_factory: sessionmaker[Session], clock: FixedClock, private_pem: str, key: str | bytes
 ) -> None:
     # Arrange
     env = _env(session_factory, clock, private_pem)
