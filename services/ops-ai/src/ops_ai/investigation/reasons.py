@@ -247,6 +247,12 @@ def _group_rows(rows: list[tuple[uuid.UUID, str | None]], tool_llm: ToolCallingL
     return ReasonBreakdown(total_failed=total, groups=tuple(groups))
 
 
+def _release_before_llm(session: Session, tool_llm: ToolCallingLlm | None) -> None:
+    """No connection may sit idle in a transaction while an LLM HTTP call runs."""
+    if tool_llm is not None:
+        session.rollback()
+
+
 def failure_reason_groups(
     session: Session, query: FailureQuery, tool_llm: ToolCallingLlm | None
 ) -> ReasonBreakdown:
@@ -263,6 +269,7 @@ def failure_reason_groups(
         statement = statement.where(PaymentFact.currency == query.currency)
     statement = statement.order_by(PaymentFact.occurred_at.desc(), PaymentFact.payment_id)
     rows = [(row.payment_id, row.decline_code) for row in session.execute(statement)]
+    _release_before_llm(session, tool_llm)
     return _group_rows(rows, tool_llm)
 
 
@@ -280,4 +287,5 @@ def transfer_reason_groups(
         .order_by(TransferFact.decided_at.desc(), TransferFact.transfer_id)
     )
     rows = [(row.transfer_id, row.reason_code) for row in session.execute(statement)]
+    _release_before_llm(session, tool_llm)
     return _group_rows(rows, tool_llm)

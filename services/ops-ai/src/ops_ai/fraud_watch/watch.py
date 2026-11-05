@@ -7,6 +7,7 @@ from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from ops_ai.alerts import raise_ops_alert
 from ops_ai.clock import Clock
 from ops_ai.fraud_watch.analysis import CardTestingEpisode, analyze_fraud
 from ops_ai.fraud_watch.models import FraudAlert
@@ -80,6 +81,17 @@ def watch_payment(session: Session, clock: Clock, event: PaymentEventV1) -> uuid
             created_at=clock(),
         )
         .on_conflict_do_nothing(index_elements=["source_key"])
+    )
+    raise_ops_alert(
+        session,
+        clock,
+        source_key=window_key,
+        kind=CARD_TESTING_KIND,
+        severity="high",
+        merchant_id=event.merchant_id,
+        fraud_alert_id=inserted,
+        title=TICKET_TITLE,
+        body=_ticket_reason(episode),
     )
     logger.info(
         "fraud alert raised alert_id=%s merchant_id=%s payment_count=%d",

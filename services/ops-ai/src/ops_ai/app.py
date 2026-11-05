@@ -15,11 +15,14 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from ops_ai.assistant.llm_port import LlmPort
+from ops_ai.assistant.routes import create_assistant_router
 from ops_ai.assistant.service import AnswerMode, ask
+from ops_ai.assistant.tool_calling import ToolCallingLlm
 from ops_ai.auth import InvalidTokenError, verify_token
 from ops_ai.clock import Clock
 from ops_ai.fraud_watch import FraudAnalysis
 from ops_ai.fraud_watch.service import FraudCause, FraudIntent, investigate_fraud
+from ops_ai.investigation.playbook import Playbook, load_playbook
 from ops_ai.investigation.service import CauseLabel, Intent, investigate
 from ops_ai.investigation.tools import FailureAggregate
 from ops_ai.memory.routes import build_memory_router
@@ -56,6 +59,8 @@ class OpsAiAppDeps:
     embedder: Embedder = field(default_factory=LocalHashEmbedder)
     redis: Redis | None = None
     """Set → the B10 session and memory routes are mounted (docs/specs/memory.md)."""
+    tool_llm: ToolCallingLlm | None = None
+    playbook: Playbook = field(default_factory=load_playbook)
 
 
 class AskRequest(BaseModel):
@@ -495,6 +500,7 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
             )
         )
 
+    app.include_router(create_assistant_router(deps, merchant_scope, principal_from_token))
     app.include_router(create_ticket_router(deps.session_factory, deps.clock, merchant_scope))
     return app
 
