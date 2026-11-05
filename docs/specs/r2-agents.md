@@ -1,0 +1,283 @@
+# R2 agentic items — test specification (11-05)
+
+Covers R2-1 (multi-agent orchestration), R2-4 (incident reranking), R2-5 (bulk token optimisation), R2-6
+(agent-to-agent messages, SQ2 by fraud + compliance + settlement) and R2-7 (feedback loop). All code lives in
+`services/ops-ai/src/ops_ai/{agents,bulk,feedback}/` and `ops_ai/search/rerank.py`. Every tool an agent calls is
+read-only; only the audit trail, feedback, scores and rule versions are written. The scope always comes from the
+token, never from the body or from model output.
+
+## 0. Migration `c7e3a1d9b4f2` (revises `b12c4e7a9f31`), schema `ops_ai`
+
+| table | columns |
+|---|---|
+| `agent_messages` | `message_id` UUID PK, `correlation_id` UUID (indexed), `sequence` int, `sender` varchar(32), `recipient` varchar(32), `intent` varchar(48), `payload` JSONB, `evidence_refs` JSONB (list of str), `merchant_id` UUID null (indexed), `user_id` UUID null, `created_at` timestamptz. Unique (`correlation_id`, `sequence`). |
+| `kyc_profiles` | `user_id` UUID PK, `kyc_status` varchar(16) CHECK in (`verified`,`pending`,`failed`), `country` varchar(2), `ingest_source` varchar(16) |
+| `feedback` | `feedback_id` UUID PK, `merchant_id` UUID, `target_kind` varchar(16) CHECK in (`alert`,`answer`,`incident`), `target_id` varchar(128), `verdict` varchar(16) CHECK in (`true_positive`,`false_positive`,`helpful`,`not_helpful`), `comment` text null, `created_at`. Unique (`merchant_id`,`target_kind`,`target_id`). |
+| `fraud_rule_versions` | PK (`merchant_id` UUID, `version` int), `steps` int CHECK 0..5, `min_micro_payments` int, `min_micro_share` float, `min_distinct_cards` int, `reason` varchar(64), `feedback_id` UUID null, `created_at` |
+| `incident_feedback_scores` | PK (`merchant_id` UUID, `incident_id` varchar(32)), `helpful` int default 0, `not_helpful` int default 0, `updated_at` |
+
+Downgrade drops all five. Models: `ops_ai/agents/models.py` (`AgentMessageRecord`, `KycProfile`),
+`ops_ai/feedback/models.py` (`Feedback`, `FraudRuleVersion`, `IncidentFeedbackScore`), registered in
+`ops_ai/schema.py`.
+
+## 1. Feedback and fraud thresholds — `ops_ai/feedback/` (R2-7)
+
+`thresholds.py`
+```python
+MAX_STEPS = 5
+@dataclass(frozen=True)
+class RuleVersion:
+    version: int            # 0 = shipped baseline (no row)
+    steps: int
+    min_micro_payments: int
+    min_micro_share: float
+    min_distinct_cards: int
+    reason: str             # "baseline" for version 0
+    feedback_id: uuid.UUID | None
+    created_at: datetime | None   # None for version 0
+BASELINE: RuleVersion  # version 0, steps 0, 10, 0.8, 3, "baseline", None, None
+def thresholds_for_steps(steps: int) -> tuple[int, float, int]
+    # steps clamped to [0, MAX_STEPS]; (10 + 2*steps, round(min(0.8 + 0.03*steps, 0.95), 2), 3 + steps)
+    # steps 5 -> (20, 0.95, 8). Never looser than the baseline.
+def active_rule_version(session, scope: Scope) -> RuleVersion   # newest version row of the merchant, else BASELINE
+def rule_history(session, scope: Scope) -> list[RuleVersion]    # the merchant's rows, newest first (no baseline)
+def is_flagged(episode: CardTestingEpisode, rule: RuleVersion) -> bool
+    # micro_payments >= min_micro_payments and micro_share >= min_micro_share
+    # and (distinct_cards is None or distinct_cards >= min_distinct_cards)
+def revert_rule(session, scope, clock, version: int) -> RuleVersion | None
+    # None when version > 0 and the merchant has no such row. Otherwise inserts a NEW row
+    # (active.version + 1) with the target's steps/values (version 0 -> baseline values),
+    # reason f"revert:v{version}", feedback_id None, created_at clock(). Returns the new row. Does not commit.
+```
+Thresholds are per merchant: one merchant's feedback never changes another merchant's rules.
+
+`service.py`
+```python
+TargetKind = Literal["alert", "answer", "incident"]
+Verdict = Literal["true_positive", "false_positive", "helpful", "not_helpful"]
+VERDICTS_BY_KIND = {"alert": ("true_positive", "false_positive"),
+                    "answer": ("helpful", "not_helpful"), "incident": ("helpful", "not_helpful")}
+@dataclass(frozen=True) class IncidentScore: incident_id: str; helpful: int; not_helpful: int
+class FeedbackRejectedError(Exception): reason: Literal["verdict_mismatch", "unknown_target", "duplicate"]
+@dataclass(frozen=True)
+class FeedbackResult:
+    feedback_id: uuid.UUID; target_kind: TargetKind; target_id: str; verdict: Verdict
+    rule_version: RuleVersion | None      # the new row when this feedback changed the thresholds
+    incident_score: IncidentScore | None  # the updated counts for incident feedback
+def record_feedback(session, scope, clock, target_kind, target_id, verdict, comment: str | None) -> FeedbackResult
+def incident_scores(session, scope, incident_ids: Sequence[str]) -> dict[str, IncidentScore]  # only ids with a row
+```
+`record_feedback` (does not commit; checks in this order):
+1. verdict not in `VERDICTS_BY_KIND[target_kind]` → `verdict_mismatch`.
+2. `alert`: `target_id` must be a UUID of a `fraud_alerts` row of the scope merchant, else `unknown_target`.
+   `incident`: an `incidents` row whose `merchant_id` is the scope merchant or NULL, else `unknown_target`.
+   `answer`: any id (an opaque answer / correlation id).
+3. existing feedback for (merchant, kind, target_id) → `duplicate` (one vote per target: bounded influence).
+4. Effects: `false_positive` → steps + 1, `true_positive` → steps − 1, clamped to [0, MAX_STEPS], starting from the
+   active version's steps. A new version row (active.version + 1, reason `feedback:false_positive` /
+   `feedback:true_positive`, `feedback_id` set) is written only when the steps change; `rule_version` is then that row,
+   else None. `helpful` / `not_helpful` on an incident upserts `incident_feedback_scores` (+1 on the matching
+   counter). Answer feedback is stored only.
+
+## 2. Incident reranking — `ops_ai/search/rerank.py` (R2-4)
+
+```python
+RECENCY_HALF_LIFE_DAYS = 30.0
+WEIGHT_RELEVANCE, WEIGHT_RECENCY, WEIGHT_EFFECTIVENESS = 0.5, 0.2, 0.3
+REOPEN_PENALTY = 0.5
+@dataclass(frozen=True)
+class IncidentCandidate:
+    incident_id: str; title: str; root_cause: str; fix_applied: str
+    started_at: datetime; resolved_at: datetime | None; recurrence_within_7d: bool
+    relevance: float; helpful: int = 0; not_helpful: int = 0
+@dataclass(frozen=True)
+class RankedIncident:
+    incident_id: str; title: str; root_cause: str; fix_applied: str
+    started_at: datetime; resolved_at: datetime | None; recurrence_within_7d: bool
+    relevance: float      # candidate relevance / max relevance of the batch (0.0 when the max is 0)
+    recency: float; effectiveness: float; score: float
+def effectiveness(resolved: bool, recurrence_within_7d: bool, helpful: int, not_helpful: int) -> float
+    # 0.0 when not resolved; else (helpful + 1) / (helpful + not_helpful + 2), times REOPEN_PENALTY when it recurred
+def recency(at: datetime, now: datetime) -> float   # 0.5 ** (max(age_days, 0) / RECENCY_HALF_LIFE_DAYS)
+def rerank_incidents(candidates: Sequence[IncidentCandidate], now: datetime) -> list[RankedIncident]
+    # recency of resolved_at, or started_at when unresolved;
+    # score = 0.5*relevance + 0.2*recency + 0.3*effectiveness; best score first, ties by incident_id ascending
+def search_incidents_reranked(session, scope, query, now, embedder, limit=5) -> list[RankedIncident]
+```
+`search_incidents_reranked` is hybrid first, rerank second: a keyword leg (FTS `websearch_to_tsquery` over the
+`incidents` the scope can see, by `ts_rank`, up to 30) and a vector leg (the embedder over the query and each visible
+incident's `title root_cause fix_applied`, newest 200 by `started_at`, cosine ≥ 0.4), fused with
+`reciprocal_rank_fusion`; the fused score is the candidate relevance, the merchant's `incident_feedback_scores` fill
+helpful / not_helpful, then `rerank_incidents`, top `limit`. Another merchant's incidents never appear; an
+unavailable embedder degrades to the keyword leg.
+
+## 3. Bulk transaction analysis — `ops_ai/bulk/` (R2-5)
+
+`tokens.py`: `count_tokens(text: str) -> int` = `len(re.findall(r"\w+|[^\w\s]", text))` (deterministic, no
+tokenizer dependency).
+
+`analysis.py`
+```python
+DEFAULT_TOKEN_BUDGET = 800; DEFAULT_CHUNK_TOKENS = 2000; TOP_ITEMS = 5
+@dataclass(frozen=True)
+class TxRow: payment_id: uuid.UUID; amount_minor: int; currency: str; method: str; state: str
+             decline_code: str | None; card_bin: str | None; occurred_at: datetime
+def render_row(row: TxRow) -> str
+    # f"{payment_id} {occurred_at.isoformat()} {method} {state} {amount_minor} {currency} bin={card_bin or '-'} code={decline_code or '-'}"
+def naive_prompt(rows: Sequence[TxRow]) -> str   # "Transactions:\n" + one render_row per line
+@dataclass(frozen=True)
+class ChunkSummary:
+    rows: int
+    amount_by_currency: dict[str, int]
+    by_state: dict[str, int]; by_method: dict[str, int]
+    decline_codes: dict[str, int]          # failed rows (state in declined/failed) with a code
+    failed_by_bin: dict[str, int]          # failed rows with a BIN
+def chunk_rows(rows, max_tokens_per_chunk: int) -> list[list[TxRow]]
+    # greedy, order kept; a chunk holds rows while the sum of count_tokens(render_row) stays <= the max,
+    # a single row larger than the max is its own chunk; [] for no rows; ValueError when max <= 0
+def summarize_chunk(rows: Sequence[TxRow]) -> ChunkSummary           # map
+def merge_summaries(summaries: Sequence[ChunkSummary]) -> ChunkSummary  # reduce: counter-wise sums
+def render_summary(summary: ChunkSummary, top_items: int = TOP_ITEMS) -> str
+    # rows, amount per currency, by state, by method, top `top_items` decline codes and failing BINs
+    # (count desc, then key asc); top_items 0 leaves the two top lists out
+@dataclass(frozen=True)
+class BulkAnalysis:
+    transactions: int; chunks: int; naive_tokens: int; optimized_tokens: int
+    reduction: float      # 1 - optimized/naive, 0.0 when naive is 0
+    within_budget: bool; summary: ChunkSummary; prompt: str
+def analyze_bulk(rows, token_budget=DEFAULT_TOKEN_BUDGET, chunk_tokens=DEFAULT_CHUNK_TOKENS) -> BulkAnalysis
+    # map-reduce; prompt = render_summary(merged, k) for the largest k in TOP_ITEMS..0 whose tokens fit the budget
+    # (k = 0 when none fits); within_budget = optimized_tokens <= token_budget
+```
+`service.py`: `MAX_BULK_ROWS = 20000`; `load_rows(session, scope, start, end) -> list[TxRow]` (the merchant's
+`payment_facts` in [start, end), oldest first, at most MAX_BULK_ROWS);
+`analyze_transactions(session, scope, start, end, llm, token_budget) -> BulkResult` with `analysis`, `mode`, `text`,
+`model`; the LLM gets one evidence item `EvidenceItem(ref="bulk:summary", summary=analysis.prompt)` and never the
+raw rows; `LlmUnavailableError` → `t2_fallback`, text None.
+
+## 4. Agents and messages — `ops_ai/agents/` (R2-1, R2-6)
+
+`messages.py`
+```python
+AgentName = Literal["supervisor", "fraud", "settlement", "dispute", "compliance"]
+MessageIntent = Literal["investigate", "assess_transfer", "check_kyc", "verify_funds", "funds_verified",
+    "check_disputes", "chargeback_impact", "chargeback_impact_result", "finding", "root_cause"]
+JsonScalar = str | int | float | bool | None
+@dataclass(frozen=True)
+class AgentMessage:
+    message_id: uuid.UUID; correlation_id: uuid.UUID; sequence: int
+    sender: AgentName; recipient: AgentName; intent: MessageIntent
+    payload: Mapping[str, JsonScalar]; evidence_refs: tuple[str, ...]; created_at: datetime
+def message_to_json(message) -> str; def message_from_json(raw: str) -> AgentMessage   # round-trip equal
+```
+`bus.py`
+```python
+MAX_MESSAGES = 16
+class MessageTransport(Protocol): def publish(self, message: AgentMessage) -> None: ...
+class RedisStreamTransport:   # optional transport: XADD <stream> MAXLEN ~ maxlen  {"message": message_to_json(m)}
+    def __init__(self, redis: Redis, stream: str = "ops_ai:agent_messages", maxlen: int = 10000)
+class MessageBudgetExceededError(Exception)
+class InProcessBus:
+    def __init__(self, correlation_id, clock, max_messages=MAX_MESSAGES, transport: MessageTransport | None = None)
+    def send(self, sender, recipient, intent, payload, evidence_refs=()) -> AgentMessage
+        # sequence 1, 2, ...; queued FIFO; published to the transport when set;
+        # the (max_messages + 1)-th send raises MessageBudgetExceededError and is not queued
+    def next_message(self) -> AgentMessage | None   # FIFO, None when empty
+    @property def history(self) -> tuple[AgentMessage, ...]   # every sent message in order
+def persist_messages(session, messages, merchant_id: uuid.UUID | None, user_id: uuid.UUID | None) -> int
+def load_messages(session, scope: Scope, correlation_id) -> list[AgentMessage]   # by sequence; [] for another merchant
+```
+`tools.py`: per-agent allowlists; a tool outside the list raises `ToolNotAllowedError` before any query.
+```python
+AGENT_TOOLS: dict[AgentName, frozenset[str]] = {
+    "supervisor": frozenset(),
+    "fraud": frozenset({"analyze_fraud", "fraud_rule_version", "transfer_status"}),
+    "settlement": frozenset({"explain_settlement", "transfer_status"}),
+    "dispute": frozenset({"dispute_tickets", "explain_settlement"}),
+    "compliance": frozenset({"kyc_profile", "transfer_status"}),
+}
+class ToolNotAllowedError(Exception)
+class AgentToolbox:
+    def __init__(self, agent: AgentName, session: Session)
+    tool_calls: list[ToolCall]  # every allowed call, in order (ops_ai.investigation.service.ToolCall)
+    def analyze_fraud(self, scope, start, end) -> FraudAnalysis
+    def fraud_rule_version(self, scope) -> RuleVersion
+    def explain_settlement(self, scope, period: str | None) -> SettlementStatement | None
+    def dispute_tickets(self, scope) -> DisputeTickets   # counts of the merchant's source='dispute' tickets by status
+    def transfer_status(self, scope: UserScope, transfer_id) -> TransferStatus | None
+    def kyc_profile(self, scope: UserScope) -> KycProfileView | None
+```
+`kyc.py`: `KycProfileView(user_id, kyc_status, country)`; `get_kyc_profile(session, scope: UserScope)`;
+`seed_kyc_profiles(session_factory, log: ScenarioLog) -> int` — one row per p2p sender (first record wins,
+`ingest_source "seed"`, ON CONFLICT DO NOTHING, re-run returns 0). `python -m ops_ai.agents` seeds them and prints
+`kyc_profiles: <n> inserted`; the compose `seed` service runs it.
+
+`AgentContribution(agent: AgentName, status: Literal["finding", "no_finding"], summary: str,
+evidence: tuple[EvidenceItem, ...], tool_calls: tuple[ToolCall, ...])` — one per agent that handled a message.
+
+### 4.1 Merchant investigation (R2-1) — `supervisor.py`
+`plan_agents(question) -> tuple[AgentName, ...]`: keywords (case-insensitive) — fraud: `fraud`, `card testing`,
+`card-testing`, `micro`, `suspicious`; settlement: `payout`, `settlement`, `fee`, `deduct`; dispute: `dispute`,
+`chargeback`. Order fraud, settlement, dispute; none matched → all three.
+
+`investigate_with_agents(session, scope: Scope, question, now, llm, transport=None) -> AgentInvestigation`:
+the supervisor sends `investigate` to each planned agent, then delivers messages FIFO until the queue is empty or the
+budget is hit (`truncated=True`).
+- fraud on `investigate`: `analyze_fraud` over [now − 24 h, now) and `fraud_rule_version`; an episode is flagged by
+  `is_flagged(episode, active rule)`. Flagged → `finding` (evidence `episode:<first_payment_id>`, summary names the rule
+  version) and a `check_disputes` to dispute; none → `no_finding`. Sends `finding` to supervisor.
+- dispute on `investigate` or `check_disputes` (only the first is worked): `dispute_tickets`; sends
+  `chargeback_impact` to settlement. On `chargeback_impact_result`: contribution (`finding` when there are dispute
+  tickets or chargebacks, evidence `disputes:<merchant_id>`), `finding` to supervisor.
+- settlement on `investigate`: `explain_settlement(latest)`; `finding` when gap ≠ 0, evidence `statement:<period>`;
+  none → `no_finding`. On `chargeback_impact`: reads the same statement and replies `chargeback_impact_result` with
+  `chargebacks_minor`, `chargeback_fees_minor`, `period` (0 / None without a statement).
+- `AgentInvestigation(correlation_id, plan, contributions, messages, finding, evidence, tool_calls, truncated, mode,
+  text, model)`; `finding` = the contribution summaries joined in plan order; the LLM narrates the combined evidence
+  (`LlmUnavailableError` → `t2_fallback`). Messages are persisted with the merchant id.
+
+### 4.2 Transfer root cause (R2-6, SQ2) — `rca.py`
+`investigate_transfer_rca(session, scope: UserScope, question, transfer_id, now, llm, transport=None)
+-> TransferRca | None` (None when the scope has no such transfer; same lookup as `get_payment_status`).
+Message trail for a failed transfer, exactly:
+
+| seq | sender → recipient | intent | payload keys |
+|---|---|---|---|
+| 1 | supervisor → fraud | assess_transfer | transfer_id |
+| 2 | fraud → compliance | check_kyc | transfer_id, fraud_hold (false) |
+| 3 | fraud → supervisor | finding | fraud_hold |
+| 4 | compliance → settlement | verify_funds | transfer_id |
+| 5 | settlement → compliance | funds_verified | balance_covered_amount |
+| 6 | compliance → supervisor | root_cause | cause_code, remediation_owner, kyc_status, kyc_tier, cross_border |
+
+Not a failed transfer → only messages 1 and 3 (`fraud_hold` false) and `cause_code "not_declined"`. A raw `flagged`
+status (fraud hold) is never revealed: it is treated like any non-failed transfer. No payload or evidence carries
+`rule_id` or `reason_code`. `TransferRca(correlation_id, cause_code, remediation_owner, contributions (fraud,
+compliance, settlement), messages, suggested_fixes, evidence, truncated, mode, text, model)`; cause from
+`classify_transfer`; fix = the KYC tier upgrade when the next tier's limit covers the amount (as
+`investigate_transfer`). Planted SQ2 → `cross_border_limit_for_kyc_tier`, owner `sender`, balance covered.
+Messages are persisted with the user id.
+
+## 5. Routes (registered in `create_app`)
+All JSON, `Cache-Control: no-store` on agent / feedback / bulk / search responses, 401/403 as the other routes.
+- `POST /v1/agents/investigate` (merchant) `{question}` → `{correlation_id, plan, finding, contributions:[{agent,
+  status, summary, evidence:[{ref, summary}], tool_calls:[{name, args}]}], messages:[{sequence, sender, recipient,
+  intent, payload, evidence_refs}], evidence, truncated, mode, text, model}`.
+- `GET /v1/agents/messages/{correlation_id}` (merchant) → `{messages:[...]}`; unknown or another merchant's → 404.
+- `POST /v1/agents/transfer-rca` (user) `{question, transfer_id?}` (extra fields 422) → `{correlation_id,
+  cause_code, remediation_owner, contributions, messages, suggested_fixes, evidence, truncated, mode, text, model}`;
+  missing / another sender's transfer → 404 `{"detail": "transfer not found"}`.
+- `POST /v1/incidents/search` (merchant) `{query (1..500), limit (1..20, default 5)}` → `{results:[{incident_id,
+  title, root_cause, fix_applied, resolved_at, recurrence_within_7d, relevance, recency, effectiveness, score}]}`.
+- `POST /v1/bulk/analyze` (merchant) `{start, end, token_budget (100..4000, default 800)}`; end ≤ start or a span over
+  31 days → 422 → `{transactions, chunks, naive_tokens, optimized_tokens, reduction, within_budget, prompt, mode,
+  text, model}`.
+- `POST /v1/feedback` (merchant) `{target_kind, target_id (1..128), verdict, comment? (≤500)}` → 201 `{feedback_id,
+  target_kind, target_id, verdict, rule_version: RuleVersionOut | null, incident_score: {incident_id, helpful,
+  not_helpful} | null}`; verdict_mismatch → 422 `{"detail": "verdict does not match target"}`; unknown_target → 404
+  `{"detail": "target not found"}`; duplicate → 409 `{"detail": "feedback already recorded"}`.
+- `GET /v1/feedback/fraud-rules` (merchant) → `{active: RuleVersionOut, history: [RuleVersionOut]}`;
+  `RuleVersionOut = {version, steps, min_micro_payments, min_micro_share, min_distinct_cards, reason, feedback_id,
+  created_at}`.
+- `POST /v1/feedback/fraud-rules/revert` (merchant) `{version (>= 0)}` → 201 RuleVersionOut; unknown → 404
+  `{"detail": "rule version not found"}`.
