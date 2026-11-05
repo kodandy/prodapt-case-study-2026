@@ -1,7 +1,7 @@
 DC := docker compose
 RUN := $(DC) run --rm dev
 
-.PHONY: up down build sync lint fmt type test migrate migrate-check ci demo demo-down web-install web-ci web-up web-smoke web-reresolve-check web-merchant-key docs-diagram
+.PHONY: up down build sync lint fmt type test eval migrate migrate-check ci demo demo-down web-install web-ci web-up web-smoke web-reresolve-check web-merchant-key docs-diagram
 
 up:
 	$(DC) up -d --wait postgres redis
@@ -43,7 +43,15 @@ migrate-check:
 test:
 	$(RUN) uv run --frozen pytest
 
-ci: up sync lint type migrate-check test web-ci
+# R2-3 / P0-15 gate: golden SQ1-SQ4 E2E, custom metrics, cross-tenant leakage and judge goldens, then the
+# report table. Any failed gate (one leak is enough) fails the target. LLM-judged metrics are reported skipped.
+EVAL_REPORT := /tmp/eval-report.json
+eval:
+	$(RUN) sh -c 'set -e; EVAL_REPORT_PATH=$(EVAL_REPORT) uv run --frozen pytest -q \
+	  services/ops-ai/src/ops_ai/evaluation services/ops-ai/src/ops_ai/judge; \
+	  uv run --frozen python -m ops_ai.evaluation show $(EVAL_REPORT)'
+
+ci: up sync lint type migrate-check test eval web-ci
 
 # runs every service from the app image, then the end-to-end walkthrough (no .env, no OPENAI_API_KEY needed)
 demo:

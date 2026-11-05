@@ -1,0 +1,23 @@
+{
+  "case_id": "sq2_cross_border_limit",
+  "sample_query": "SQ2",
+  "route": "/v1/assistant/investigate-transfer",
+  "principal": "sq2_user",
+  "body": {
+    "question": "My international transfer was declined even though I had enough money — what triggered it?"
+  },
+  "expect": {
+    "status": 200,
+    "fields": {
+      "cause_code": "cross_border_limit_for_kyc_tier",
+      "remediation_owner": "sender",
+      "balance_covered_amount": true,
+      "transfer.amount_minor": 180000,
+      "transfer.currency": "USD"
+    },
+    "evidence_ref_prefixes": ["transfer:", "balance:", "limit:"],
+    "required_terms": ["tier 2"],
+    "tool_calls": ["get_payment_status"]
+  },
+  "thresholds": {"faithfulness": 0.9, "answer_relevancy": 1.0, "evidence_ref_coverage": 1.0}
+}
