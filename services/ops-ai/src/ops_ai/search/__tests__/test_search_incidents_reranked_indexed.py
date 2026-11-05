@@ -295,3 +295,26 @@ def test_an_unavailable_embedder_still_returns_the_indexed_keyword_hits(
     # Assert
     assert _ids(ranked) == ["INC-MATCH"]
     assert ranked[0].relevance == pytest.approx(1.0, abs=TOLERANCE)
+
+
+def test_an_own_incident_whose_only_document_belongs_to_another_merchant_is_still_found(
+    session_factory: sessionmaker[Session],
+) -> None:
+    # Arrange: the document of INC-OWN is mis-owned, so hybrid_search cannot return it for this scope
+    _seed_incident(session_factory, "INC-OWN", MERCHANT)
+    with session_factory.begin() as session:
+        upsert_search_document(
+            session,
+            kind=INCIDENT_KIND,
+            ref_id=incident_ref_id("INC-OWN"),
+            merchant_id=OTHER_MERCHANT,
+            title=TITLE,
+            body=f"{ROOT_CAUSE} Fix: {FIX_APPLIED}",
+            occurred_at=TEST_NOW - timedelta(days=3),
+        )
+
+    # Act
+    ranked = _search(session_factory)
+
+    # Assert
+    assert _ids(ranked) == ["INC-OWN"]
