@@ -195,6 +195,65 @@ Same auth as `/ask` (Bearer merchant token → scope; 401 `{"detail": "invalid t
   the three tool names; `inc_0001` cited; the live declined payment id cited. It prints the label, the numbers, the
   tools and the evidence refs. The existing `/ask` checks stay.
 
+## 10. Hybrid incident search for SQ1 (B5.1, 11-05)
+
+Closes the B5.1 / SQ1 Partial gap: `search_incidents` on the SQ1 path runs the existing `hybrid_search`
+(FTS + pgvector, RRF k = 60) over incidents indexed in `search_documents`. D5.6 is updated to match.
+
+### 10.1 Indexing — `ops_ai/search/indexing.py`
+
+```python
+PLATFORM_MERCHANT_ID: uuid.UUID            # uuid.UUID(int=0): owner of platform-wide incident documents
+INCIDENT_KIND = "incident"
+def incident_ref_id(incident_id: str) -> uuid.UUID                     # uuid5(fixed namespace, incident_id)
+def upsert_search_document(session, *, kind, ref_id, merchant_id, title, body, occurred_at) -> None
+def index_incidents(session) -> int                                    # documents upserted
+```
+
+- `upsert_search_document` is the one indexing path: upsert on `(kind, ref_id)` with the local-hash-v1 vector of
+  `document_text(title, body)` (NULL when it is the zero vector). The consumer's payment document goes through it;
+  other embedders' columns are filled by `python -m ops_ai.search backfill`, as before.
+- `index_incidents` upserts one `kind = "incident"` document per `ops_ai.incidents` row: `ref_id =
+  incident_ref_id(incident_id)`, `merchant_id` = the incident's merchant or `PLATFORM_MERCHANT_ID` when NULL,
+  `title` = the incident title (first 300 chars), `body` = `"{root_cause} Fix: {fix_applied} Notes:
+  {resolution_notes}"`, `occurred_at = started_at`. Idempotent (a second run changes no row count).
+- Callers: `python -m ops_ai.seed` (after `seed_dataset`; its one output line is unchanged) and the evaluation
+  suite (`run_full_eval`, after seeding). `seed_dataset` itself does not index incidents.
+
+### 10.2 Scoped search — `ops_ai/search/service.py`
+
+`search_documents`, `vector_search` and `hybrid_search` gain keyword-only parameters
+`kinds: Collection[str] | None = None` (None = every kind) and `include_platform: bool = False`.
+- Default call = today's behaviour (`merchant_id == scope.merchant_id`, every kind).
+- `include_platform=True` adds rows with `merchant_id == PLATFORM_MERCHANT_ID` **and** `kind == "incident"` only;
+  another merchant's rows are never returned.
+
+### 10.3 `search_incidents(session, scope, query, limit=5, embedder: Embedder | None = None)`
+
+- `embedder` None → the FTS over `ops_ai.incidents` of section 6, unchanged (fallback).
+- `embedder` given → `hybrid_search(..., kinds=("incident",), include_platform=True)`; each hit is mapped back to its
+  incident through `incident_ref_id`, and kept only if the incident is visible to the scope in `ops_ai.incidents`
+  (the merchant's or platform-wide) — a stale document never widens visibility. Incidents found by the FTS of
+  section 6 but not (yet) indexed are appended after the hybrid hits. Then resolved incidents first (stable), top
+  `limit`.
+- An embedder outage (`EmbedderUnavailableError`) degrades inside `hybrid_search` to its keyword leg.
+
+### 10.4 Wiring
+
+`investigate(session, scope, question, now, llm, embedder: Embedder | None = None)` passes `embedder` to
+`search_incidents`; `POST /v1/assistant/investigate` passes `deps.embedder`. Tool-call args are unchanged
+(`{"query": ...}`).
+
+### 10.5 Tests (RED first, `__tests__/` next to the source)
+
+- The seeded SQ1 question (seed 42 + `index_incidents`, `LocalHashEmbedder`) still cites `incident:inc_0001` with an
+  `acq_b` fix, and the embedder is called with the SQ1 incident query.
+- A semantic-only match (no shared keyword, same concept vector) is returned with an embedder and not by FTS alone.
+- Tenant isolation: another merchant's incident — same text, both legs matching — never appears; a platform-wide
+  incident does; the default `hybrid_search` never returns platform documents.
+- Fallback: no embedder → FTS results; an un-indexed incident is still found with an embedder.
+- The route uses `deps.embedder`.
+
 ## Out of scope here
 
 SQ2–SQ4, `change_timeline`, pgvector, the OpenAI adapter, re-anchoring an existing seed.
