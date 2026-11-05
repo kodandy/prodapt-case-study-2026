@@ -187,6 +187,15 @@ so the ops analytics routes follow the same ops principal as the other `/v1/ops/
 
 The merchant routes are unchanged: an ops token on `/v1/analytics/*` → 403 `{"detail": "forbidden"}`.
 
+Known residuals (accepted for this release, from the security audit):
+- Ops reads are not attributed: the routes take `OpsAccess.actor` but record nothing, and the gateway does not
+  audit `POST /v1/ops/ops-ai-tokens`, so who read which merchant's analytics cannot be reconstructed. The other
+  ops-ai reads (`/v1/ops/alerts`, `/v1/ops/compliance/erasures`) share this gap. Next step: an `ops.read` audit
+  record (actor, route, merchant_id) per request and `ops.token.issue` in the gateway audit log.
+- The ops-ai token is stateless: disabling or demoting an ops user takes effect on ops-ai only when the token
+  expires (at most 900 s).
+- Both ops roles read every merchant; there is no staff-to-merchant assignment.
+
 ## 5. Web
 
 - `web/src/features/dashboard/`: `DashboardArea` (merchant sign-in via the existing merchant key flow, then the
