@@ -228,7 +228,7 @@ Written in `docs/design.md` with a compose → GCP mapping (Cloud Run / GKE, Clo
 | --- | --- | --- | --- | --- |
 | DL1 | Architecture diagram (PDF/JPEG) | `docs/architecture.md` (runtime topology from `compose.yaml` + card payment, P2P transfer, refund, events into ops-ai, ops assistant; planned parts dashed) → `make docs-diagram` (mmdc in `minlag/mermaid-cli:11.4.2`) → `docs/architecture.pdf`, `.png` | 5 | Done (2026-11-04; re-render after the feature freeze) |
 | DL2 | Design decisions and trade-offs | `docs/design.md`: every decision as Decision / Why / What we gave up / Alternatives (DOC-4); lock strategy, P0 evidence map, P2 items | 5 | Done (snapshot `b5f7271`; P0 map links only existing test files; P2-1–P2-8 each have a section, design only) |
-| DL3 | Executable code + README (setup, ≥ 1 E2E example) | `README.md` (all 4 sample queries with input and output; `make ci`) | 5 | Planned |
+| DL3 | Executable code + README (setup, ≥ 1 E2E example) | `README.md` (all 4 sample queries with input and output; `make ci`), `scripts/sample_queries.py` | 5 | Done (2026-11-05: README section "Sample queries (SQ1–SQ4)" with inputs and trimmed outputs captured from a fresh stack (`docker compose down -v`, `make demo` all checks passed, `scripts/sample_queries.py`), mock LLM (no `OPENAI_API_KEY`); `make ci` steps documented against the Makefile; last full `make ci` had one load-sensitive test failure that passed on rerun) |
 | DL4 | 10-minute presentation | `docs/presentation.md`: 0:30 goal, 4:00 SQ1–SQ4, ≥ 3:00 production design (PR-1–PR-3, one line on crash recovery), 0:30 wrap-up, 2:00 Q&A | 5 | Planned |
 
 ## Production documents and demo items (D-021)

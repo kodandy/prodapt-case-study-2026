@@ -5,8 +5,9 @@ expected, merchants and operations staff can find the cause with evidence. See `
 statement, `docs/architecture-detail.md` for the design and its trade-offs, and `docs/requirements-traceability.md` for the
 mapping from the brief to code and tests.
 
-Status (2026-11-03): the Day 1 thin slice (decision D-022) runs end to end as long-running compose services, and
-`make demo` shows it working over HTTP. The React UI comes next.
+Status (2026-11-05): the services run end to end as long-running compose services. `make demo` answers all four sample
+queries (SQ1–SQ4) over HTTP against a freshly seeded stack; the captured inputs and outputs are in
+[Sample queries](#sample-queries-sq1sq4). A React web client (`web/`) runs with `make web-up`.
 
 ## Layout
 
@@ -16,6 +17,8 @@ Status (2026-11-03): the Day 1 thin slice (decision D-022) runs end to end as lo
 | `services/gateway/` | FastAPI gateway: sign-up, merchants and API keys, card tokenization, idempotent charges, ledger, outbox, audit log, acquirer simulator |
 | `services/ops-ai/` | Stream consumer, payment projection, full-text search, assistant with an LLM port (mock by default) |
 | `scripts/generate_dataset.py` | Seeded synthetic dataset (brief fields + extensions) with planted sample-query scenarios |
+| `scripts/demo.py`, `scripts/sample_queries.py` | The `make demo` walkthrough with checks, and the raw JSON answers to SQ1–SQ4 |
+| `web/` | React web client (user and merchant tabs), served by nginx |
 | `tests/` | Cross-service tests: the end-to-end thin slice and import-boundary rules |
 | `docs/specs/` | Test specifications that the tests were written from |
 
@@ -27,11 +30,26 @@ Status (2026-11-03): the Day 1 thin slice (decision D-022) runs end to end as lo
 ## Setup and checks
 
 ```bash
-make ci        # start Postgres + Redis, sync deps, lint, type-check, migration round-trip, all tests
+git clone <repo-url> && cd <repo>
+make demo-down   # only if a demo stack is running: its relay and consumer would take the events the tests wait for
+make ci          # the same command the GitHub Actions workflow runs (.github/workflows/ci.yml)
 ```
 
-Individual targets: `make up`, `make sync`, `make lint`, `make type`, `make migrate`, `make migrate-check`, `make test`,
-`make down`.
+`make ci` runs, in order: `up` (Postgres + Redis), `sync` (build the `dev` image, `uv sync --frozen`), `proto-check`
+(generated gRPC code is current), `lint` (ruff check + format check), `type` (mypy), `migrate-check` (each Alembic
+history upgrade → downgrade one step → upgrade → `alembic check`), `test` (pytest), `eval` (golden SQ1–SQ4 E2E cases,
+custom metrics, cross-tenant leakage gate and judge goldens; LLM-judged metrics are reported as skipped without a key)
+and `web-ci` (`npm ci`, then typecheck, lint, unit tests and build in the pinned node image). No `.env` and no
+`OPENAI_API_KEY` are needed.
+
+Last full run (2026-11-05, on a laptop running several other compose stacks): every step passed except one
+timing-sensitive test, `test_complete_gives_the_fallback_only_the_remaining_budget` in
+`services/ops-ai/src/ops_ai/assistant/__tests__/test_openai_llm.py`, which failed once under load (it got `openai: http 503`
+where it expected `openai: timeout`) and passed on three reruns; `eval` and `web-ci` were then run on their own and
+passed. The pytest step took about 90 minutes on that machine.
+
+Individual targets: `make up`, `make sync`, `make proto-check`, `make lint`, `make type`, `make migrate`,
+`make migrate-check`, `make test`, `make eval`, `make web-ci`, `make down`.
 
 ## Run the services: `make demo`
 
@@ -93,8 +111,159 @@ the JWT private key, and ops-ai gets only the public key.
    the `fraud` queue, both cited in the evidence, and that the SQ2 user token gets 403 on this route. Card identity is
    `card_ref`: an HMAC of the merchant id and the gateway card fingerprint under a subkey of the fingerprint key, so
    it counts distinct cards at one merchant without linking a card across merchants. See `docs/specs/sq3.md`.
+9. SQ4 for the seeded merchant `mch_0003`: asks "Why is my October payout lower than expected?" on
+   `POST /v1/assistant/explain-settlement` (merchant token). The tool `explain_settlement` builds the typed statement
+   (gross, MDR, fixed fees, FX, refunds, chargebacks, chargeback fees, reserve → net) and cross-checks it against the
+   payment projection before any text is written. The demo checks the eight lines in order, that they sum to the net,
+   that the net is below the expected payout, the evidence refs, and that the SQ2 user token gets 403. See
+   `docs/specs/sq4.md`.
 
 Only the first 8 characters of the API key are printed. Passwords and tokens are never printed.
+
+## Sample queries (SQ1–SQ4)
+
+All four sample queries from the brief run against the live HTTP APIs of a freshly seeded stack. To reproduce:
+
+```bash
+make demo-down && docker compose down -v   # start from empty volumes (drops the demo database)
+make demo                                  # seed, run SQ1–SQ4 with checks; exits 0 only if every check passed
+docker compose --profile demo run --rm --no-deps -T demo python scripts/sample_queries.py   # raw JSON, one line per answer
+make demo-down
+```
+
+`scripts/sample_queries.py` sends the same questions with the same principals as `scripts/demo.py` (merchant token
+from `POST /v1/merchant-tokens`, SQ2 user token from `POST /v1/user-tokens`) and prints each response body. It never
+prints an API key, a password or a token.
+
+The outputs below were captured on 2026-11-05 from a fresh stack (`docker compose down -v`, then `make demo` with
+`all checks passed`, then `scripts/sample_queries.py`). They are trimmed to the fields that carry the answer; ids are
+dropped and timestamps follow the seed, which shifts the dataset so the SQ1 afternoon ends at seed time, so they
+differ on every run. A few fields are condensed for reading (`top_bin` is the first `by_bin` entry, `timeline_changes`
+lists `kind subject: detail`, `lines` is `[kind, amount_minor, payments]`); the raw objects are in the script output.
+No `OPENAI_API_KEY` was set, so every answer reports `"mode": "llm", "model": "mock"`: the
+deterministic `MockLlm` writes the text from the evidence. Labels, numbers, fixes and evidence come from the tools in
+both cases; a real key changes only the narrated `text`.
+
+### SQ1: card failures spiking this afternoon — root cause and fix
+
+Input: merchant `mch_0001` (merchant token), `POST /v1/assistant/investigate`,
+`{"question": "15% of my card payments are failing this afternoon — what is the root cause and how do we fix it?"}`
+
+```json
+{
+  "cause_label": "issuer_outage_on_bin",
+  "window":   {"total": 241, "failed": 36, "rate": 0.1494,
+               "top_bin": {"card_bin": "400000", "failed": 32, "total": 52},
+               "by_code": [{"decline_code": "issuer_unavailable", "count": 32}, {"decline_code": "expired_card", "count": 4}]},
+  "baseline": {"total": 390, "failed": 7, "rate": 0.0179},
+  "suggested_fixes": ["Rerouted BIN 400000 to acquirer acq_b until the issuer recovered."],
+  "tool_calls": ["aggregate_failures", "compare_baseline", "search_incidents"],
+  "evidence_refs": ["aggregate:window", "aggregate:baseline", "aggregate:bin:400000", "incident:inc_0001", "payment:…"]
+}
+```
+
+The same question on the failure assistant, `POST /v1/assistant/failures`, separates observed facts, hypotheses and
+how to confirm them, and ranks fixes from the playbook:
+
+```json
+{
+  "comparison": {"window_rate": 0.1494, "baseline_rate": 0.0179, "ratio": 8.32, "elevated": true},
+  "timeline_changes": ["failure_onset card", "bin_onset 400000: 32 of 52 payments failed", "new_decline_code expired_card: 4 failures"],
+  "reasons": [{"taxonomy_code": "issuer_unavailable", "owner": "issuer", "retryable": false, "count": 32, "share": 0.889},
+              {"taxonomy_code": "expired_card", "owner": "cardholder", "retryable": false, "count": 4, "share": 0.111}],
+  "facts": ["Window: 36 of 241 card payments failed (14.9%).", "Baseline: 7 of 390 card payments failed (1.8%).",
+            "The failure rate is elevated.", "BIN 400000 accounts for 88.9% of failures."],
+  "hypotheses": ["The issuer (or its processor) is not answering authorisation requests, so charges time out or are rejected as issuer unavailable.",
+                 "Stored or entered cards are past their expiry date."],
+  "how_to_confirm": ["Check whether the failures concentrate on one card BIN or issuer.",
+                     "Compare the issuer_unavailable rate in the window with the 7-day baseline.",
+                     "Check the acquirer status page and open incidents for the same issuer."],
+  "fixes": [{"rank": 1, "taxonomy_code": "issuer_unavailable", "fix": "Route the affected BIN range to the secondary acquirer and do not auto-retry timed-out charges; reconcile their outcome with the issuer first.", "incident_refs": []},
+            {"rank": 2, "taxonomy_code": "expired_card", "fix": "Ask the cardholder to update the card, and enable account updater for stored cards.", "incident_refs": []}],
+  "tool_calls": ["compare_baseline", "change_timeline", "failure_reasons", "search_incidents", "list_failed_payments"]
+}
+```
+
+What it shows: the failure rate is 14.9% in the last 6 hours against 1.8% over the 7 days before (8.3×), 32 of the 36
+failures are `issuer_unavailable` on BIN 400000, and the fix is to reroute that BIN; `/investigate` cites the past
+incident `inc_0001` and the live declined charge from `make demo`. On `/failures` the ranked fixes come from the
+playbook and carry no incident reference in this run (`incident_refs` is empty), and the `make eval` SQ1 golden still
+targets `/investigate`, not `/failures`.
+
+### SQ2: international transfer declined despite sufficient funds — which rule fired
+
+Input: the seeded SQ2 sender (user token, role `consumer`), `POST /v1/assistant/investigate-transfer`,
+`{"question": "My international transfer was declined even though I had enough money — what triggered it?"}`
+
+```json
+{
+  "cause_code": "cross_border_limit_for_kyc_tier",
+  "remediation_owner": "sender",
+  "balance_covered_amount": true,
+  "transfer": {"amount_minor": 180000, "currency": "USD", "status": "failed", "country_sender": "US", "country_receiver": "IN",
+               "kyc_tier": 1, "limit_minor": 100000, "limit_currency": "USD", "next_tier_limit_minor": 1000000,
+               "sender_balance_minor": 525000},
+  "suggested_fixes": ["Upgrade to KYC tier 2: its cross-border limit of 10000.00 USD per transfer covers 1800.00 USD."],
+  "tool_calls": ["get_payment_status"],
+  "evidence": ["Transfer of 1800.00 USD from US to IN, failed at …",
+               "Sender balance at decision time 5250.00 USD vs amount 1800.00 USD",
+               "Cross-border per-transfer limit for KYC tier 1 1000.00 USD vs amount 1800.00 USD"]
+}
+```
+
+What it shows: the balance (5250.00 USD) covered the 1800.00 USD transfer, so it was not insufficient funds; the rule
+that fired is the KYC tier 1 cross-border limit of 1000.00 USD per transfer, and the fix is KYC tier 2. The transfer is a
+seeded decision record (`scripts/transfer_fixture.py`), not a transfer executed through the gateway.
+
+### SQ3: card-testing micro-transaction series
+
+Input: merchant `mch_0002` (merchant token), `POST /v1/assistant/investigate-fraud`,
+`{"question": "We're seeing a series of tiny card payments — is this card testing, and what should we do?"}`.
+`make demo` first sends a live burst of 12 charges of 0.50 USD over 4 test cards through `POST /v1/payments`.
+
+```json
+{
+  "cause_label": "card_testing",
+  "episodes": [
+    {"micro_payments": 12, "distinct_cards": 4, "declined": 6, "decline_ratio": 0.5,
+     "card_bins": ["400000", "424242", "555555"], "flagged": true, "reasons": ["micro_burst", "many_cards", "high_decline_ratio"]},
+    {"micro_payments": 40, "distinct_cards": null, "declined": 40, "decline_ratio": 1.0,
+     "card_bins": ["411111", "424242", "522222", "555555", "601100"], "flagged": true,
+     "reasons": ["micro_burst", "card_identity_unknown", "high_decline_ratio"]}
+  ],
+  "alerts": [{"queue": "fraud", "ticket_id": "…"}],
+  "suggested_fixes": ["Add a velocity limit on card payments of 1.00 or less, per card and per client IP.",
+                      "Require 3-D Secure for card payments of 1.00 or less until the burst stops.",
+                      "Do not refund or contact the cards in the burst from this channel; the fraud team works the ticket."],
+  "tool_calls": ["analyze_fraud"]
+}
+```
+
+What it shows: both the live burst (12 micro payments, 4 cards, half declined) and the seeded burst (40 micro payments,
+all declined) are flagged as card testing with the features that tripped the rule. Only the live burst raised an alert
+with a ticket in the `fraud` queue: seeded events raise no alert, and seeded payments carry no card identity. No
+alert notification is shown here; SQ3 stays Partial in `docs/requirements-traceability.md` for that reason.
+
+### SQ4: plain-English settlement summary — why the payout differs
+
+Input: merchant `mch_0003` (merchant token), `POST /v1/assistant/explain-settlement`,
+`{"question": "Why is my October payout lower than expected?"}`
+
+```json
+{
+  "period": "2026-10", "currency": "USD", "verified": true, "mismatches": [], "projection_checked": 202,
+  "gross_minor": 1125137, "expected_minor": 1092508, "net_minor": 983882, "gap_minor": 108626,
+  "lines": [["gross", 1125137, 202], ["mdr", -32629, 202], ["fixed_fees", -6060, 202], ["fx", -876, 10],
+            ["refunds", -28393, 8], ["chargebacks", -12540, 3], ["chargeback_fees", -4500, 3], ["reserve", -56257, 202]],
+  "tool_calls": ["explain_settlement"],
+  "summary": "Your 2026-10 payout is 9838.82 USD, 1086.26 USD less than the 10925.08 USD you would expect from gross sales of 11251.37 USD minus the 2.90% MDR. Fixed fees: 60.60 USD (202 payments at 0.30 USD each). FX conversion: 8.76 USD on 10 non-USD payments (rate set fx-2026-10). Refunds: 283.93 USD on 8 payments. Chargebacks: 125.40 USD on 3 payments. Chargeback fees: 45.00 USD (3 at 15.00 USD each). Rolling reserve: 562.57 USD held (5.00% of gross), released in a later payout."
+}
+```
+
+What it shows: the eight typed lines
+sum to the net payout, the statement was verified against 202 payments in the payment projection before the summary
+was written, and the 1086.26 USD gap is explained line by line. Settlement entries are seeded as the acquirer's report;
+the gateway settlement batch and payouts are Design (see Known gaps).
 
 ## Web client: `make web-up`
 
@@ -197,9 +366,9 @@ These were found by the Day 1 audit and are planned:
 - Separate migration and app database roles. Today `audit_log` append-only is enforced by a trigger, not by grants, and
   TRUNCATE is not blocked.
 - DB-level ledger invariants (unique journal per reference, balanced postings per currency).
-- Rate limiting, API key revocation, `maxlen` on the stream, and structured logging.
-- No dead-letter queue on the consumer. A stream entry that fails validation is retried on every loop and blocks the
-  entries behind it in this consumer's pending list.
+- API key revocation, `maxlen` on the stream, and structured logging. (Rate limiting exists: token buckets per API
+  key and per user, see P1-4 in the traceability matrix.)
+- The consumer dead-letters a malformed entry (see "Stream" below) but has no retry with backoff for other failures.
 - Merchant tokens cannot be revoked before they expire (15 minutes), and there is no key rotation (`kid`) yet.
 - `demo-secrets` recreates only missing files. If only the private key is deleted, the old public key stays and tokens
   stop verifying; delete the volume (`make demo-down` then `docker volume rm payplat_demo-secrets`) to start over.
