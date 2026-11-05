@@ -162,7 +162,9 @@ def test_cross_currency_charge_posts_a_four_line_fx_journal_with_the_rate_id(
 
     # Act
     outcome = charge_card(
-        h.deps, h.merchant_id, "k-fx",
+        h.deps,
+        h.merchant_id,
+        "k-fx",
         _request(amount_minor=1_501, settlement_currency="EUR"),
     )
 
@@ -274,7 +276,9 @@ def test_cross_currency_charge_response_body_is_unchanged(
 
     # Act
     outcome = charge_card(
-        h.deps, h.merchant_id, "k-fx-body",
+        h.deps,
+        h.merchant_id,
+        "k-fx-body",
         _request(amount_minor=1_501, settlement_currency="EUR"),
     )
 
@@ -301,7 +305,9 @@ def test_cross_currency_charge_stores_the_payment_in_the_card_currency(
 
     # Act
     outcome = charge_card(
-        h.deps, h.merchant_id, "k-fx-pay",
+        h.deps,
+        h.merchant_id,
+        "k-fx-pay",
         _request(amount_minor=1_501, settlement_currency="EUR"),
     )
 
@@ -327,7 +333,9 @@ def test_cross_currency_charge_uses_the_rate_in_force_at_the_clock_time(
 
     # Act
     outcome = charge_card(
-        h.deps, h.merchant_id, "k-fx-v2",
+        h.deps,
+        h.merchant_id,
+        "k-fx-v2",
         _request(amount_minor=1_000, settlement_currency="EUR"),
     )
 

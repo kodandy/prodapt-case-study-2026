@@ -4,6 +4,7 @@ section B1.4 / B2.3 / B2.5 / P0-2 / P0-3 (Decisions 1, 7, 8 and `gateway/wallets
 `RailResult` is imported from the `gateway.payments.rails` package, so its `__init__` must re-export it.
 """
 
+import functools
 import threading
 import uuid
 from collections.abc import Callable, Sequence
@@ -674,7 +675,7 @@ def test_parallel_top_ups_with_distinct_keys_credit_every_one(
 
     # Act
     outcomes = _run_parallel(
-        [lambda i=i: _top_up(session_factory, clock, user_id, f"k-{i}", 100) for i in range(PARALLEL)]
+        [functools.partial(_top_up, session_factory, clock, user_id, f"k-{i}", 100) for i in range(PARALLEL)]
     )
 
     # Assert

@@ -83,7 +83,7 @@ class TopUp:
 class Transfer:
     sender: int
     offset: int
-    """Recipient index = sender + offset (mod users), so a user never sends to themself."""
+    """Recipient = sender + 1 + (offset - 1) % (users - 1) (mod users), so a user never sends to themself."""
     currency: str
     recipient_currency: str | None
     amount_minor: int
@@ -263,7 +263,8 @@ class World:
             self._settle(step)
 
     def _transfer(self, step: Transfer) -> None:
-        recipient_index = (step.sender + step.offset) % len(self.user_ids)
+        users = len(self.user_ids)
+        recipient_index = (step.sender % users + 1 + (step.offset - 1) % (users - 1)) % users
         outcome = transfer(
             self.session_factory,
             self.clock,

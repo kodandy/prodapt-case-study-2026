@@ -4,6 +4,7 @@ section "B1.4 / B2.3 / B2.5 / P0-2 / P0-3" (Decisions 2-5, 9, and the `list_tran
 Needs the 12 migration-seeded demo rates (`gateway.fx_rates`) to survive the per-test table reset.
 """
 
+import functools
 import hashlib
 import json
 import threading
@@ -894,8 +895,12 @@ def test_opposite_direction_cross_currency_transfers_complete_without_deadlock(
     eur_usd = _expected_target(_rate(session_factory, "demo-EURUSD-v1"), 1_000, "EUR", "USD")
     jobs: list[Callable[[], TransferOutcome]] = []
     for n in range(PARALLEL):
-        jobs.append(lambda n=n: _send(session_factory, clock, alice, f"k-a-{n}", BOB, 1_000, "USD", "EUR"))
-        jobs.append(lambda n=n: _send(session_factory, clock, bob, f"k-b-{n}", ALICE, 1_000, "EUR", "USD"))
+        jobs.append(
+            functools.partial(_send, session_factory, clock, alice, f"k-a-{n}", BOB, 1_000, "USD", "EUR")
+        )
+        jobs.append(
+            functools.partial(_send, session_factory, clock, bob, f"k-b-{n}", ALICE, 1_000, "EUR", "USD")
+        )
 
     # Act
     outcomes = _run_parallel(jobs)

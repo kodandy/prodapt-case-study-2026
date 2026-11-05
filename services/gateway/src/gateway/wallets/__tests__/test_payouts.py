@@ -5,6 +5,7 @@ section B1.4 / B2.3 / B2.5 / P0-2 / P0-3 (Decisions 8 and 9, `gateway/wallets/pa
 Journal `ref_id` of the three payout journals is assumed to be the payout id.
 """
 
+import functools
 import threading
 import uuid
 from collections.abc import Callable, Sequence
@@ -175,9 +176,7 @@ def _payout_rows(session_factory: sessionmaker[Session]) -> list[dict[str, objec
 
 
 def _payout_audit_count(session_factory: sessionmaker[Session]) -> int:
-    return _count(
-        session_factory, "SELECT count(*) AS n FROM gateway.audit_log WHERE action LIKE 'payout.%'"
-    )
+    return _count(session_factory, "SELECT count(*) AS n FROM gateway.audit_log WHERE action LIKE 'payout.%'")
 
 
 def _deps(session_factory: sessionmaker[Session], clock: FixedClock, rail: _ScriptedRail) -> PayoutDeps:
@@ -383,9 +382,7 @@ def test_the_hold_is_committed_and_no_lock_is_held_while_the_rail_runs(
         with session_factory.begin() as session:
             try:
                 session.execute(
-                    text(
-                        "SELECT 1 FROM gateway.account_balances WHERE account_id = :a FOR UPDATE NOWAIT"
-                    ),
+                    text("SELECT 1 FROM gateway.account_balances WHERE account_id = :a FOR UPDATE NOWAIT"),
                     {"a": wallet_ids[0]},
                 )
                 session.execute(
@@ -1052,8 +1049,8 @@ def test_parallel_payouts_from_one_wallet_never_overdraw(
     # Act
     outcomes = _run_parallel(
         [
-            lambda i=i: _create(
-                deps, user_id, key=f"p-{i}", amount_minor=amount, destination=f"acct-{i:04d}-xyz"
+            functools.partial(
+                _create, deps, user_id, key=f"p-{i}", amount_minor=amount, destination=f"acct-{i:04d}-xyz"
             )
             for i in range(PARALLEL)
         ]
@@ -1081,8 +1078,8 @@ def test_parallel_payouts_that_all_fit_are_all_accepted(
     # Act
     outcomes = _run_parallel(
         [
-            lambda i=i: _create(
-                deps, user_id, key=f"p-{i}", amount_minor=100, destination=f"acct-{i:04d}-xyz"
+            functools.partial(
+                _create, deps, user_id, key=f"p-{i}", amount_minor=100, destination=f"acct-{i:04d}-xyz"
             )
             for i in range(PARALLEL)
         ]
@@ -1102,16 +1099,17 @@ def test_parallel_transfers_and_payouts_from_one_wallet_never_overdraw(
     deps, alice = _setup(session_factory, clock, rail, balance=3_500)
     bob = _user(session_factory, clock, BOB)
     half = PARALLEL // 2
-    payout_jobs: list[Callable[[], int]] = [
-        lambda i=i: _create(
+
+    def payout_status(i: int) -> int:
+        return _create(
             deps, alice, key=f"p-{i}", amount_minor=1_000, destination=f"acct-{i:04d}-xyz"
         ).status_code
-        for i in range(half)
-    ]
-    transfer_jobs: list[Callable[[], int]] = [
-        lambda i=i: transfer(session_factory, clock, alice, f"t-{i}", BOB, 1_000, "USD").status_code
-        for i in range(half)
-    ]
+
+    def transfer_status(i: int) -> int:
+        return transfer(session_factory, clock, alice, f"t-{i}", BOB, 1_000, "USD").status_code
+
+    payout_jobs: list[Callable[[], int]] = [functools.partial(payout_status, i) for i in range(half)]
+    transfer_jobs: list[Callable[[], int]] = [functools.partial(transfer_status, i) for i in range(half)]
 
     # Act
     statuses = _run_parallel([*payout_jobs, *transfer_jobs])
