@@ -1,10 +1,12 @@
 import logging
+import os
 import signal
 import socket
 import threading
 from datetime import datetime, timedelta
 from types import FrameType
 
+from contracts.events import PAYMENTS_TOPIC
 from redis import Redis
 from redis.exceptions import RedisError
 from sqlalchemy.exc import SQLAlchemyError
@@ -13,7 +15,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from ops_ai.clock import Clock, system_clock
 from ops_ai.config import load_ops_ai_settings
 from ops_ai.db import make_engine, make_session_factory
-from ops_ai.ingest.consumer import consume_payments
+from ops_ai.ingest.consumer import PAYMENT_FACTS_GROUP, consume_payments
+from ops_ai.observability.consumer import record_consumer_lag
+from ops_ai.observability.server import start_metrics_server
+from ops_ai.observability.tracing import configure_logging
 from ops_ai.tickets.sources import sweep_unknown_payments
 
 logger = logging.getLogger(__name__)
@@ -22,6 +27,7 @@ RETRY_BACKOFF_SECONDS = 0.2
 REDIS_CONNECT_TIMEOUT_SECONDS = 2.0
 REDIS_SOCKET_TIMEOUT_SECONDS = 5.0
 UNKNOWN_SWEEP_INTERVAL = timedelta(seconds=60)
+LAG_SAMPLE_SECONDS = 5.0
 
 
 def run_consumer(
@@ -59,8 +65,21 @@ def run_consumer(
     return total
 
 
+def sample_consumer_lag(
+    redis: Redis, stop: threading.Event, interval_seconds: float = LAG_SAMPLE_SECONDS
+) -> None:
+    """Thread loop for the consumer-lag alert: XINFO GROUPS every `interval_seconds` until `stop`."""
+    while not stop.is_set():
+        try:
+            record_consumer_lag(redis, PAYMENTS_TOPIC, PAYMENT_FACTS_GROUP)
+        except (RedisError, OSError) as error:
+            logger.warning("consumer lag sample failed: %s", type(error).__name__)
+        stop.wait(interval_seconds)
+
+
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_logging(logging.INFO)
+    start_metrics_server(os.environ.get("METRICS_PORT"))
     settings = load_ops_ai_settings()
     session_factory = make_session_factory(make_engine(settings.database_url))
     redis = Redis.from_url(
@@ -76,6 +95,7 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, _request_stop)
     signal.signal(signal.SIGINT, _request_stop)
+    threading.Thread(target=sample_consumer_lag, args=(redis, stop), name="consumer-lag", daemon=True).start()
     consumer_name = f"ops-ai-{socket.gethostname()}"
     total = run_consumer(session_factory, redis, system_clock, consumer_name, stop)
     logger.info("consumer stopped after reading %d entries", total)

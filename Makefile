@@ -1,7 +1,7 @@
 DC := docker compose
 RUN := $(DC) run --rm dev
 
-.PHONY: up down build sync lint fmt type test migrate migrate-check ci demo demo-down web-install web-ci web-up web-smoke web-reresolve-check web-merchant-key docs-diagram
+.PHONY: up down build sync lint fmt type test migrate migrate-check ci demo demo-down web-install web-ci web-up web-smoke web-reresolve-check web-merchant-key docs-diagram alerts-test monitoring-up tls-up perf
 
 up:
 	$(DC) up -d --wait postgres redis
@@ -91,3 +91,24 @@ ARCH_MMD := awk '/^```mermaid/ {n++; if (n == 1) {f = 1; next}} f && /^```/ {exi
 docs-diagram:
 	$(ARCH_MMD) | $(MMDC) -i - -o /data/architecture.png -b white -s 2
 	$(ARCH_MMD) | $(MMDC) -i - -o /data/architecture.pdf -b white --pdfFit
+
+# P0-14: promtool unit tests for ops/prometheus/alerts.yml (Docker only; not part of `make ci`)
+PROMTOOL := docker run --rm -v $(CURDIR)/ops/prometheus:/etc/prometheus:ro --entrypoint promtool prom/prometheus:v3.5.0
+
+alerts-test:
+	$(PROMTOOL) check config /etc/prometheus/prometheus.yml
+	$(PROMTOOL) test rules /etc/prometheus/alerts.test.yml
+
+# Prometheus on 127.0.0.1:9090, Grafana on 127.0.0.1:3000 (dashboard "PayPlat overview")
+monitoring-up:
+	$(DC) up -d --wait gateway-api relay ops-ai-api ops-ai-consumer
+	$(DC) --profile monitoring up -d prometheus grafana
+
+# https://localhost:8443 through a self-signed dev certificate generated at startup (never committed)
+tls-up: web-up
+	$(DC) --profile tls up -d web-tls
+
+# P1-5: k6 against POST /v1/payments on the compose network (docs/perf/); bounded to 2 minutes by the script
+perf:
+	@key=$$($(MAKE) -s web-merchant-key 2>/dev/null) && MERCHANT_KEY="$$key" \
+	  $(DC) --profile perf run --rm --no-deps -e MERCHANT_KEY -e RATE k6 run /perf/payments.js

@@ -96,7 +96,7 @@ services:
     environment:
       <<: *app-env
       GATEWAY_SECRETS_DIR: /run/secrets/gateway
-    command: ["uvicorn", "--factory", "gateway.main:build_app_from_env", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uvicorn", "--factory", "gateway.main:build_app_from_env", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "20"]
     restart: unless-stopped
     ports: ["127.0.0.1:${GATEWAY_PORT:-8080}:8000"]
     volumes: [*gateway-secrets]
@@ -111,6 +111,7 @@ services:
     environment:
       <<: *app-env
       GATEWAY_SECRETS_DIR: /run/secrets/gateway
+      METRICS_PORT: "9100"
     command: ["python", "-m", "gateway.outbox.worker"]
     restart: unless-stopped
     volumes: [*gateway-secrets]
@@ -132,7 +133,7 @@ services:
       <<: *app-env
       OPS_AI_SECRETS_DIR: /run/secrets/ops-ai
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-    command: ["uvicorn", "--factory", "ops_ai.main:build_app_from_env", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uvicorn", "--factory", "ops_ai.main:build_app_from_env", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "20"]
     restart: unless-stopped
     ports: ["127.0.0.1:${OPS_AI_PORT:-8081}:8000"]
     volumes: [*ops-ai-secrets]
@@ -143,7 +144,9 @@ services:
 
   ops-ai-consumer:
     image: payplat-app
-    environment: *app-env
+    environment:
+      <<: *app-env
+      METRICS_PORT: "9100"
     command: ["python", "-m", "ops_ai.ingest.worker"]
     restart: unless-stopped
     depends_on: *ops-ai-deps
@@ -196,7 +199,68 @@ services:
     depends_on:
       web: { condition: service_started }
 
+  # --- monitoring (make monitoring-up): Prometheus + Grafana, bound to 127.0.0.1 only. ---
+
+  prometheus:
+    profiles: ["monitoring"]
+    image: prom/prometheus:v3.5.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=2d"]
+    ports: ["127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"]
+    volumes: ["./ops/prometheus:/etc/prometheus:ro"]
+    restart: unless-stopped
+
+  grafana:
+    profiles: ["monitoring"]
+    image: grafana/grafana:12.1.1
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-payplat-local-only}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    ports: ["127.0.0.1:${GRAFANA_PORT:-3000}:3000"]
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus]
+    restart: unless-stopped
+
+  # --- TLS (make tls-up): self-signed dev certificate generated into a volume, never committed. ---
+
+  dev-cert:
+    profiles: ["tls"]
+    image: payplat-app
+    user: "0"
+    command: ["python", "/ops/gen_dev_cert.py", "/certs"]
+    volumes:
+      - ./ops/tls/gen_dev_cert.py:/ops/gen_dev_cert.py:ro
+      - dev-cert:/certs
+
+  web-tls:
+    profiles: ["tls"]
+    image: nginx:1.28.0-alpine
+    ports: ["127.0.0.1:${WEB_TLS_PORT:-8443}:443"]
+    volumes:
+      - ./ops/tls/nginx-tls.conf:/etc/nginx/conf.d/default.conf:ro
+      - dev-cert:/certs:ro
+    depends_on:
+      dev-cert: { condition: service_completed_successfully }
+      web: { condition: service_started }
+    restart: unless-stopped
+
+  # --- load test (make perf, P1-5): k6 on the compose network against gateway-api. ---
+
+  k6:
+    profiles: ["perf"]
+    image: grafana/k6:1.2.3
+    environment:
+      GATEWAY_URL: http://gateway-api:8000
+    volumes:
+      - ./ops/perf:/perf:ro
+      - ./docs/perf:/results
+
 volumes:
+  dev-cert:
   pgdata:
   venv:
   uvcache:

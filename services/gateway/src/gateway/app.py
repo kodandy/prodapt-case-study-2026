@@ -51,6 +51,7 @@ from gateway.accounts.tokens import (
     issue_user_token,
 )
 from gateway.audit.models import AuditLog
+from gateway.observability.http import install_observability
 from gateway.payments.charge import ChargeDeps, charge_card
 from gateway.payments.disputes import (
     DisputeNotFoundError,
@@ -79,6 +80,7 @@ from gateway.payments.schemas import (
     RefundRequest,
 )
 from gateway.payments.state import PaymentState
+from gateway.resilience.rate_limit import RateLimitConfig, RateLimitMiddleware, TokenBucketLimiter
 from gateway.wallets.history import TransferHistoryItem, list_transfers
 from gateway.wallets.service import WalletBalanceView, list_wallets, transfer
 
@@ -97,6 +99,7 @@ class GatewayAppDeps:
     login_slots: threading.BoundedSemaphore | None = None
     """Caps concurrent argon2 verifications on login; None → LOGIN_CONCURRENCY slots."""
     totp_encryption_key: str | None = field(default=None, repr=False)
+    rate_limits: RateLimitConfig = field(default_factory=RateLimitConfig)
 
 
 class SignUpRequest(BaseModel):
@@ -573,6 +576,14 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         except InvalidDisputeTransitionError:
             raise HTTPException(status.HTTP_409_CONFLICT, "invalid dispute transition") from None
 
+    app.add_middleware(
+        RateLimitMiddleware,
+        limiter=TokenBucketLimiter(deps.charge.redis),
+        config=deps.rate_limits,
+        jwt_private_key_pem=deps.jwt_private_key_pem,
+        clock=deps.charge.clock,
+    )
+    install_observability(app)
     return app
 
 
