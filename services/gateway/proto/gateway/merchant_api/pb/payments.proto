@@ -1,0 +1,79 @@
+// Merchant payments over gRPC (B8.2). Same domain functions, tenancy and validation as the REST routes.
+// Auth: `authorization: Bearer <api key>` metadata. CreatePayment needs `idempotency-key` metadata.
+// Errors: INVALID_ARGUMENT carries google.rpc.BadRequest field violations in grpc-status-details-bin.
+syntax = "proto3";
+
+package payplat.gateway.v1;
+
+service MerchantPayments {
+  rpc CreatePayment(CreatePaymentRequest) returns (CreatePaymentResponse);
+  rpc GetPayment(GetPaymentRequest) returns (Payment);
+  rpc ListPayments(ListPaymentsRequest) returns (ListPaymentsResponse);
+}
+
+message CardInput {
+  string number = 1;
+  int32 exp_month = 2;
+  int32 exp_year = 3;
+  string cvc = 4;
+}
+
+message CreatePaymentRequest {
+  int64 amount_minor = 1;
+  string currency = 2;
+  // empty means the default, "card"
+  string method = 3;
+  CardInput card = 4;
+}
+
+message CardSummary {
+  string bin = 1;
+  string last4 = 2;
+}
+
+message CreatePaymentResponse {
+  string payment_id = 1;
+  // succeeded | declined | unknown
+  string state = 2;
+  int64 amount_minor = 3;
+  string currency = 4;
+  string method = 5;
+  CardSummary card = 6;
+  optional string decline_code = 7;
+}
+
+message GetPaymentRequest {
+  string payment_id = 1;
+}
+
+message Payment {
+  string payment_id = 1;
+  string state = 2;
+  int64 amount_minor = 3;
+  string currency = 4;
+  string method = 5;
+  // absent when the payment has no card token
+  CardSummary card = 6;
+  optional string decline_code = 7;
+  int64 refunded_minor = 8;
+  int64 disputed_minor = 9;
+  int64 chargeback_minor = 10;
+  // ISO 8601 with offset, UTC
+  string created_at = 11;
+}
+
+message ListPaymentsRequest {
+  // 0 means the default page size
+  int32 limit = 1;
+  optional string cursor = 2;
+  optional string state = 3;
+  // ISO 8601 with an offset; half-open [created_from, created_to)
+  optional string created_from = 4;
+  optional string created_to = 5;
+  optional string method = 6;
+}
+
+message ListPaymentsResponse {
+  repeated Payment items = 1;
+  optional string next_cursor = 2;
+}

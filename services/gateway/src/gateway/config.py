@@ -1,6 +1,6 @@
 import os
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MIN_SECRET_LENGTH = 32
@@ -15,6 +15,13 @@ class GatewaySettings(BaseSettings):
     card_fingerprint_key: SecretStr = Field(min_length=MIN_SECRET_LENGTH)
     jwt_private_key_pem: SecretStr | None = None
     totp_encryption_key: SecretStr | None = Field(default=None, min_length=MIN_SECRET_LENGTH)
+    payment_provider: str = Field(default="simulator", validation_alias="PAYMENT_PROVIDER")
+    stripe_secret_key: SecretStr | None = Field(default=None, validation_alias="STRIPE_SECRET_KEY")
+
+    @field_validator("stripe_secret_key", mode="before")
+    @classmethod
+    def _empty_key_is_unset(cls, value: object) -> object:
+        return None if value == "" else value
 
 
 def load_gateway_settings() -> GatewaySettings:

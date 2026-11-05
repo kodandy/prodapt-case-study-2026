@@ -20,6 +20,9 @@ dependencies = [
   "prometheus-client>=0.21",
   "opentelemetry-api>=1.28",
   "opentelemetry-sdk>=1.28",
+  "grpcio>=1.66",
+  "grpcio-status>=1.66",
+  "protobuf>=7.35.1,<8",
 ]
 
 [tool.uv.sources]

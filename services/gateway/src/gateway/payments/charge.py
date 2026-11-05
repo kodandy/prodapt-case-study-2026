@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import secrets
 import time
 import uuid
@@ -21,7 +22,13 @@ from gateway.outbox.models import OutboxEvent
 from gateway.payments.idempotency.models import IdempotencyRecord
 from gateway.payments.ledger.service import PostingLine, ensure_account, post_journal
 from gateway.payments.models import Payment, PaymentAttempt
-from gateway.payments.providers.port import CardRef, ProviderPort, ProviderResult, ProviderTimeoutError
+from gateway.payments.providers.port import (
+    CardRef,
+    ProviderPort,
+    ProviderRequestError,
+    ProviderResult,
+    ProviderTimeoutError,
+)
 from gateway.payments.risk import RISK_BLOCKED_DECLINE_CODE, assess_charge_risk
 from gateway.payments.schemas import CardSummary, ChargeRequest, ChargeResponse
 from gateway.payments.state import ATTEMPT_LEASE_SECONDS as ATTEMPT_LEASE_SECONDS
@@ -32,7 +39,10 @@ from gateway.payments.tokenization.vault import tokenize_card
 IDEMPOTENCY_WAIT_SECONDS = 5.0
 REDIS_LOCK_MILLISECONDS = 10_000
 POLL_INTERVAL_SECONDS = 0.02
+
 ROUTE_CONFIG_VERSION = 1
+
+_logger = logging.getLogger(__name__)
 
 _RELEASE_LOCK_SCRIPT = (
     "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0"
@@ -245,9 +255,18 @@ def _claim(
 
 
 def _call_provider(provider: ProviderPort, claim: _Claim, request: ChargeRequest) -> ProviderResult | None:
-    """Outside any transaction. None means the outcome is unknown (timeout or transport failure)."""
+    """Outside any transaction. None means the outcome is unknown (timeout, transport failure, or a rejected
+    request that is not a decline): the payment is finalized as unknown instead of waiting for its lease."""
     try:
         return provider.charge(str(claim.attempt_id), request.amount_minor, request.currency, claim.card)
+    except ProviderRequestError as exc:
+        _logger.error(
+            "provider rejected request: provider=%s attempt=%s error=%s",
+            provider.name,
+            claim.attempt_id,
+            type(exc).__name__,
+        )
+        return None
     except (ProviderTimeoutError, ConnectionError, TimeoutError):
         return None
 
