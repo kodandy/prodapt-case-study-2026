@@ -6,6 +6,8 @@ from redis import Redis
 from ops_ai.app import OpsAiAppDeps, create_app
 from ops_ai.assistant.llm_port import LlmPort, MockLlm
 from ops_ai.assistant.openai_llm import OpenAiLlm
+from ops_ai.assistant.openai_tool_calling import OpenAiToolCallingLlm
+from ops_ai.assistant.tool_calling import ToolCallingLlm
 from ops_ai.clock import system_clock
 from ops_ai.config import load_ops_ai_settings
 from ops_ai.db import make_engine, make_session_factory
@@ -36,9 +38,16 @@ def build_app_from_env() -> FastAPI:
         socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
     )
     llm: LlmPort = MockLlm()
+    tool_llm: ToolCallingLlm | None = None
     api_key = settings.openai_api_key
     if api_key is not None and api_key.get_secret_value():
         llm = OpenAiLlm(
+            api_key=api_key,
+            chat_model=settings.openai_chat_model,
+            fallback_model=settings.openai_fallback_model,
+            base_url=settings.openai_base_url,
+        )
+        tool_llm = OpenAiToolCallingLlm(
             api_key=api_key,
             chat_model=settings.openai_chat_model,
             fallback_model=settings.openai_fallback_model,
@@ -53,6 +62,7 @@ def build_app_from_env() -> FastAPI:
         OpsAiAppDeps(
             session_factory=session_factory,
             llm=InstrumentedLlm(llm),
+            tool_llm=tool_llm,
             jwt_public_key_pem=settings.jwt_public_key_pem,
             clock=system_clock,
             readiness=lambda: check_ready(session_factory, redis),

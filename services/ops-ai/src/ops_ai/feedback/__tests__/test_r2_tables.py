@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from conftest import ALEMBIC_CONFIGS
 
 R2_REVISION = "c7e3a1d9b4f2"
-PREVIOUS_REVISION = "b12c4e7a9f31"
+PREVIOUS_REVISION = "c7d3e9a1f254"
 R2_TABLES = (
     "agent_messages",
     "kyc_profiles",
@@ -653,15 +653,17 @@ def test_the_r2_migration_is_a_single_step_after_the_ticket_lifecycle_migration(
     assert revision.down_revision == PREVIOUS_REVISION
 
 
-def test_the_alembic_head_is_the_r2_migration() -> None:
+def test_the_r2_migration_is_an_ancestor_of_the_single_alembic_head() -> None:
     # Arrange
     script = ScriptDirectory.from_config(_ops_ai_config())
 
     # Act
     heads = script.get_heads()
+    ancestors = {revision.revision for revision in script.iterate_revisions(heads[0], "base")}
 
     # Assert
-    assert heads == [R2_REVISION]
+    assert len(heads) == 1
+    assert R2_REVISION in ancestors
 
 
 def test_migration_downgrade_removes_all_five_tables_and_upgrade_restores_them(engine: Engine) -> None:
