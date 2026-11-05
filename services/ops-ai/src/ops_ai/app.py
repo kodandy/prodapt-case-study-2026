@@ -16,11 +16,15 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from ops_ai.analytics.access import ForbiddenOpsError, OpsAccess, require_ops_principal
 from ops_ai.analytics.routes import create_analytics_router
+from ops_ai.agents.bus import RedisStreamTransport
+from ops_ai.agents.routes import create_agents_router
 from ops_ai.assistant.llm_port import LlmPort
 from ops_ai.assistant.service import AnswerMode, ask
 from ops_ai.auth import InvalidTokenError, verify_token
+from ops_ai.bulk.routes import create_bulk_router
 from ops_ai.clock import Clock
 from ops_ai.compliance.api import create_compliance_router
+from ops_ai.feedback.routes import create_feedback_router
 from ops_ai.fraud_watch import FraudAnalysis
 from ops_ai.fraud_watch.service import FraudCause, FraudIntent, investigate_fraud
 from ops_ai.investigation.service import CauseLabel, Intent, investigate
@@ -29,6 +33,7 @@ from ops_ai.memory.routes import build_memory_router
 from ops_ai.memory.session import SessionStore
 from ops_ai.scope import ForbiddenPrincipalError, OpsScope, Principal, Scope, UserScope, require_ops_role
 from ops_ai.search.embedder import Embedder, LocalHashEmbedder
+from ops_ai.search.incident_routes import create_incident_search_router
 from ops_ai.settlement.service import explain_payout
 from ops_ai.settlement.statement import LineKind
 from ops_ai.tickets.api import create_ticket_router
@@ -517,6 +522,21 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
         create_analytics_router(deps.session_factory, deps.clock, merchant_scope, analytics_ops_access)
     )
     app.include_router(create_compliance_router(deps.session_factory, ops_scope))
+    app.include_router(create_feedback_router(deps.session_factory, deps.clock, merchant_scope))
+    app.include_router(create_bulk_router(deps.session_factory, deps.llm, merchant_scope))
+    app.include_router(
+        create_incident_search_router(deps.session_factory, deps.clock, deps.embedder, merchant_scope)
+    )
+    app.include_router(
+        create_agents_router(
+            deps.session_factory,
+            deps.llm,
+            deps.clock,
+            merchant_scope,
+            user_scope,
+            None if deps.redis is None else RedisStreamTransport(deps.redis),
+        )
+    )
     return app
 
 
