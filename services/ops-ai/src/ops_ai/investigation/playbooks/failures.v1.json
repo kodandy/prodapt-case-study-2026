@@ -1,0 +1,112 @@
+{
+  "version": "failures.v1",
+  "entries": [
+    {
+      "taxonomy_code": "issuer_unavailable",
+      "fix": "Route the affected BIN range to the secondary acquirer and do not auto-retry timed-out charges; reconcile their outcome with the issuer first.",
+      "hypothesis": "The issuer (or its processor) is not answering authorisation requests, so charges time out or are rejected as issuer unavailable.",
+      "how_to_confirm": [
+        "Check whether the failures concentrate on one card BIN or issuer.",
+        "Compare the issuer_unavailable rate in the window with the 7-day baseline.",
+        "Check the acquirer status page and open incidents for the same issuer."
+      ]
+    },
+    {
+      "taxonomy_code": "do_not_honor",
+      "fix": "Ask the cardholder to contact their bank or use another card; do not retry the same card automatically.",
+      "hypothesis": "The issuer is refusing the charge without a specific reason, often from its own risk rules.",
+      "how_to_confirm": [
+        "Check whether the declines come from many cardholders or a few repeat cards.",
+        "Check whether the same cards later succeed after the cardholder contacts the bank."
+      ]
+    },
+    {
+      "taxonomy_code": "card_declined",
+      "fix": "Show the cardholder a clear decline message and offer another payment method.",
+      "hypothesis": "The issuer declined the charge with a generic decline.",
+      "how_to_confirm": [
+        "Check whether the declines concentrate on one BIN or issuer.",
+        "Compare the generic decline rate with the 7-day baseline."
+      ]
+    },
+    {
+      "taxonomy_code": "insufficient_funds",
+      "fix": "Tell the cardholder the balance is too low and offer a smaller amount or another payment method.",
+      "hypothesis": "Cardholders do not have enough available balance for these charges.",
+      "how_to_confirm": [
+        "Check whether the failed amounts are higher than the merchant's usual ticket size.",
+        "Check whether the declines cluster around a pay cycle or a price change."
+      ]
+    },
+    {
+      "taxonomy_code": "expired_card",
+      "fix": "Ask the cardholder to update the card, and enable account updater for stored cards.",
+      "hypothesis": "Stored or entered cards are past their expiry date.",
+      "how_to_confirm": [
+        "Check whether the failures come from stored cards on recurring charges.",
+        "Check whether account updater is enabled for the merchant."
+      ]
+    },
+    {
+      "taxonomy_code": "incorrect_cvc",
+      "fix": "Ask the cardholder to re-enter the security code; review the checkout form for a field or validation bug.",
+      "hypothesis": "The security code sent with the charge does not match the card.",
+      "how_to_confirm": [
+        "Check whether the failures started after a checkout release.",
+        "Check whether many distinct cards fail the CVC check, which points at the form rather than cardholders."
+      ]
+    },
+    {
+      "taxonomy_code": "fraud_flagged",
+      "fix": "Escalate to the risk team and keep the affected cards blocked until they review the pattern.",
+      "hypothesis": "Risk rules flagged the charges as likely fraud, for example card testing.",
+      "how_to_confirm": [
+        "Check fraud alerts for the merchant in the same window.",
+        "Check whether many small charges came from few cards or devices in a short time."
+      ]
+    },
+    {
+      "taxonomy_code": "processing_error",
+      "fix": "Retry the charge with the same idempotency key once the acquirer recovers; escalate to the acquirer if errors persist.",
+      "hypothesis": "The acquirer or processor returned a processing error for these charges.",
+      "how_to_confirm": [
+        "Check the acquirer error rate and status page for the window.",
+        "Check whether retries with the same idempotency key succeed."
+      ]
+    },
+    {
+      "taxonomy_code": "rate_limited",
+      "fix": "Back off and retry with the same idempotency key; spread traffic or raise the provider rate limit.",
+      "hypothesis": "Requests exceeded a provider or platform rate limit.",
+      "how_to_confirm": [
+        "Check whether request volume spiked in the window.",
+        "Check provider responses for HTTP 429 or rate limit messages."
+      ]
+    },
+    {
+      "taxonomy_code": "cross_border_limit_kyc_tier",
+      "fix": "Ask the sender to complete the next KYC tier, or split the transfer within the current tier limit.",
+      "hypothesis": "The transfer exceeds the cross-border limit of the sender's KYC tier.",
+      "how_to_confirm": [
+        "Compare the transfer amount with the sender's tier limit.",
+        "Check the limit rule that rejected the transfer."
+      ]
+    },
+    {
+      "taxonomy_code": "kyc_verification_failed",
+      "fix": "Ask the sender to finish or redo identity verification before retrying the transfer.",
+      "hypothesis": "The sender's identity verification is pending or failed.",
+      "how_to_confirm": [
+        "Check the sender's KYC status and the date of the last verification attempt."
+      ]
+    },
+    {
+      "taxonomy_code": "unclassified",
+      "fix": "Collect the raw failure codes and escalate to the payments team for classification; do not auto-retry.",
+      "hypothesis": "The failures carry codes the taxonomy does not map yet.",
+      "how_to_confirm": [
+        "Review the raw failure codes and sample payments for a common pattern."
+      ]
+    }
+  ]
+}
