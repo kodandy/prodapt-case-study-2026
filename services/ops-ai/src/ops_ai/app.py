@@ -340,6 +340,7 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
     - GET /v1/tickets, GET /v1/tickets/{id}, POST /v1/tickets/{id}/transition (merchant token):
       see ops_ai.tickets.api.
     - GET /v1/ops/compliance/erasures (ops token): see ops_ai.compliance.api.
+    - GET /v1/ops/analytics/{alerts,forecast,chargeback-risk} (ops token): see ops_ai.analytics.routes.
     Missing/invalid/expired token → 401 {"detail": "invalid token"}. A valid token of another kind (user or
     ops token on the merchant routes, merchant or ops token on the transfer route, a non-ops token on the ops
     routes) → 403 {"detail": "forbidden"}.
