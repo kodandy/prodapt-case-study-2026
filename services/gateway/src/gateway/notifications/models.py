@@ -16,6 +16,7 @@ class Notification(GatewayBase):
     __table_args__ = (
         UniqueConstraint("source_event_id", "kind"),
         Index("ix_notifications_recipient_created", "recipient_id", "created_at"),
+        Index("ix_notifications_recipient_feed", "recipient_type", "recipient_id", "created_at", "id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
@@ -27,6 +28,10 @@ class Notification(GatewayBase):
     channel: Mapped[str] = mapped_column(String(16))
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
     created_at: Mapped[datetime]
+    read_at: Mapped[datetime | None]
+    response: Mapped[str | None] = mapped_column(String(16))
+    """`confirmed | not_me`, only on `was_this_you`."""
+    responded_at: Mapped[datetime | None]
 
 
 class NotificationProcessedEvent(GatewayBase):

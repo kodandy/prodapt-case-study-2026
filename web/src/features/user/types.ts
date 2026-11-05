@@ -43,3 +43,32 @@ export interface TransferHistory {
   items: TransferHistoryItem[];
   next_cursor: string | null;
 }
+
+export interface ConsumerChargeResult {
+  payment_id: string;
+  state: string;
+  amount_minor: number;
+  currency: Currency;
+  card: { bin: string; last4: string } | null;
+  decline_code: string | null;
+}
+
+export interface ConsumerPayment {
+  payment_id: string;
+  merchant_id: string;
+  state: string;
+  amount_minor: number;
+  currency: Currency;
+  card: { bin: string; last4: string } | null;
+  decline_code: string | null;
+  refunded_minor: number;
+  disputed_minor: number;
+  chargeback_minor: number;
+  chargeback_flag: boolean;
+  created_at: string;
+}
+
+export interface ConsumerPaymentList {
+  items: ConsumerPayment[];
+  next_cursor: string | null;
+}

@@ -91,6 +91,23 @@ export interface SettlementExplanation extends AssistantAnswer {
   summary: string;
 }
 
+export interface DisputeView {
+  dispute_id: string;
+  payment_id: string;
+  state: string;
+  amount_minor: number;
+  currency: Currency;
+  reason: string;
+  chargeback_fee_minor: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DisputeList {
+  items: DisputeView[];
+  next_cursor: string | null;
+}
+
 export function refundableMinor(p: PaymentSummary): number {
   return Math.max(0, p.amount_minor - p.refunded_minor - p.disputed_minor - p.chargeback_minor);
 }

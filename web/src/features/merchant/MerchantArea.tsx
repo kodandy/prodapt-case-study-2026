@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { errorMessageOf, useAuthState, useServices } from "../../app/services";
+import { Disclosure } from "../../components/Disclosure";
 import { AssistantPanel } from "./AssistantPanel";
+import { DisputesPanel } from "./DisputesPanel";
 import { KeyEntry } from "./KeyEntry";
+import { MerchantNotificationsPanel } from "./MerchantNotificationsPanel";
 import { PaymentDetail } from "./PaymentDetail";
 import { PaymentsPanel } from "./PaymentsPanel";
 import { SettlementPanel } from "./SettlementPanel";
@@ -80,6 +83,12 @@ function SignedInMerchant(): ReactNode {
         <div className="stack">
           <AssistantPanel knownPaymentIds={knownPaymentIds} onOpenPayment={setOpenId} />
           <SettlementPanel />
+          <Disclosure label="disputes">
+            <DisputesPanel />
+          </Disclosure>
+          <Disclosure label="notifications">
+            <MerchantNotificationsPanel />
+          </Disclosure>
         </div>
       </div>
     </div>

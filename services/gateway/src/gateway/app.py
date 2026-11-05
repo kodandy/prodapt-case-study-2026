@@ -88,7 +88,11 @@ from gateway.compliance.kyc import (
     screen_operation,
     user_operation_lock,
 )
+from gateway.notifications.routes import notification_router
 from gateway.payments.charge import ChargeDeps, charge_card
+from gateway.payments.consumer import USER_KEY_PREFIX
+from gateway.payments.consumer_routes import consumer_payment_router
+from gateway.payments.dispute_routes import dispute_router
 from gateway.payments.disputes import (
     DisputeNotFoundError,
     InvalidDisputeTransitionError,
@@ -135,6 +139,10 @@ class GatewayAppDeps:
     login_slots: threading.BoundedSemaphore | None = None
     """Caps concurrent argon2 verifications on login; None → LOGIN_CONCURRENCY slots."""
     totp_encryption_key: str | None = field(default=None, repr=False)
+    network_token: str | None = field(default=None, repr=False)
+    """X-Network-Token of the simulated card network; None → its routes answer 503."""
+    ops_admin_token: str | None = field(default=None, repr=False)
+    """Interim X-Ops-Admin-Token for ops dispute resolution; None → 503."""
 
 
 class SignUpRequest(BaseModel):
@@ -290,6 +298,8 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
       POST /v1/ops/users/{user_id}/kyc/verify {outcome}, GET /v1/ops/data-requests?overdue&limit,
       GET /v1/ops/audit?target&limit (ops_lead). No or invalid ops session → 401 "invalid ops session"; a role
       outside the policy → 403 "forbidden". Merchant routes likewise answer 403 for a key role outside it.
+    - Consumer payments (`consumer_payment_router`), dispute lists / opening / resolution (`dispute_router`)
+      and notifications (`notification_router`) are documented on their routers.
     - GET /healthz → 200 (liveness). GET /readyz → 200 ready, or 503 with the failed components.
     """
     app = FastAPI(title="gateway")
@@ -611,6 +621,8 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         idempotency_key: Annotated[str | None, Header(max_length=255)] = None,
     ) -> JSONResponse:
         key = _require_idempotency_key(idempotency_key)
+        if key.startswith(USER_KEY_PREFIX):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid Idempotency-Key header")
         outcome = charge_card(deps.charge, merchant_id, key, body)
         return JSONResponse(outcome.body, status_code=outcome.status_code)
 
@@ -863,6 +875,19 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
             items = list_audit(session, target, limit)
         return JSONResponse({"items": items}, headers=NO_STORE_HEADERS)
 
+    clock = deps.charge.clock
+    app.include_router(consumer_payment_router(deps.charge, clock, session_user))
+    app.include_router(
+        dispute_router(
+            session_factory,
+            clock,
+            merchant_from_api_key,
+            session_user,
+            deps.network_token,
+            deps.ops_admin_token,
+        )
+    )
+    app.include_router(notification_router(session_factory, clock, merchant_from_api_key, session_user))
     return app
 
 

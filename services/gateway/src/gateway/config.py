@@ -17,6 +17,10 @@ class GatewaySettings(BaseSettings):
     totp_encryption_key: SecretStr | None = Field(default=None, min_length=MIN_SECRET_LENGTH)
     db_role: str | None = None
     """GATEWAY_DB_ROLE: least-privilege role every connection switches to (P0-10)."""
+    network_token: SecretStr | None = Field(default=None, min_length=MIN_SECRET_LENGTH)
+    """Unset → the simulated card-network routes answer 503."""
+    ops_admin_token: SecretStr | None = Field(default=None, min_length=MIN_SECRET_LENGTH)
+    """Unset → the ops dispute-resolution route answers 503 (interim until the RBAC OpsGuard)."""
 
 
 def load_gateway_settings() -> GatewaySettings:

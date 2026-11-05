@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from gateway.audit.models import AuditLog
 from gateway.clock import Clock
+from gateway.notifications.records import add_notification
 from gateway.payments.ledger.service import PostingLine, ensure_account, post_journal
 from gateway.payments.models import Dispute
 from gateway.payments.refunds import lock_payment, refundable_minor
@@ -53,48 +54,92 @@ def open_dispute(
     payment_id: uuid.UUID,
     reason: str,
     amount_minor: int | None = None,
+    *,
+    payer_user_id: uuid.UUID | None = None,
+    actor_id: str = "network",
+    actor_role: str = "card_network",
 ) -> DisputeView:
-    """Network-side: opens a dispute and reserves its amount on the payment (`disputed_minor`)."""
-    if not _valid_reason(reason):
+    """Opens a dispute and reserves its amount on the payment (`disputed_minor`).
+
+    With `payer_user_id` (consumer route) a payment the user did not pay raises PaymentNotFoundError, the same
+    as an unknown one. The owning merchant gets a `dispute_opened` notification in the same transaction.
+    """
+    if not valid_dispute_reason(reason):
         raise InvalidDisputeReasonError
     with session_factory.begin() as session:
-        payment = lock_payment(session, payment_id)
-        if payment is None:
-            raise PaymentNotFoundError
-        if payment.state != "succeeded":
-            raise PaymentNotDisputableError
-        active = session.scalar(
-            select(Dispute.id).where(
-                Dispute.payment_id == payment_id, Dispute.state.in_(("opened", "under_review"))
-            )
+        return open_dispute_in_session(
+            session,
+            clock,
+            payment_id,
+            reason,
+            amount_minor,
+            payer_user_id=payer_user_id,
+            actor_id=actor_id,
+            actor_role=actor_role,
         )
-        if active is not None:
-            raise DisputeAlreadyOpenError
-        available = refundable_minor(payment)
-        amount = available if amount_minor is None else amount_minor
-        if amount <= 0 or amount > available:
-            raise DisputeAmountExceedsError
-        now = clock()
-        dispute = Dispute(
-            id=uuid.uuid4(),
-            payment_id=payment.id,
-            merchant_id=payment.merchant_id,
-            amount_minor=amount,
-            currency=payment.currency,
-            reason=reason,
-            state="opened",
-            evidence_text=None,
-            chargeback_fee_minor=0,
-            created_at=now,
-            updated_at=now,
-            resolved_at=None,
+
+
+def open_dispute_in_session(
+    session: Session,
+    clock: Clock,
+    payment_id: uuid.UUID,
+    reason: str,
+    amount_minor: int | None = None,
+    *,
+    payer_user_id: uuid.UUID | None = None,
+    actor_id: str = "network",
+    actor_role: str = "card_network",
+) -> DisputeView:
+    """`open_dispute` inside the caller's transaction (the caller commits or rolls back)."""
+    if not valid_dispute_reason(reason):
+        raise InvalidDisputeReasonError
+    payment = lock_payment(session, payment_id, payer_user_id=payer_user_id)
+    if payment is None:
+        raise PaymentNotFoundError
+    if payment.state != "succeeded":
+        raise PaymentNotDisputableError
+    active = session.scalar(
+        select(Dispute.id).where(
+            Dispute.payment_id == payment_id, Dispute.state.in_(("opened", "under_review"))
         )
-        session.add(dispute)
-        payment.disputed_minor += amount
-        payment.updated_at = now
-        session.flush()
-        _audit(session, clock, "network", "card_network", "dispute.opened", dispute, {"amount_minor": amount})
-        return _view(dispute)
+    )
+    if active is not None:
+        raise DisputeAlreadyOpenError
+    available = refundable_minor(payment)
+    amount = available if amount_minor is None else amount_minor
+    if amount <= 0 or amount > available:
+        raise DisputeAmountExceedsError
+    now = clock()
+    dispute = Dispute(
+        id=uuid.uuid4(),
+        payment_id=payment.id,
+        merchant_id=payment.merchant_id,
+        amount_minor=amount,
+        currency=payment.currency,
+        reason=reason,
+        state="opened",
+        evidence_text=None,
+        chargeback_fee_minor=0,
+        created_at=now,
+        updated_at=now,
+        resolved_at=None,
+    )
+    session.add(dispute)
+    payment.disputed_minor += amount
+    payment.updated_at = now
+    session.flush()
+    _audit(session, clock, actor_id, actor_role, "dispute.opened", dispute, {"amount_minor": amount})
+    add_notification(
+        session,
+        now,
+        "dispute_opened",
+        "merchant",
+        dispute.merchant_id,
+        payment.id,
+        dispute.id,
+        _notice_payload(dispute),
+    )
+    return dispute_view(dispute)
 
 
 def submit_evidence(
@@ -124,7 +169,7 @@ def submit_evidence(
             dispute,
             {"evidence_chars": len(text)},
         )
-        return _view(dispute)
+        return dispute_view(dispute)
 
 
 def resolve_dispute(
@@ -133,8 +178,11 @@ def resolve_dispute(
     dispute_id: uuid.UUID,
     outcome: DisputeOutcome,
     actor_id: str,
+    actor_role: str = "ops_lead",
 ) -> DisputeView:
-    """Network / ops_lead: `under_review → won | lost`. `lost` posts the chargeback and its fee."""
+    """Network / ops_lead: `under_review → won | lost`. `lost` posts the chargeback and its fee and sets the
+    payment's `chargeback_flag`. Notifies the merchant (`dispute_resolved`) and the payer, if any
+    (`dispute_update`)."""
     if outcome not in ("won", "lost"):
         raise ValueError(f"unknown dispute outcome: {outcome!r}")
     with session_factory.begin() as session:
@@ -151,6 +199,7 @@ def resolve_dispute(
         if outcome == "lost":
             fee = CHARGEBACK_FEE_MINOR[dispute.currency]
             payment.chargeback_minor += dispute.amount_minor
+            payment.chargeback_flag = True
             dispute.chargeback_fee_minor = fee
             _post_chargeback(session, clock, dispute, fee)
         payment.updated_at = now
@@ -162,12 +211,20 @@ def resolve_dispute(
             session,
             clock,
             actor_id,
-            "ops_lead",
+            actor_role,
             "dispute.resolved",
             dispute,
             {"outcome": outcome, "chargeback_fee_minor": dispute.chargeback_fee_minor},
         )
-        return _view(dispute)
+        payload = _notice_payload(dispute)
+        add_notification(
+            session, now, "dispute_resolved", "merchant", dispute.merchant_id, payment.id, dispute.id, payload
+        )
+        if payment.payer_user_id is not None:
+            add_notification(
+                session, now, "dispute_update", "user", payment.payer_user_id, payment.id, dispute.id, payload
+            )
+        return dispute_view(dispute)
 
 
 def get_dispute(session: Session, merchant_id: uuid.UUID, dispute_id: uuid.UUID) -> DisputeView:
@@ -175,7 +232,7 @@ def get_dispute(session: Session, merchant_id: uuid.UUID, dispute_id: uuid.UUID)
     dispute = session.get(Dispute, dispute_id)
     if dispute is None or dispute.merchant_id != merchant_id:
         raise DisputeNotFoundError
-    return _view(dispute)
+    return dispute_view(dispute)
 
 
 def _lock_dispute(
@@ -228,7 +285,16 @@ def _audit(
     )
 
 
-def _view(dispute: Dispute) -> DisputeView:
+def _notice_payload(dispute: Dispute) -> dict[str, object]:
+    return {
+        "dispute_id": str(dispute.id),
+        "state": dispute.state,
+        "amount_minor": dispute.amount_minor,
+        "currency": dispute.currency,
+    }
+
+
+def dispute_view(dispute: Dispute) -> DisputeView:
     return DisputeView(
         dispute_id=dispute.id,
         payment_id=dispute.payment_id,
@@ -242,7 +308,7 @@ def _view(dispute: Dispute) -> DisputeView:
     )
 
 
-def _valid_reason(reason: str) -> bool:
+def valid_dispute_reason(reason: str) -> bool:
     """1 to MAX_REASON_LENGTH chars, not blank, no Unicode Cc/Cf (NUL, newlines, zero-width, bidi)."""
     if not reason.strip() or len(reason) > MAX_REASON_LENGTH:
         return False

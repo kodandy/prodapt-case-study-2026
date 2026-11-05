@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from gateway.clock import Clock
 from gateway.notifications.models import Notification, NotificationProcessedEvent
+from gateway.notifications.records import add_notification
 from gateway.outbox.models import OutboxEvent
 from gateway.payments.models import Payment
 
@@ -88,6 +89,37 @@ def _notify(session: Session, now: datetime, outbox_event_id: uuid.UUID, payload
         # Score and reasons draw on the card's activity at every merchant, so they stay internal.
         alert = {**amount, "blocked": payment.risk_blocked}
         created += _create(session, now, event, payment, "suspicious_activity", alert)
+    if payment.payer_user_id is not None:
+        created += _notify_payer(session, now, event, payment, payment.payer_user_id)
+    return created
+
+
+def _notify_payer(
+    session: Session, now: datetime, event: PaymentEventV1, payment: Payment, payer_user_id: uuid.UUID
+) -> int:
+    """In-app records for the paying user (no outbox row): a receipt, and a "was this you?" notice when
+    the risk rules flagged or blocked the payment."""
+    payload: dict[str, object] = {
+        "amount_minor": payment.amount_minor,
+        "currency": payment.currency,
+        "merchant_id": str(payment.merchant_id),
+    }
+    created = 0
+    if event.event_type == "payment.succeeded" and add_notification(
+        session, now, "payment_receipt", "user", payer_user_id, payment.id, event.event_id, payload
+    ):
+        created += 1
+    if (payment.risk_flagged or payment.risk_blocked) and add_notification(
+        session,
+        now,
+        "was_this_you",
+        "user",
+        payer_user_id,
+        payment.id,
+        event.event_id,
+        {**payload, "blocked": payment.risk_blocked},
+    ):
+        created += 1
     return created
 
 

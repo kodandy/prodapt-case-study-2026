@@ -36,6 +36,7 @@ class Payment(GatewayBase):
         ),
         Index("ix_payments_merchant_history", "merchant_id", "created_at", "id"),
         Index("ix_payments_card_fingerprint_created", "card_fingerprint", "created_at"),
+        Index("ix_payments_payer_history", "payer_user_id", "created_at", "id"),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
@@ -58,6 +59,10 @@ class Payment(GatewayBase):
     risk_reasons: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
     risk_flagged: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     risk_blocked: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    payer_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    """The signed-in user who paid (POST /v1/me/payments); null for merchant-initiated charges."""
+    chargeback_flag: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    """Set once a dispute on the payment is lost; never reset."""
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
 
