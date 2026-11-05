@@ -68,5 +68,6 @@ def build_app_from_env() -> FastAPI:
             readiness=lambda: check_ready(session_factory, redis),
             embedder=embedder,
             redis=redis,
+            judge_llm=None if isinstance(llm, MockLlm) else InstrumentedLlm(llm),
         )
     )

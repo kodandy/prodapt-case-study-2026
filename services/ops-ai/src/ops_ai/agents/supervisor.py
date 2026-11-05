@@ -27,6 +27,7 @@ from ops_ai.assistant.llm_port import LlmPort, LlmRequest, LlmUnavailableError
 from ops_ai.assistant.service import MAX_QUESTION_CHARS, AnswerMode
 from ops_ai.feedback.thresholds import is_flagged
 from ops_ai.investigation.service import ToolCall
+from ops_ai.judge.dispute_summary import DisputeJudgement, DisputeRecordSource, judge_merchant_disputes
 from ops_ai.scope import Scope
 from ops_ai.settlement.statement import SettlementStatement
 
@@ -69,6 +70,7 @@ class AgentState:
     status: ContributionStatus = "no_finding"
     summaries: list[str] = field(default_factory=list)
     evidence: list[EvidenceItem] = field(default_factory=list)
+    judge: DisputeJudgement | None = None
 
     def contribution(self) -> AgentContribution:
         return AgentContribution(
@@ -77,6 +79,7 @@ class AgentState:
             summary=" ".join(self.summaries),
             evidence=tuple(self.evidence),
             tool_calls=tuple(self.toolbox.tool_calls),
+            judge=self.judge,
         )
 
 
@@ -104,8 +107,16 @@ def _line_total(statement: SettlementStatement, kind: str) -> int:
 class MerchantRun:
     """One merchant investigation: the agents' handlers and their state."""
 
-    def __init__(self, session: Session, scope: Scope, now: datetime, bus: InProcessBus) -> None:
+    def __init__(
+        self,
+        session: Session,
+        scope: Scope,
+        now: datetime,
+        bus: InProcessBus,
+        dispute_records: DisputeRecordSource | None = None,
+    ) -> None:
         self.scope = scope
+        self.dispute_records = dispute_records
         self.now = now
         self.bus = bus
         self.states: dict[AgentName, AgentState] = {
@@ -294,23 +305,54 @@ class MerchantRun:
             )
         else:
             state.summaries.append("No dispute ticket and no chargeback is on record.")
+        judgement = judge_merchant_disputes(self.scope, self.dispute_records)
+        state.judge = judgement
+        if judgement.status == "judged":
+            state.evidence.append(
+                EvidenceItem(
+                    ref=f"dispute_judge:{self.scope.merchant_id}",
+                    summary=(
+                        f"Dispute judge: {judgement.disputes} dispute workflow(s), worst verdict "
+                        f"{judgement.verdict}, rubric score {judgement.score}"
+                    ),
+                )
+            )
+            state.summaries.append(
+                f"The dispute judge rates {judgement.disputes} dispute workflow(s) {judgement.verdict}."
+            )
+            if judgement.passed is False:
+                state.status = "finding"
         self.send(
             "dispute",
             "supervisor",
             "finding",
-            {"status": state.status},
+            {
+                "status": state.status,
+                "judge_status": judgement.status,
+                "judge_reason": judgement.reason,
+                "judge_disputes": judgement.disputes,
+                "judge_verdict": judgement.verdict,
+                "judge_score": judgement.score,
+                "judge_passed": judgement.passed,
+                "judge_rationale": judgement.rationale,
+            },
             [item.ref for item in state.evidence],
         )
 
 
 def run_agents(
-    session: Session, scope: Scope, question: str, now: datetime, transport: MessageTransport | None = None
+    session: Session,
+    scope: Scope,
+    question: str,
+    now: datetime,
+    transport: MessageTransport | None = None,
+    dispute_records: DisputeRecordSource | None = None,
 ) -> AgentInvestigation:
     """Runs the planned agents and persists the message trail (the caller commits); no LLM call, so the
     caller can release the DB connection before `narrate_investigation`."""
     plan = plan_agents(question)
     bus = InProcessBus(uuid.uuid4(), lambda: now, transport=transport)
-    run = MerchantRun(session, scope, now, bus)
+    run = MerchantRun(session, scope, now, bus, dispute_records)
     truncated = run.run(plan)
     contributions = run.contributions()
     evidence = combine_evidence(contributions)

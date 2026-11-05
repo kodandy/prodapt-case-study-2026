@@ -9,6 +9,7 @@ from typing import Literal, cast, get_args
 
 from ops_ai.assistant.evidence import EvidenceItem
 from ops_ai.investigation.service import ToolCall
+from ops_ai.judge.dispute_summary import DisputeJudgement
 
 AgentName = Literal["supervisor", "fraud", "settlement", "dispute", "compliance"]
 MessageIntent = Literal[
@@ -52,6 +53,7 @@ class AgentContribution:
     summary: str
     evidence: tuple[EvidenceItem, ...]
     tool_calls: tuple[ToolCall, ...]
+    judge: DisputeJudgement | None = None
 
 
 def message_to_json(message: AgentMessage) -> str:
