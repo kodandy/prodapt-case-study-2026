@@ -89,15 +89,15 @@ keys and manual rotation are not a real KMS integration.
 
 ## Known gaps
 
-Open security-audit items (H1-H3, M6 and L3 from the same audit are fixed and covered by
-`test_hardening.py` / `test_risk_provider_unavailable.py`):
+Open security-audit items (H1-H3, M6, L1 and L3 from the same audit are fixed and covered by
+`test_hardening.py` / `test_risk_provider_unavailable.py` / `test_method_label.py`; L1: non-standard
+HTTP methods are labelled `OTHER`):
 
 - **M1:** Limiter shares the Redis pool and its timeouts with payment coordination.
 - **M2:** Per-bearer buckets do not bound API-key guessing; edge `limit_req` is design only.
 - **M3:** Non-timeout provider exceptions are re-raised; safe unknown-outcome classification is incomplete.
 - **M4:** Breaker admission tokens / stale outcomes are not tracked across state transitions.
 - **M5:** `/metrics` remains unauthenticated on the app port; only the nginx public proxy blocks it.
-- **L1:** HTTP method label cardinality is not bounded to an allowlist.
 - **L2:** Span exception recording can capture sensitive exception details.
 - **L4:** Merchant bucket uses key hash, not merchant id; multiple keys get independent capacity.
 - **L5:** Grafana uses a default dev password; container images use version tags rather than digests.

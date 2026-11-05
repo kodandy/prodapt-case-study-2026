@@ -10,6 +10,8 @@ from ops_ai.observability.tracing import PROPAGATOR, TRACEPARENT, configure_trac
 
 METRICS_PATH = "/metrics"
 UNMATCHED_ROUTE = "unmatched"
+KNOWN_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
+OTHER_METHOD = "OTHER"
 
 
 def route_template(scope: Scope) -> str:
@@ -17,6 +19,13 @@ def route_template(scope: Scope) -> str:
     route = scope.get("route")
     path = getattr(route, "path", None)
     return path if isinstance(path, str) else UNMATCHED_ROUTE
+
+
+def method_label(scope: Scope) -> str:
+    """The request method if standard, else OTHER: clients choose the method token, so it is never a label
+    as-is (arbitrary tokens would grow label cardinality without bound)."""
+    method = scope["method"]
+    return method if method in KNOWN_METHODS else OTHER_METHOD
 
 
 class ObservabilityMiddleware:
@@ -33,7 +42,7 @@ class ObservabilityMiddleware:
             return
         headers = {k.decode("latin-1"): v.decode("latin-1") for k, v in scope["headers"]}
         parent = PROPAGATOR.extract({TRACEPARENT: headers[TRACEPARENT]} if TRACEPARENT in headers else {})
-        method = scope["method"]
+        method = method_label(scope)
         status = 500
         started = time.perf_counter()
         with self.tracer.start_as_current_span(method, context=parent, kind=trace.SpanKind.SERVER) as span:
