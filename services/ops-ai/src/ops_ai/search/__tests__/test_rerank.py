@@ -258,9 +258,7 @@ def test_identical_candidates_are_ordered_by_incident_id_ascending() -> None:
 
 def test_a_lower_relevance_can_win_on_recency_and_effectiveness() -> None:
     # Arrange: A is the most relevant but unresolved and ancient; B is 80% as relevant but fresh and resolved
-    ancient = _candidate(
-        "INC-A", relevance=1.0, started_at=TEST_NOW - timedelta(days=300), resolved_at=None
-    )
+    ancient = _candidate("INC-A", relevance=1.0, started_at=TEST_NOW - timedelta(days=300), resolved_at=None)
     fresh = _candidate("INC-B", relevance=0.8, resolved_at=TEST_NOW)
 
     # Act

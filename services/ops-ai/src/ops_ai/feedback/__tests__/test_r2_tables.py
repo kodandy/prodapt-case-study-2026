@@ -158,8 +158,9 @@ def _execute(
 
 
 def _count(session_factory: sessionmaker[Session], table: str) -> int:
+    assert table in R2_TABLES
     with session_factory() as session:
-        return int(session.execute(text(f"SELECT count(*) FROM ops_ai.{table}")).scalar_one())
+        return int(session.execute(text(f"SELECT count(*) FROM ops_ai.{table}")).scalar_one())  # noqa: S608
 
 
 # --- metadata and columns -------------------------------------------------------------------------------
@@ -542,9 +543,7 @@ def test_steps_on_the_boundaries_of_the_check_are_accepted(
 
 
 @pytest.mark.parametrize("steps", [-1, 6])
-def test_steps_outside_zero_to_five_are_rejected(
-    session_factory: sessionmaker[Session], steps: int
-) -> None:
+def test_steps_outside_zero_to_five_are_rejected(session_factory: sessionmaker[Session], steps: int) -> None:
     # Arrange
     params = _version_params(steps=steps)
 
@@ -618,9 +617,7 @@ def test_incident_feedback_counters_default_to_zero(session_factory: sessionmake
 
     # Act
     with session_factory() as session:
-        row = session.execute(
-            text("SELECT helpful, not_helpful FROM ops_ai.incident_feedback_scores")
-        ).one()
+        row = session.execute(text("SELECT helpful, not_helpful FROM ops_ai.incident_feedback_scores")).one()
 
     # Assert
     assert tuple(row) == (0, 0)

@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from gateway.clock import FixedClock
+from ops_ai.clock import Clock
 from ops_ai.feedback.thresholds import (
     BASELINE,
     MAX_STEPS,
@@ -23,6 +23,20 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
 from conftest import TEST_NOW
+
+
+class _MutableClock:
+    """Callable fixed clock whose instant can be moved forward."""
+
+    def __init__(self, now: datetime) -> None:
+        self._now = now
+
+    def __call__(self) -> datetime:
+        return self._now
+
+    def advance(self, delta: timedelta) -> None:
+        self._now += delta
+
 
 MERCHANT = uuid.UUID("aaaaaaaa-0000-4000-8000-000000000001")
 OTHER_MERCHANT = uuid.UUID("bbbbbbbb-0000-4000-8000-000000000002")
@@ -446,7 +460,7 @@ def test_rule_history_excludes_the_rows_of_another_merchant(
 
 
 def test_revert_to_an_earlier_version_inserts_a_new_row_with_that_versions_values(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_version(session_factory, MERCHANT, 1, 1)
@@ -473,7 +487,7 @@ def test_revert_to_an_earlier_version_inserts_a_new_row_with_that_versions_value
 
 
 def test_revert_keeps_the_history_rows_it_reverted_over(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_version(session_factory, MERCHANT, 1, 1)
@@ -490,7 +504,7 @@ def test_revert_keeps_the_history_rows_it_reverted_over(
 
 
 def test_revert_to_version_zero_restores_the_baseline_values_in_a_new_row(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_version(session_factory, MERCHANT, 1, 1)
@@ -516,7 +530,7 @@ def test_revert_to_version_zero_restores_the_baseline_values_in_a_new_row(
 
 
 def test_revert_to_version_zero_without_any_row_creates_version_one(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange / Act
     with session_factory.begin() as session:
@@ -529,7 +543,7 @@ def test_revert_to_version_zero_without_any_row_creates_version_one(
 
 
 def test_revert_to_the_currently_active_version_still_inserts_a_new_row(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_version(session_factory, MERCHANT, 1, 2)
@@ -545,7 +559,7 @@ def test_revert_to_the_currently_active_version_still_inserts_a_new_row(
 
 
 def test_revert_to_an_unknown_version_returns_none_and_writes_nothing(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_version(session_factory, MERCHANT, 1, 1)
@@ -560,7 +574,7 @@ def test_revert_to_an_unknown_version_returns_none_and_writes_nothing(
 
 
 def test_revert_to_a_positive_version_without_any_row_returns_none(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange / Act
     with session_factory.begin() as session:
@@ -572,7 +586,7 @@ def test_revert_to_a_positive_version_without_any_row_returns_none(
 
 
 def test_revert_cannot_target_a_version_of_another_merchant(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_version(session_factory, OTHER_MERCHANT, 1, 4)
@@ -588,7 +602,7 @@ def test_revert_cannot_target_a_version_of_another_merchant(
 
 
 def test_revert_leaves_the_other_merchants_rules_untouched(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_version(session_factory, MERCHANT, 1, 1)
@@ -605,7 +619,7 @@ def test_revert_leaves_the_other_merchants_rules_untouched(
     assert _version_count(session_factory, OTHER_MERCHANT) == 1
 
 
-def test_revert_does_not_commit(session_factory: sessionmaker[Session], clock: FixedClock) -> None:
+def test_revert_does_not_commit(session_factory: sessionmaker[Session], clock: Clock) -> None:
     # Arrange
     _insert_version(session_factory, MERCHANT, 1, 1)
 
@@ -620,10 +634,9 @@ def test_revert_does_not_commit(session_factory: sessionmaker[Session], clock: F
     assert _version_count(session_factory, MERCHANT) == 1
 
 
-def test_revert_stamps_the_row_with_the_injected_clock(
-    session_factory: sessionmaker[Session], clock: FixedClock
-) -> None:
+def test_revert_stamps_the_row_with_the_injected_clock(session_factory: sessionmaker[Session]) -> None:
     # Arrange
+    clock = _MutableClock(TEST_NOW)
     _insert_version(session_factory, MERCHANT, 1, 1)
     clock.advance(timedelta(minutes=5))
 

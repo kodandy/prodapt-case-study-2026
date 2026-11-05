@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from gateway.clock import FixedClock
+from ops_ai.clock import Clock
 from ops_ai.feedback.service import (
     VERDICTS_BY_KIND,
     FeedbackRejectedError,
@@ -130,7 +130,7 @@ def _insert_score(
 
 def _record(
     session_factory: sessionmaker[Session],
-    clock: FixedClock,
+    clock: Clock,
     target_kind: TargetKind,
     target_id: str,
     verdict: Verdict,
@@ -143,7 +143,7 @@ def _record(
 
 def _rejection(
     session_factory: sessionmaker[Session],
-    clock: FixedClock,
+    clock: Clock,
     target_kind: TargetKind,
     target_id: str,
     verdict: Verdict,
@@ -221,7 +221,7 @@ def test_verdicts_by_kind_maps_each_target_kind_to_its_two_verdicts() -> None:
 )
 def test_a_verdict_that_does_not_belong_to_the_target_kind_is_a_verdict_mismatch(
     session_factory: sessionmaker[Session],
-    clock: FixedClock,
+    clock: Clock,
     target_kind: TargetKind,
     verdict: Verdict,
 ) -> None:
@@ -241,7 +241,7 @@ def test_a_verdict_that_does_not_belong_to_the_target_kind_is_a_verdict_mismatch
 
 
 def test_verdict_mismatch_is_reported_before_an_unknown_target(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     missing_alert = str(uuid.uuid4())
@@ -257,7 +257,7 @@ def test_verdict_mismatch_is_reported_before_an_unknown_target(
 
 
 def test_an_alert_of_another_merchant_is_an_unknown_target(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     others_alert = _insert_alert(session_factory, OTHER_MERCHANT)
@@ -273,7 +273,7 @@ def test_an_alert_of_another_merchant_is_an_unknown_target(
 
 
 def test_an_alert_id_that_is_not_a_uuid_is_an_unknown_target(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_alert(session_factory, MERCHANT)
@@ -286,7 +286,7 @@ def test_an_alert_id_that_is_not_a_uuid_is_an_unknown_target(
 
 
 def test_a_well_formed_alert_id_without_a_row_is_an_unknown_target(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     missing_alert = str(uuid.uuid4())
@@ -299,7 +299,7 @@ def test_a_well_formed_alert_id_without_a_row_is_an_unknown_target(
 
 
 def test_an_incident_of_another_merchant_is_an_unknown_target(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_incident(session_factory, "INC-OTHER", OTHER_MERCHANT)
@@ -314,7 +314,7 @@ def test_an_incident_of_another_merchant_is_an_unknown_target(
 
 
 def test_an_incident_id_without_a_row_is_an_unknown_target(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange / Act
     reason = _rejection(session_factory, clock, "incident", "INC-404", "not_helpful")
@@ -324,7 +324,7 @@ def test_an_incident_id_without_a_row_is_an_unknown_target(
 
 
 def test_an_unknown_target_leaves_no_trace_in_the_other_merchants_data(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     others_alert = _insert_alert(session_factory, OTHER_MERCHANT)
@@ -337,7 +337,7 @@ def test_an_unknown_target_leaves_no_trace_in_the_other_merchants_data(
 
 
 def test_an_answer_accepts_any_id_including_an_opaque_correlation_id(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     correlation_id = str(uuid.uuid4())
@@ -353,7 +353,7 @@ def test_an_answer_accepts_any_id_including_an_opaque_correlation_id(
 
 
 def test_a_second_feedback_on_the_same_alert_is_a_duplicate_and_does_not_move_the_thresholds_again(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     alert_id = str(_insert_alert(session_factory, MERCHANT))
@@ -369,7 +369,7 @@ def test_a_second_feedback_on_the_same_alert_is_a_duplicate_and_does_not_move_th
 
 
 def test_the_opposite_verdict_on_the_same_alert_is_still_a_duplicate(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     alert_id = str(_insert_alert(session_factory, MERCHANT))
@@ -385,7 +385,7 @@ def test_the_opposite_verdict_on_the_same_alert_is_still_a_duplicate(
 
 
 def test_a_second_feedback_on_the_same_incident_is_a_duplicate_and_the_counts_stay(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_incident(session_factory, "INC-1", MERCHANT)
@@ -400,7 +400,7 @@ def test_a_second_feedback_on_the_same_incident_is_a_duplicate_and_the_counts_st
 
 
 def test_a_second_feedback_on_the_same_answer_is_a_duplicate(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _record(session_factory, clock, "answer", "corr-1", "helpful")
@@ -414,7 +414,7 @@ def test_a_second_feedback_on_the_same_answer_is_a_duplicate(
 
 
 def test_the_same_answer_id_may_be_rated_by_another_merchant(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _record(session_factory, clock, "answer", "shared-corr", "helpful")
@@ -429,7 +429,7 @@ def test_the_same_answer_id_may_be_rated_by_another_merchant(
 
 
 def test_the_same_id_may_be_rated_as_an_answer_and_as_an_incident(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_incident(session_factory, "INC-1", MERCHANT)
@@ -447,7 +447,7 @@ def test_the_same_id_may_be_rated_as_an_answer_and_as_an_incident(
 
 
 def test_a_false_positive_raises_the_steps_and_writes_version_one_with_reason_and_feedback_id(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     alert_id = str(_insert_alert(session_factory, MERCHANT))
@@ -472,7 +472,7 @@ def test_a_false_positive_raises_the_steps_and_writes_version_one_with_reason_an
 
 
 def test_the_feedback_row_is_stored_with_its_comment_and_the_clock_time(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     alert_id = str(_insert_alert(session_factory, MERCHANT))
@@ -487,7 +487,7 @@ def test_the_feedback_row_is_stored_with_its_comment_and_the_clock_time(
 
 
 def test_a_feedback_without_a_comment_stores_null(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange / Act
     result = _record(session_factory, clock, "answer", "corr-1", "helpful", None)
@@ -499,7 +499,7 @@ def test_a_feedback_without_a_comment_stores_null(
 
 
 def test_each_false_positive_on_a_different_alert_raises_the_steps_by_one(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     alerts = [str(_insert_alert(session_factory, MERCHANT)) for _ in range(3)]
@@ -520,7 +520,7 @@ def test_each_false_positive_on_a_different_alert_raises_the_steps_by_one(
 
 
 def test_a_true_positive_at_the_baseline_writes_no_version(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     alert_id = str(_insert_alert(session_factory, MERCHANT))
@@ -538,7 +538,7 @@ def test_a_true_positive_at_the_baseline_writes_no_version(
 
 
 def test_a_true_positive_after_a_false_positive_steps_back_and_writes_a_new_version(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     first_alert = str(_insert_alert(session_factory, MERCHANT))
@@ -564,7 +564,7 @@ def test_a_true_positive_after_a_false_positive_steps_back_and_writes_a_new_vers
 
 
 def test_the_steps_start_from_the_active_version_not_from_the_baseline(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_versions_up_to(session_factory, MERCHANT, 3)
@@ -580,7 +580,7 @@ def test_the_steps_start_from_the_active_version_not_from_the_baseline(
 
 
 def test_a_true_positive_steps_down_from_the_active_version(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_versions_up_to(session_factory, MERCHANT, 3)
@@ -596,7 +596,7 @@ def test_a_true_positive_steps_down_from_the_active_version(
 
 
 def test_a_false_positive_at_max_steps_clamps_and_writes_no_new_version(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_versions_up_to(session_factory, MERCHANT, MAX_STEPS)
@@ -612,7 +612,7 @@ def test_a_false_positive_at_max_steps_clamps_and_writes_no_new_version(
 
 
 def test_a_false_positive_on_one_merchant_never_changes_another_merchants_rules(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     alert_id = str(_insert_alert(session_factory, MERCHANT))
@@ -627,7 +627,7 @@ def test_a_false_positive_on_one_merchant_never_changes_another_merchants_rules(
 
 
 def test_the_other_merchants_steps_do_not_leak_into_the_starting_point(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_versions_up_to(session_factory, OTHER_MERCHANT, 4)
@@ -646,7 +646,7 @@ def test_the_other_merchants_steps_do_not_leak_into_the_starting_point(
 
 
 def test_helpful_on_an_incident_creates_a_score_row_with_one_helpful(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_incident(session_factory, "INC-1", MERCHANT)
@@ -662,7 +662,7 @@ def test_helpful_on_an_incident_creates_a_score_row_with_one_helpful(
 
 
 def test_not_helpful_on_an_incident_increments_the_not_helpful_counter(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_incident(session_factory, "INC-1", MERCHANT)
@@ -676,7 +676,7 @@ def test_not_helpful_on_an_incident_increments_the_not_helpful_counter(
 
 
 def test_helpful_upserts_into_an_existing_score_row(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_incident(session_factory, "INC-1", MERCHANT)
@@ -691,7 +691,7 @@ def test_helpful_upserts_into_an_existing_score_row(
 
 
 def test_not_helpful_upserts_into_an_existing_score_row(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_incident(session_factory, "INC-1", MERCHANT)
@@ -706,7 +706,7 @@ def test_not_helpful_upserts_into_an_existing_score_row(
 
 
 def test_the_score_row_is_stamped_with_the_clock_time(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_incident(session_factory, "INC-1", MERCHANT)
@@ -724,7 +724,7 @@ def test_the_score_row_is_stamped_with_the_clock_time(
 
 
 def test_another_merchants_score_for_the_same_incident_is_not_touched(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_incident(session_factory, "INC-PLATFORM", None)
@@ -739,7 +739,7 @@ def test_another_merchants_score_for_the_same_incident_is_not_touched(
 
 
 def test_a_platform_incident_with_a_null_merchant_is_accepted(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_incident(session_factory, "INC-PLATFORM", None)
@@ -753,7 +753,7 @@ def test_a_platform_incident_with_a_null_merchant_is_accepted(
 
 
 def test_an_incident_of_the_scope_merchant_is_accepted(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     _insert_incident(session_factory, "INC-OWN", MERCHANT)
@@ -765,7 +765,7 @@ def test_an_incident_of_the_scope_merchant_is_accepted(
     assert result.incident_score == IncidentScore(incident_id="INC-OWN", helpful=0, not_helpful=1)
 
 
-def test_answer_feedback_is_stored_only(session_factory: sessionmaker[Session], clock: FixedClock) -> None:
+def test_answer_feedback_is_stored_only(session_factory: sessionmaker[Session], clock: Clock) -> None:
     # Arrange / Act
     result = _record(session_factory, clock, "answer", "corr-1", "not_helpful", "wrong period")
 
@@ -829,7 +829,7 @@ def test_incident_scores_never_returns_another_merchants_counts(
     assert others == {"INC-1": IncidentScore(incident_id="INC-1", helpful=9, not_helpful=9)}
 
 
-def test_record_feedback_does_not_commit(session_factory: sessionmaker[Session], clock: FixedClock) -> None:
+def test_record_feedback_does_not_commit(session_factory: sessionmaker[Session], clock: Clock) -> None:
     # Arrange
     alert_id = str(_insert_alert(session_factory, MERCHANT))
 

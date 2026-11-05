@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from gateway.clock import FixedClock
 from ops_ai.agents.bus import (
     MAX_MESSAGES,
     InProcessBus,
@@ -16,12 +15,27 @@ from ops_ai.agents.bus import (
     persist_messages,
 )
 from ops_ai.agents.messages import AgentMessage, JsonScalar, message_from_json, message_to_json
+from ops_ai.clock import Clock
 from ops_ai.scope import Scope
 from redis import Redis
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
 from conftest import TEST_NOW
+
+
+class _MutableClock:
+    """Callable fixed clock whose instant can be moved forward."""
+
+    def __init__(self, now: datetime) -> None:
+        self._now = now
+
+    def __call__(self) -> datetime:
+        return self._now
+
+    def advance(self, delta: timedelta) -> None:
+        self._now += delta
+
 
 CORRELATION_ID = uuid.UUID("c0c0c0c0-0000-4000-8000-000000000001")
 OTHER_CORRELATION_ID = uuid.UUID("c0c0c0c0-0000-4000-8000-000000000002")
@@ -61,7 +75,22 @@ def _message(sequence: int = 1, payload: dict[str, JsonScalar] | None = None) ->
     )
 
 
-def _three_message_bus(clock: FixedClock, correlation_id: uuid.UUID = CORRELATION_ID) -> InProcessBus:
+def _stream_entries(redis_client: Redis, stream: str) -> list[dict[str, str]]:
+    raw = redis_client.xrange(stream)
+    assert isinstance(raw, list)
+    entries: list[dict[str, str]] = []
+    for _entry_id, fields in raw:
+        assert isinstance(fields, dict)
+        entry: dict[str, str] = {}
+        for key, value in fields.items():
+            assert isinstance(key, str)
+            assert isinstance(value, str)
+            entry[key] = value
+        entries.append(entry)
+    return entries
+
+
+def _three_message_bus(clock: Clock, correlation_id: uuid.UUID = CORRELATION_ID) -> InProcessBus:
     bus = InProcessBus(correlation_id, clock)
     bus.send("supervisor", "fraud", "assess_transfer", {"transfer_id": "t-1"})
     bus.send(
@@ -135,7 +164,7 @@ def test_message_json_round_trip_keeps_the_timestamp_instant_and_timezone_awaren
 # --- the bus: sequence, FIFO, history --------------------------------------------------------------------
 
 
-def test_send_numbers_messages_from_one_and_fills_every_field(clock: FixedClock) -> None:
+def test_send_numbers_messages_from_one_and_fills_every_field(clock: Clock) -> None:
     # Arrange
     bus = InProcessBus(CORRELATION_ID, clock)
 
@@ -158,8 +187,9 @@ def test_send_numbers_messages_from_one_and_fills_every_field(clock: FixedClock)
     assert first.message_id != second.message_id
 
 
-def test_send_stamps_created_at_from_the_injected_clock_at_send_time(clock: FixedClock) -> None:
+def test_send_stamps_created_at_from_the_injected_clock_at_send_time() -> None:
     # Arrange
+    clock = _MutableClock(TEST_NOW)
     bus = InProcessBus(CORRELATION_ID, clock)
     first = bus.send("supervisor", "fraud", "investigate", {})
     clock.advance(timedelta(seconds=30))
@@ -172,7 +202,7 @@ def test_send_stamps_created_at_from_the_injected_clock_at_send_time(clock: Fixe
     assert second.created_at == TEST_NOW + timedelta(seconds=30)
 
 
-def test_next_message_delivers_in_fifo_order_then_none(clock: FixedClock) -> None:
+def test_next_message_delivers_in_fifo_order_then_none(clock: Clock) -> None:
     # Arrange
     bus = _three_message_bus(clock)
 
@@ -190,7 +220,7 @@ def test_next_message_delivers_in_fifo_order_then_none(clock: FixedClock) -> Non
     assert after_empty is None
 
 
-def test_next_message_on_a_fresh_bus_is_none(clock: FixedClock) -> None:
+def test_next_message_on_a_fresh_bus_is_none(clock: Clock) -> None:
     # Arrange
     bus = InProcessBus(CORRELATION_ID, clock)
 
@@ -201,7 +231,7 @@ def test_next_message_on_a_fresh_bus_is_none(clock: FixedClock) -> None:
     assert message is None
 
 
-def test_next_message_interleaves_with_new_sends_in_fifo_order(clock: FixedClock) -> None:
+def test_next_message_interleaves_with_new_sends_in_fifo_order(clock: Clock) -> None:
     # Arrange
     bus = InProcessBus(CORRELATION_ID, clock)
     bus.send("supervisor", "fraud", "investigate", {})
@@ -221,7 +251,7 @@ def test_next_message_interleaves_with_new_sends_in_fifo_order(clock: FixedClock
     assert bus.next_message() is None
 
 
-def test_history_lists_every_sent_message_in_order_and_survives_delivery(clock: FixedClock) -> None:
+def test_history_lists_every_sent_message_in_order_and_survives_delivery(clock: Clock) -> None:
     # Arrange
     bus = _three_message_bus(clock)
     while bus.next_message() is not None:
@@ -240,7 +270,7 @@ def test_history_lists_every_sent_message_in_order_and_survives_delivery(clock: 
     ]
 
 
-def test_history_of_a_fresh_bus_is_empty(clock: FixedClock) -> None:
+def test_history_of_a_fresh_bus_is_empty(clock: Clock) -> None:
     # Arrange
     bus = InProcessBus(CORRELATION_ID, clock)
 
@@ -251,7 +281,7 @@ def test_history_of_a_fresh_bus_is_empty(clock: FixedClock) -> None:
     assert history == ()
 
 
-def test_history_returns_the_same_messages_that_send_returned(clock: FixedClock) -> None:
+def test_history_returns_the_same_messages_that_send_returned(clock: Clock) -> None:
     # Arrange
     bus = InProcessBus(CORRELATION_ID, clock)
 
@@ -276,7 +306,7 @@ def test_the_default_message_budget_is_sixteen() -> None:
     assert budget == 16
 
 
-def test_the_seventeenth_send_raises_message_budget_exceeded_and_is_not_queued(clock: FixedClock) -> None:
+def test_the_seventeenth_send_raises_message_budget_exceeded_and_is_not_queued(clock: Clock) -> None:
     # Arrange
     bus = InProcessBus(CORRELATION_ID, clock)
     for _ in range(16):
@@ -295,7 +325,7 @@ def test_the_seventeenth_send_raises_message_budget_exceeded_and_is_not_queued(c
     assert delivered == 16
 
 
-def test_the_sixteenth_send_is_still_accepted(clock: FixedClock) -> None:
+def test_the_sixteenth_send_is_still_accepted(clock: Clock) -> None:
     # Arrange
     bus = InProcessBus(CORRELATION_ID, clock)
     for _ in range(15):
@@ -308,7 +338,7 @@ def test_the_sixteenth_send_is_still_accepted(clock: FixedClock) -> None:
     assert last.sequence == 16
 
 
-def test_a_custom_budget_of_two_rejects_the_third_send(clock: FixedClock) -> None:
+def test_a_custom_budget_of_two_rejects_the_third_send(clock: Clock) -> None:
     # Arrange
     bus = InProcessBus(CORRELATION_ID, clock, max_messages=2)
     bus.send("supervisor", "fraud", "investigate", {})
@@ -322,7 +352,7 @@ def test_a_custom_budget_of_two_rejects_the_third_send(clock: FixedClock) -> Non
     assert len(bus.history) == 2
 
 
-def test_the_budget_stays_exceeded_for_every_later_send(clock: FixedClock) -> None:
+def test_the_budget_stays_exceeded_for_every_later_send(clock: Clock) -> None:
     # Arrange
     bus = InProcessBus(CORRELATION_ID, clock, max_messages=1)
     bus.send("supervisor", "fraud", "investigate", {})
@@ -337,7 +367,7 @@ def test_the_budget_stays_exceeded_for_every_later_send(clock: FixedClock) -> No
     assert len(bus.history) == 1
 
 
-def test_delivering_messages_does_not_free_budget(clock: FixedClock) -> None:
+def test_delivering_messages_does_not_free_budget(clock: Clock) -> None:
     # Arrange
     bus = InProcessBus(CORRELATION_ID, clock, max_messages=2)
     bus.send("supervisor", "fraud", "investigate", {})
@@ -356,7 +386,7 @@ def test_delivering_messages_does_not_free_budget(clock: FixedClock) -> None:
 # --- transports ------------------------------------------------------------------------------------------
 
 
-def test_a_recording_transport_receives_each_message_in_send_order(clock: FixedClock) -> None:
+def test_a_recording_transport_receives_each_message_in_send_order(clock: Clock) -> None:
     # Arrange
     transport = RecordingTransport()
     bus = InProcessBus(CORRELATION_ID, clock, transport=transport)
@@ -372,7 +402,7 @@ def test_a_recording_transport_receives_each_message_in_send_order(clock: FixedC
     assert transport.published == sent
 
 
-def test_a_message_over_the_budget_is_not_published(clock: FixedClock) -> None:
+def test_a_message_over_the_budget_is_not_published(clock: Clock) -> None:
     # Arrange
     transport = RecordingTransport()
     bus = InProcessBus(CORRELATION_ID, clock, max_messages=1, transport=transport)
@@ -386,7 +416,7 @@ def test_a_message_over_the_budget_is_not_published(clock: FixedClock) -> None:
     assert transport.published == [first]
 
 
-def test_a_bus_without_a_transport_still_queues_and_records_history(clock: FixedClock) -> None:
+def test_a_bus_without_a_transport_still_queues_and_records_history(clock: Clock) -> None:
     # Arrange
     bus = InProcessBus(CORRELATION_ID, clock)
 
@@ -409,9 +439,9 @@ def test_redis_stream_transport_writes_a_message_field_that_parses_back_equal(
     transport.publish(message)
 
     # Assert
-    entries = redis_client.xrange(DEFAULT_STREAM)
+    entries = _stream_entries(redis_client, DEFAULT_STREAM)
     assert len(entries) == 1
-    fields = entries[0][1]
+    fields = entries[0]
     assert set(fields) == {"message"}
     assert message_from_json(fields["message"]) == message
 
@@ -426,8 +456,8 @@ def test_redis_stream_transport_appends_messages_in_publish_order(redis_client: 
         transport.publish(message)
 
     # Assert
-    entries = redis_client.xrange(DEFAULT_STREAM)
-    assert [message_from_json(fields["message"]) for _id, fields in entries] == messages
+    entries = _stream_entries(redis_client, DEFAULT_STREAM)
+    assert [message_from_json(fields["message"]) for fields in entries] == messages
 
 
 def test_redis_stream_transport_uses_the_stream_name_it_is_given(redis_client: Redis) -> None:
@@ -444,7 +474,7 @@ def test_redis_stream_transport_uses_the_stream_name_it_is_given(redis_client: R
 
 
 def test_a_bus_with_a_redis_transport_writes_every_sent_message_to_the_stream(
-    redis_client: Redis, clock: FixedClock
+    redis_client: Redis, clock: Clock
 ) -> None:
     # Arrange
     bus = InProcessBus(CORRELATION_ID, clock, transport=RedisStreamTransport(redis_client))
@@ -456,15 +486,15 @@ def test_a_bus_with_a_redis_transport_writes_every_sent_message_to_the_stream(
     ]
 
     # Assert
-    entries = redis_client.xrange(DEFAULT_STREAM)
-    assert [message_from_json(fields["message"]) for _id, fields in entries] == sent
+    entries = _stream_entries(redis_client, DEFAULT_STREAM)
+    assert [message_from_json(fields["message"]) for fields in entries] == sent
 
 
 # --- persistence -----------------------------------------------------------------------------------------
 
 
 def test_persist_messages_stores_every_column_with_the_merchant_and_returns_the_count(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     bus = _three_message_bus(clock)
@@ -497,7 +527,7 @@ def test_persist_messages_stores_every_column_with_the_merchant_and_returns_the_
 
 
 def test_persist_messages_stores_the_user_id_for_a_user_scoped_trail(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     bus = _three_message_bus(clock)
@@ -529,7 +559,7 @@ def test_persist_messages_with_no_messages_returns_zero(session_factory: session
 
 
 def test_load_messages_returns_the_scope_merchants_messages_ordered_by_sequence(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     bus = _three_message_bus(clock)
@@ -547,7 +577,7 @@ def test_load_messages_returns_the_scope_merchants_messages_ordered_by_sequence(
 
 
 def test_load_messages_returns_an_empty_list_for_another_merchants_scope(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     bus = _three_message_bus(clock)
@@ -564,7 +594,7 @@ def test_load_messages_returns_an_empty_list_for_another_merchants_scope(
 
 
 def test_load_messages_returns_an_empty_list_for_an_unknown_correlation_id(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     bus = _three_message_bus(clock)
@@ -581,7 +611,7 @@ def test_load_messages_returns_an_empty_list_for_an_unknown_correlation_id(
 
 
 def test_load_messages_does_not_return_a_user_scoped_trail_to_a_merchant_scope(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     bus = _three_message_bus(clock)
@@ -598,7 +628,7 @@ def test_load_messages_does_not_return_a_user_scoped_trail_to_a_merchant_scope(
 
 
 def test_load_messages_keeps_two_correlation_ids_apart(
-    session_factory: sessionmaker[Session], clock: FixedClock
+    session_factory: sessionmaker[Session], clock: Clock
 ) -> None:
     # Arrange
     first = _three_message_bus(clock, CORRELATION_ID)

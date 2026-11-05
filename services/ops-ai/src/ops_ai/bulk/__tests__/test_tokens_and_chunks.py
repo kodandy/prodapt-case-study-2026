@@ -5,6 +5,7 @@ A canonical row renders to exactly 32 tokens: 9 (uuid) + 13 (ISO timestamp) + me
 currency (4) + `bin = <v>` (3) + `code = <v>` (3). Chunk budgets below are multiples of that.
 """
 
+import itertools
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -458,7 +459,7 @@ def test_render_summary_costs_fewer_tokens_the_fewer_top_items_it_keeps() -> Non
     sizes = [count_tokens(render_summary(summary, top_items=k)) for k in range(0, 8)]
 
     # Assert
-    assert all(smaller < larger for smaller, larger in zip(sizes, sizes[1:], strict=False))
+    assert all(smaller < larger for smaller, larger in itertools.pairwise(sizes))
 
 
 def test_render_summary_never_contains_a_payment_id() -> None:

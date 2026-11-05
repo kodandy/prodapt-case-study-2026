@@ -539,9 +539,7 @@ def test_incident_search_rejects_an_invalid_body_with_422(
     client = _app(session_factory, key_pair)
 
     # Act
-    response = client.post(
-        SEARCH_ROUTE, json=body, headers=_bearer(_merchant_token(key_pair.private_pem))
-    )
+    response = client.post(SEARCH_ROUTE, json=body, headers=_bearer(_merchant_token(key_pair.private_pem)))
 
     # Assert
     assert response.status_code == 422
@@ -789,9 +787,7 @@ def test_bulk_analyze_rejects_an_invalid_body_with_422_before_calling_the_llm(
         _bulk_body(start=(WINDOW_END - timedelta(days=31)).isoformat(), end=WINDOW_END.isoformat()),
         _bulk_body(token_budget=100),
         _bulk_body(token_budget=4000),
-        _bulk_body(
-            start=(WINDOW_START).isoformat(), end=(WINDOW_START + timedelta(seconds=1)).isoformat()
-        ),
+        _bulk_body(start=(WINDOW_START).isoformat(), end=(WINDOW_START + timedelta(seconds=1)).isoformat()),
     ],
     ids=["span_exactly_31_days", "budget_100", "budget_4000", "span_1_second"],
 )

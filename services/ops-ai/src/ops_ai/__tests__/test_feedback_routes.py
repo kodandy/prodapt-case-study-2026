@@ -3,6 +3,7 @@ written from docs/specs/r2-agents.md sections 0, 1 and 5. They also close the lo
 tightens the rules that GET reports."""
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -182,16 +183,15 @@ def _insert_incident(
 
 
 def _post_feedback(
-    client: TestClient, key_pair: KeyPair, body: dict[str, object], merchant_id: uuid.UUID = MERCHANT
+    client: TestClient, key_pair: KeyPair, body: Mapping[str, object], merchant_id: uuid.UUID = MERCHANT
 ) -> Response:
-    return client.post(
+    response: Response = client.post(
         FEEDBACK_ROUTE, json=body, headers=_bearer(_merchant_token(key_pair.private_pem, merchant_id))
     )
+    return response
 
 
-def _get_rules(
-    client: TestClient, key_pair: KeyPair, merchant_id: uuid.UUID = MERCHANT
-) -> dict[str, object]:
+def _get_rules(client: TestClient, key_pair: KeyPair, merchant_id: uuid.UUID = MERCHANT) -> dict[str, object]:
     response = client.get(RULES_ROUTE, headers=_bearer(_merchant_token(key_pair.private_pem, merchant_id)))
     assert response.status_code == 200
     return _json(response)
