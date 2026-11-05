@@ -9,6 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictInt
+from sqlalchemy import select
 
 from gateway.accounts.mfa import (
     InvalidTotpCodeError,
@@ -21,9 +22,11 @@ from gateway.accounts.mfa import (
     enrol_totp,
     totp_enabled,
 )
+from gateway.accounts.models import User
+from gateway.accounts.rbac import MerchantRole, is_allowed
 from gateway.accounts.service import (
     EmailAlreadyRegisteredError,
-    authenticate_api_key,
+    authenticate_api_key_role,
     find_login,
     sign_up,
     verify_login,
@@ -44,11 +47,45 @@ from gateway.accounts.throttle import (
 )
 from gateway.accounts.tokens import (
     MERCHANT_TOKEN_TTL_SECONDS,
+    OPS_TOKEN_TTL_SECONDS,
     USER_TOKEN_TTL_SECONDS,
     issue_merchant_token,
+    issue_ops_token,
     issue_user_token,
 )
+from gateway.admin import (
+    OPS_SESSION_TTL_SECONDS,
+    InvalidOpsCredentialsError,
+    OpsGuard,
+    OpsLockedError,
+    OpsPrincipal,
+    authenticate_ops,
+    issue_ops_session_token,
+)
 from gateway.audit.models import AuditLog
+from gateway.audit.service import list_audit
+from gateway.compliance.gdpr import (
+    erase_subject,
+    export_subject_data,
+    list_own_requests,
+    list_requests_for_ops,
+    ops_request_json,
+    profile_json,
+    read_profile,
+    rectify_profile,
+    request_json,
+)
+from gateway.compliance.kyc import (
+    KycOutcome,
+    OperationInProgressError,
+    OperationRequest,
+    ReviewStatus,
+    UnknownUserError,
+    list_kyc_reviews,
+    resolve_kyc,
+    screen_operation,
+    user_operation_lock,
+)
 from gateway.merchant_api.validation import (
     RequestValidationFailedError,
     field_violations,
@@ -98,6 +135,7 @@ from gateway.wallets.service import WalletBalanceView, list_wallets, transfer
 LOGIN_CONCURRENCY = 4
 NO_STORE_HEADERS = {"Cache-Control": "no-store", "Pragma": "no-cache"}
 LOGIN_SLOT_WAIT_SECONDS = 2.0
+OPS_LIST_LIMIT_MAX = 100
 
 
 @dataclass(frozen=True)
@@ -174,6 +212,37 @@ class TransferRequest(BaseModel):
     currency: Literal["USD", "EUR", "JPY", "INR"]
 
 
+@dataclass(frozen=True)
+class MerchantPrincipal:
+    merchant_id: uuid.UUID
+    role: MerchantRole
+
+
+class OpsSessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(min_length=3, max_length=320, pattern=r"^[^@\s\x00]+@[^@\s\x00]+$")
+    password: SecretStr = Field(min_length=1, max_length=256)
+    totp_code: SecretStr = Field(min_length=1, max_length=16)
+
+
+class OpsSessionResponse(MerchantTokenResponse):
+    role: str
+
+
+class KycVerifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: KycOutcome
+
+
+class ProfilePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: str | None = Field(default=None, min_length=1, max_length=200, pattern=r"^[^\x00]+$")
+    country: str | None = Field(default=None, pattern=r"^[A-Z]{2}$")
+
+
 class PaymentListResponse(BaseModel):
     items: list[PaymentSummary]
     next_cursor: str | None
@@ -231,6 +300,17 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
       RefundOutcome status/body. Idempotency-Key outside visible ASCII → 400; explicit null amount → 422.
     - GET /v1/disputes/{dispute_id}, POST /v1/disputes/{dispute_id}/evidence (Bearer API key) → DisputeView;
       unknown or another merchant's → 404; not `opened` for evidence → 409.
+    - GET/PATCH /v1/me/profile, POST /v1/me/data-requests/export (200), POST /v1/me/data-requests/erasure
+      (202), GET /v1/me/data-requests (Bearer session) → GDPR access, rectification, erasure (R2-10).
+      An erased
+      user's sessions answer 401 "invalid session". A cross-border transfer by a sender who is not KYC
+      `verified` → 403 {"error": "kyc_reverification_required"}.
+    - POST /v1/ops/sessions {email, password, totp_code} → 201 {access_token, token_type, expires_in, role};
+      bad credentials → 401; 5th failure → 429 with Retry-After. Ops routes (Bearer ops session, see
+      accounts/rbac.py): POST /v1/ops/ops-ai-tokens, GET /v1/ops/kyc-reviews?status&limit,
+      POST /v1/ops/users/{user_id}/kyc/verify {outcome}, GET /v1/ops/data-requests?overdue&limit,
+      GET /v1/ops/audit?target&limit (ops_lead). No or invalid ops session → 401 "invalid ops session"; a role
+      outside the policy → 403 "forbidden". Merchant routes likewise answer 403 for a key role outside it.
     - GET /healthz → 200 (liveness). GET /readyz → 200 ready, or 503 with the failed components.
     """
     app = FastAPI(title="gateway")
@@ -241,16 +321,35 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         threading.BoundedSemaphore(LOGIN_CONCURRENCY) if deps.login_slots is None else deps.login_slots
     )
 
-    def merchant_from_api_key(
-        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
-    ) -> uuid.UUID:
-        if credentials is None:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing api key")
-        with session_factory() as session:
-            merchant_id = authenticate_api_key(session, credentials.credentials, deps.api_key_pepper)
-        if merchant_id is None:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid api key")
-        return merchant_id
+    ops = OpsGuard(session_factory, deps.charge.clock, deps.jwt_private_key_pem)
+
+    def merchant_principal(action: str) -> Callable[..., MerchantPrincipal]:
+        """API-key dependency for one policy action: 401 without a valid key, 403 when the key's role may not
+        perform `action`."""
+
+        def dependency(
+            credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+        ) -> MerchantPrincipal:
+            if credentials is None:
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing api key")
+            with session_factory() as session:
+                found = authenticate_api_key_role(session, credentials.credentials, deps.api_key_pepper)
+            if found is None:
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid api key")
+            merchant_id, role = found
+            if not is_allowed(role, action):
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
+            return MerchantPrincipal(merchant_id=merchant_id, role=role)
+
+        return dependency
+
+    def merchant_for(action: str) -> Callable[..., uuid.UUID]:
+        principal_dependency = merchant_principal(action)
+
+        def dependency(principal: Annotated[MerchantPrincipal, Depends(principal_dependency)]) -> uuid.UUID:
+            return principal.merchant_id
+
+        return dependency
 
     def check_password(body: SignUpRequest) -> tuple[uuid.UUID, bool]:
         """The user id and whether TOTP is enabled, on a password success. Unknown email and wrong password
@@ -350,7 +449,10 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
                 status.HTTP_401_UNAUTHORIZED, "invalid session", headers=NO_STORE_HEADERS
             ) from None
         with session_factory() as session:
+            erased_at = session.scalar(select(User.erased_at).where(User.id == claims.user_id))
             needs_otp = totp_enabled(session, claims.user_id)
+        if erased_at is not None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid session", headers=NO_STORE_HEADERS)
         if needs_otp and AMR_OTP not in claims.amr:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "mfa required", headers=NO_STORE_HEADERS)
         return claims.user_id
@@ -373,12 +475,14 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
 
     @app.post("/v1/merchant-tokens", status_code=status.HTTP_201_CREATED)
     def merchant_tokens(
-        merchant_id: Annotated[uuid.UUID, Depends(merchant_from_api_key)],
+        principal: Annotated[MerchantPrincipal, Depends(merchant_principal("merchant.token.issue"))],
         response: Response,
     ) -> MerchantTokenResponse:
         if deps.jwt_private_key_pem is None:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "token issuing not configured")
-        token = issue_merchant_token(deps.jwt_private_key_pem, merchant_id, deps.charge.clock())
+        token = issue_merchant_token(
+            deps.jwt_private_key_pem, principal.merchant_id, deps.charge.clock(), role=principal.role
+        )
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
         return MerchantTokenResponse(access_token=token, expires_in=MERCHANT_TOKEN_TTL_SECONDS)
@@ -518,15 +622,40 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
             key = _require_idempotency_key(idempotency_key)
         except HTTPException as exc:
             raise HTTPException(exc.status_code, exc.detail, headers=NO_STORE_HEADERS) from None
-        outcome = transfer(
-            session_factory,
-            deps.charge.clock,
-            user_id,
-            key,
-            body.recipient_email,
-            body.amount_minor,
-            body.currency,
-        )
+        try:
+            with user_operation_lock(session_factory, user_id):
+                screening = screen_operation(
+                    session_factory,
+                    deps.charge.clock,
+                    user_id,
+                    OperationRequest(
+                        kind="transfer",
+                        amount_minor=body.amount_minor,
+                        currency=body.currency,
+                        recipient_email=body.recipient_email,
+                    ),
+                )
+                if screening.blocked:
+                    return JSONResponse(
+                        {"error": "kyc_reverification_required"},
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        headers=NO_STORE_HEADERS,
+                    )
+                outcome = transfer(
+                    session_factory,
+                    deps.charge.clock,
+                    user_id,
+                    key,
+                    body.recipient_email,
+                    body.amount_minor,
+                    body.currency,
+                )
+        except OperationInProgressError:
+            return JSONResponse(
+                {"error": "operation_in_progress"},
+                status_code=status.HTTP_409_CONFLICT,
+                headers={**NO_STORE_HEADERS, "Retry-After": "1"},
+            )
         return JSONResponse(outcome.body, status_code=outcome.status_code, headers=NO_STORE_HEADERS)
 
     @app.post("/v1/signup", status_code=status.HTTP_201_CREATED)
@@ -541,7 +670,7 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     @app.post("/v1/payments")
     def create_payment(
         body: ChargeRequest,
-        merchant_id: Annotated[uuid.UUID, Depends(merchant_from_api_key)],
+        merchant_id: Annotated[uuid.UUID, Depends(merchant_for("payment.create"))],
         idempotency_key: Annotated[str | None, Header(max_length=255)] = None,
     ) -> JSONResponse:
         key = _require_idempotency_key(idempotency_key)
@@ -550,7 +679,7 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
 
     @app.get("/v1/payments")
     def payment_history(
-        merchant_id: Annotated[uuid.UUID, Depends(merchant_from_api_key)],
+        merchant_id: Annotated[uuid.UUID, Depends(merchant_for("payment.read"))],
         limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
         cursor: Annotated[str | None, Query(max_length=512)] = None,
         state: PaymentState | None = None,
@@ -587,7 +716,7 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
 
     @app.get("/v1/payments/{payment_id}", response_model=PaymentSummary)
     def payment_detail(
-        payment_id: uuid.UUID, merchant_id: Annotated[uuid.UUID, Depends(merchant_from_api_key)]
+        payment_id: uuid.UUID, merchant_id: Annotated[uuid.UUID, Depends(merchant_for("payment.read"))]
     ) -> JSONResponse:
         try:
             with session_factory() as session:
@@ -600,7 +729,7 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
 
     @app.get("/v1/payments/{payment_id}/risk")
     def payment_risk(
-        payment_id: uuid.UUID, merchant_id: Annotated[uuid.UUID, Depends(merchant_from_api_key)]
+        payment_id: uuid.UUID, merchant_id: Annotated[uuid.UUID, Depends(merchant_for("payment.read"))]
     ) -> PaymentRiskView:
         try:
             with session_factory() as session:
@@ -611,7 +740,7 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     @app.post("/v1/payments/{payment_id}/refunds")
     def create_refund(
         payment_id: uuid.UUID,
-        merchant_id: Annotated[uuid.UUID, Depends(merchant_from_api_key)],
+        merchant_id: Annotated[uuid.UUID, Depends(merchant_for("refund.create"))],
         _no_null_body: Annotated[None, Depends(_reject_null_body)],
         body: RefundRequest | None = None,
         idempotency_key: Annotated[str | None, Header(max_length=255)] = None,
@@ -629,7 +758,8 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
 
     @app.get("/v1/disputes/{dispute_id}")
     def read_dispute(
-        dispute_id: uuid.UUID, merchant_id: Annotated[uuid.UUID, Depends(merchant_from_api_key)]
+        dispute_id: uuid.UUID,
+        merchant_id: Annotated[uuid.UUID, Depends(merchant_for("merchant.dispute.read"))],
     ) -> DisputeView:
         try:
             with session_factory() as session:
@@ -641,7 +771,7 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     def dispute_evidence(
         dispute_id: uuid.UUID,
         body: EvidenceRequest,
-        merchant_id: Annotated[uuid.UUID, Depends(merchant_from_api_key)],
+        merchant_id: Annotated[uuid.UUID, Depends(merchant_for("merchant.dispute.evidence"))],
     ) -> DisputeView:
         try:
             return submit_evidence(session_factory, deps.charge.clock, merchant_id, dispute_id, body.text)
@@ -649,6 +779,166 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "dispute not found") from None
         except InvalidDisputeTransitionError:
             raise HTTPException(status.HTTP_409_CONFLICT, "invalid dispute transition") from None
+
+    @app.get("/v1/me/profile")
+    def my_profile(user_id: Annotated[uuid.UUID, Depends(session_user)]) -> JSONResponse:
+        try:
+            with session_factory() as session:
+                view = read_profile(session, user_id)
+        except UnknownUserError:
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED, "invalid session", headers=NO_STORE_HEADERS
+            ) from None
+        return JSONResponse(profile_json(view), headers=NO_STORE_HEADERS)
+
+    @app.patch("/v1/me/profile")
+    def rectify_my_profile(
+        body: ProfilePatch, user_id: Annotated[uuid.UUID, Depends(session_user)]
+    ) -> JSONResponse:
+        try:
+            view = rectify_profile(session_factory, deps.charge.clock, user_id, body.full_name, body.country)
+        except UnknownUserError:
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED, "invalid session", headers=NO_STORE_HEADERS
+            ) from None
+        return JSONResponse(profile_json(view), headers=NO_STORE_HEADERS)
+
+    @app.post("/v1/me/data-requests/export")
+    def export_my_data(user_id: Annotated[uuid.UUID, Depends(session_user)]) -> JSONResponse:
+        try:
+            exported = export_subject_data(session_factory, deps.charge.clock, user_id)
+        except UnknownUserError:
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED, "invalid session", headers=NO_STORE_HEADERS
+            ) from None
+        return JSONResponse(exported, headers=NO_STORE_HEADERS)
+
+    @app.post("/v1/me/data-requests/erasure")
+    def erase_my_data(user_id: Annotated[uuid.UUID, Depends(session_user)]) -> JSONResponse:
+        try:
+            request_id = erase_subject(session_factory, deps.charge.clock, user_id)
+        except UnknownUserError:
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED, "invalid session", headers=NO_STORE_HEADERS
+            ) from None
+        return JSONResponse(
+            {"request_id": str(request_id), "status": "completed"},
+            status_code=status.HTTP_202_ACCEPTED,
+            headers=NO_STORE_HEADERS,
+        )
+
+    @app.get("/v1/me/data-requests")
+    def my_data_requests(user_id: Annotated[uuid.UUID, Depends(session_user)]) -> JSONResponse:
+        with session_factory() as session:
+            items = [request_json(view) for view in list_own_requests(session, user_id)]
+        return JSONResponse({"items": items}, headers=NO_STORE_HEADERS)
+
+    @app.post("/v1/ops/sessions", status_code=status.HTTP_201_CREATED)
+    def create_ops_session(body: OpsSessionRequest, response: Response) -> OpsSessionResponse:
+        if deps.jwt_private_key_pem is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "token issuing not configured")
+        if deps.totp_encryption_key is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "mfa not configured")
+        if not login_slots.acquire(timeout=LOGIN_SLOT_WAIT_SECONDS):
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE, "try again later", headers={"Retry-After": "1"}
+            )
+        try:
+            principal = authenticate_ops(
+                session_factory,
+                deps.charge.clock,
+                deps.totp_encryption_key,
+                body.email,
+                body.password.get_secret_value(),
+                body.totp_code.get_secret_value(),
+            )
+        except InvalidOpsCredentialsError:
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED, "invalid credentials", headers=NO_STORE_HEADERS
+            ) from None
+        except OpsLockedError as lock:
+            raise too_many_attempts(lock.retry_after) from None
+        finally:
+            login_slots.release()
+        token = issue_ops_session_token(deps.jwt_private_key_pem, principal, deps.charge.clock())
+        response.headers.update(NO_STORE_HEADERS)
+        return OpsSessionResponse(access_token=token, expires_in=OPS_SESSION_TTL_SECONDS, role=principal.role)
+
+    @app.post("/v1/ops/ops-ai-tokens", status_code=status.HTTP_201_CREATED)
+    def ops_ai_tokens(
+        principal: Annotated[OpsPrincipal, Depends(ops.require("ops.token.issue"))], response: Response
+    ) -> MerchantTokenResponse:
+        if deps.jwt_private_key_pem is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "token issuing not configured")
+        token = issue_ops_token(
+            deps.jwt_private_key_pem, principal.ops_user_id, principal.role, deps.charge.clock()
+        )
+        response.headers.update(NO_STORE_HEADERS)
+        return MerchantTokenResponse(access_token=token, expires_in=OPS_TOKEN_TTL_SECONDS)
+
+    @app.get("/v1/ops/kyc-reviews")
+    def ops_kyc_reviews(
+        _principal: Annotated[OpsPrincipal, Depends(ops.require("kyc.review.read"))],
+        status_filter: Annotated[ReviewStatus | None, Query(alias="status")] = None,
+        limit: Annotated[int, Query(ge=1, le=OPS_LIST_LIMIT_MAX)] = OPS_LIST_LIMIT_MAX,
+    ) -> JSONResponse:
+        with session_factory() as session:
+            reviews = list_kyc_reviews(session, status_filter, limit)
+        items = [
+            {
+                "review_id": str(review.review_id),
+                "user_id": str(review.user_id),
+                "status": review.status,
+                "reasons": list(review.reasons),
+                "opened_at": review.opened_at.isoformat(),
+                "resolved_at": None if review.resolved_at is None else review.resolved_at.isoformat(),
+                "resolved_by": review.resolved_by,
+            }
+            for review in reviews
+        ]
+        return JSONResponse({"items": items}, headers=NO_STORE_HEADERS)
+
+    @app.post("/v1/ops/users/{user_id}/kyc/verify")
+    def ops_kyc_verify(
+        user_id: uuid.UUID,
+        body: KycVerifyRequest,
+        principal: Annotated[OpsPrincipal, Depends(ops.require("kyc.verify"))],
+    ) -> JSONResponse:
+        try:
+            resolution = resolve_kyc(session_factory, deps.charge.clock, principal, user_id, body.outcome)
+        except UnknownUserError:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, "user not found", headers=NO_STORE_HEADERS
+            ) from None
+        expires_at = resolution.kyc_expires_at
+        return JSONResponse(
+            {
+                "user_id": str(resolution.user_id),
+                "kyc_status": resolution.kyc_status,
+                "kyc_expires_at": None if expires_at is None else expires_at.isoformat(),
+            },
+            headers=NO_STORE_HEADERS,
+        )
+
+    @app.get("/v1/ops/data-requests")
+    def ops_data_requests(
+        _principal: Annotated[OpsPrincipal, Depends(ops.require("dsr.read"))],
+        overdue: bool | None = None,
+        limit: Annotated[int, Query(ge=1, le=OPS_LIST_LIMIT_MAX)] = OPS_LIST_LIMIT_MAX,
+    ) -> JSONResponse:
+        with session_factory() as session:
+            views = list_requests_for_ops(session, deps.charge.clock(), overdue, limit)
+        return JSONResponse({"items": [ops_request_json(view) for view in views]}, headers=NO_STORE_HEADERS)
+
+    @app.get("/v1/ops/audit")
+    def ops_audit(
+        _principal: Annotated[OpsPrincipal, Depends(ops.require("audit.read"))],
+        target: Annotated[str | None, Query(max_length=128, pattern=r"^[^\x00]*$")] = None,
+        limit: Annotated[int, Query(ge=1, le=OPS_LIST_LIMIT_MAX)] = OPS_LIST_LIMIT_MAX,
+    ) -> JSONResponse:
+        with session_factory() as session:
+            items = list_audit(session, target, limit)
+        return JSONResponse({"items": items}, headers=NO_STORE_HEADERS)
 
     app.add_middleware(
         RateLimitMiddleware,

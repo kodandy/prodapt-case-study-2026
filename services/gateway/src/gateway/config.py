@@ -17,6 +17,8 @@ class GatewaySettings(BaseSettings):
     totp_encryption_key: SecretStr | None = Field(default=None, min_length=MIN_SECRET_LENGTH)
     payment_provider: str = Field(default="simulator", validation_alias="PAYMENT_PROVIDER")
     stripe_secret_key: SecretStr | None = Field(default=None, validation_alias="STRIPE_SECRET_KEY")
+    db_role: str | None = None
+    """GATEWAY_DB_ROLE: least-privilege role every connection switches to (P0-10)."""
 
     @field_validator("stripe_secret_key", mode="before")
     @classmethod
