@@ -14,8 +14,13 @@ Status legend:
 - **Implemented; separate verification**: local operational configuration exists, but is outside
   `make ci`; do not confuse it with CI-tested behavior or a measured deployment.
 
-Verification on branch `worker/nfr-observability` (2026-11-05): `make ci` passed, `make alerts-test`
-passed (promtool: 10 rules, 21 test groups), and the load test ran as described in [docs/perf](perf/README.md).
+Verification on branch `worker/nfr-observability` (2026-11-05, laptop VM shared with other test runs):
+`make ci` ran ruff, format, mypy (298 files) and migrate-check clean; pytest gave 3861 passed and 1 failed
+(`test_charge.py::test_e1_twenty_concurrent_charges_with_one_key_make_one_provider_charge_with_redis`: one of
+20 same-key callers got `409 idempotency_in_progress` after the 5 s wait budget; this branch does not touch
+that path, and the test passed 3 of 3 runs in isolation). `make web-ci` passed on a separate run (23 files,
+257 tests). `make alerts-test` passed (promtool: 10 rules, 21 test groups), and the load test ran as described
+in [docs/perf](perf/README.md).
 
 | NFR id | Requirement (short) | Status | Evidence |
 | --- | --- | --- | --- |
