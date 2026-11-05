@@ -18,6 +18,11 @@ dev = [
   "hypothesis>=6.112",
   "mypy>=1.13",
   "ruff>=0.8",
+  "grpcio-tools>=1.66",
+  "mypy-protobuf>=3.6",
+  "types-protobuf>=5.28",
+  "types-grpcio>=1.0.0.20250318",
+  "types-grpcio-status>=1.0.0.20250318",
 ]
 
 [tool.pytest.ini_options]

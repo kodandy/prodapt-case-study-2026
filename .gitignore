@@ -21,3 +21,8 @@ data/generated/
 
 # local Claude Code state and agent worktrees
 .claude/
+
+# dev TLS material is generated into a Docker volume (ops/tls/gen_dev_cert.py); never commit keys or certs
+*.key
+*.crt
+*.pem

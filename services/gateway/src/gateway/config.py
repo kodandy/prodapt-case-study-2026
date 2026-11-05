@@ -1,6 +1,6 @@
 import os
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MIN_SECRET_LENGTH = 32
@@ -15,6 +15,8 @@ class GatewaySettings(BaseSettings):
     card_fingerprint_key: SecretStr = Field(min_length=MIN_SECRET_LENGTH)
     jwt_private_key_pem: SecretStr | None = None
     totp_encryption_key: SecretStr | None = Field(default=None, min_length=MIN_SECRET_LENGTH)
+    payment_provider: str = Field(default="simulator", validation_alias="PAYMENT_PROVIDER")
+    stripe_secret_key: SecretStr | None = Field(default=None, validation_alias="STRIPE_SECRET_KEY")
     db_role: str | None = None
     """GATEWAY_DB_ROLE: least-privilege role every connection switches to (P0-10)."""
     network_token: SecretStr | None = Field(default=None, min_length=MIN_SECRET_LENGTH)
@@ -23,6 +25,11 @@ class GatewaySettings(BaseSettings):
     """Unset → the ops dispute-resolution route answers 503 (interim until the RBAC OpsGuard)."""
     demo_top_up_enabled: bool = False
     """GATEWAY_DEMO_TOP_UP_ENABLED: exposes POST /v1/me/top-ups (demo funding only)."""
+
+    @field_validator("stripe_secret_key", mode="before")
+    @classmethod
+    def _empty_key_is_unset(cls, value: object) -> object:
+        return None if value == "" else value
 
 
 def load_gateway_settings() -> GatewaySettings:

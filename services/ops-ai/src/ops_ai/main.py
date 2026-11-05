@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI
 from redis import Redis
 
@@ -8,6 +10,8 @@ from ops_ai.clock import system_clock
 from ops_ai.config import load_ops_ai_settings
 from ops_ai.db import make_engine, make_session_factory
 from ops_ai.health import check_ready
+from ops_ai.observability.llm import InstrumentedLlm
+from ops_ai.observability.tracing import configure_logging
 from ops_ai.search.embedder import Embedder, LocalHashEmbedder
 from ops_ai.search.openai_embedder import OpenAiEmbedder
 
@@ -21,6 +25,7 @@ def build_app_from_env() -> FastAPI:
     Without OPENAI_API_KEY (unset or empty) the assistant uses MockLlm (evidence-led, model "mock").
     OPS_AI_EMBEDDER=openai needs OPENAI_API_KEY (RuntimeError otherwise); the default is the local embedder.
     """
+    configure_logging(logging.INFO)
     settings = load_ops_ai_settings()
     if settings.jwt_public_key_pem is None:
         raise RuntimeError("OPS_AI_JWT_PUBLIC_KEY_PEM is required")
@@ -47,7 +52,7 @@ def build_app_from_env() -> FastAPI:
     return create_app(
         OpsAiAppDeps(
             session_factory=session_factory,
-            llm=llm,
+            llm=InstrumentedLlm(llm),
             jwt_public_key_pem=settings.jwt_public_key_pem,
             clock=system_clock,
             readiness=lambda: check_ready(session_factory, redis),

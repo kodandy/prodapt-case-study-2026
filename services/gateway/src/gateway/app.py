@@ -1,9 +1,7 @@
-import re
 import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
@@ -88,7 +86,15 @@ from gateway.compliance.kyc import (
     screen_operation,
     user_operation_lock,
 )
+from gateway.merchant_api.validation import (
+    RequestValidationFailedError,
+    field_violations,
+    require_idempotency_key,
+    validate_payment_history_query,
+    validate_transaction_query,
+)
 from gateway.notifications.routes import notification_router
+from gateway.observability.http import install_observability
 from gateway.payments.charge import ChargeDeps, charge_card
 from gateway.payments.consumer import USER_KEY_PREFIX
 from gateway.payments.consumer_routes import consumer_payment_router
@@ -103,7 +109,6 @@ from gateway.payments.disputes import (
 from gateway.payments.history import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
-    PAYMENT_METHODS,
     InvalidCursorError,
     get_payment,
     list_payments,
@@ -121,7 +126,15 @@ from gateway.payments.schemas import (
     RefundRequest,
 )
 from gateway.payments.state import PaymentState
-from gateway.wallets.history import TransferHistoryItem, list_transfers
+from gateway.resilience.rate_limit import RateLimitConfig, RateLimitMiddleware, TokenBucketLimiter
+from gateway.wallets.history import (
+    TRANSACTION_METHODS,
+    TRANSACTION_STATUSES,
+    TransactionItem,
+    TransferHistoryItem,
+    list_transactions,
+    list_transfers,
+)
 from gateway.wallets.payouts import PayoutDeps, PayoutNotFoundError, PayoutView, create_payout, get_payout
 from gateway.wallets.service import (
     MAX_TOP_UP_MINOR,
@@ -135,7 +148,6 @@ from gateway.wallets.service import (
 LOGIN_CONCURRENCY = 4
 NO_STORE_HEADERS = {"Cache-Control": "no-store", "Pragma": "no-cache"}
 LOGIN_SLOT_WAIT_SECONDS = 2.0
-IDEMPOTENCY_KEY_PATTERN = re.compile(r"[\x21-\x7e]{1,255}")
 OPS_LIST_LIMIT_MAX = 100
 
 
@@ -156,6 +168,7 @@ class GatewayAppDeps:
     """Payout rail; None → SimulatedRail."""
     demo_top_up_enabled: bool = False
     """POST /v1/me/top-ups exists only when True (demo funding source, never in production)."""
+    rate_limits: RateLimitConfig = field(default_factory=RateLimitConfig)
 
 
 class SignUpRequest(BaseModel):
@@ -286,6 +299,11 @@ class TransferHistoryResponse(BaseModel):
     next_cursor: str | None
 
 
+class TransactionListResponse(BaseModel):
+    items: list[TransactionItem]
+    next_cursor: str | None
+
+
 def create_app(deps: GatewayAppDeps) -> FastAPI:
     """Routes:
     - POST /v1/signup {email, password} → 201 {user_id, wallet_account_id}; duplicate email → 409.
@@ -327,6 +345,9 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
     - GET /v1/me/transfers?limit&cursor (Bearer session) → 200 {items, next_cursor}: the user's sent and
       received transfers, newest first, counterparty email masked; invalid cursor → 400. All with
       Cache-Control: no-store.
+    - GET /v1/me/transactions?limit&cursor&status&created_from&created_to&method (Bearer session) → 200
+      {items, next_cursor}: the user's own transactions (B3.1), filters validated like GET /v1/payments
+      (400 per filter, 422 for limit), no-store.
     - GET /v1/payments?limit&cursor&state&created_from&created_to&method (Bearer API key) → 200 {items,
       next_cursor}: the merchant's payments, newest first; half-open date range, offsets required.
       Invalid cursor, date, range or method → 400.
@@ -627,6 +648,48 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         response.headers.update(NO_STORE_HEADERS)
         return TransferHistoryResponse(items=page.items, next_cursor=page.next_cursor)
 
+    @app.get("/v1/me/transactions")
+    def my_transactions(
+        user_id: Annotated[uuid.UUID, Depends(consumer_for("me.transfer.read"))],
+        response: Response,
+        limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+        cursor: Annotated[str | None, Query(max_length=512)] = None,
+        status_filter: Annotated[str | None, Query(alias="status", max_length=32)] = None,
+        created_from: Annotated[str | None, Query(max_length=64)] = None,
+        created_to: Annotated[str | None, Query(max_length=64)] = None,
+        method: Annotated[str | None, Query(max_length=32)] = None,
+    ) -> TransactionListResponse:
+        try:
+            query = validate_transaction_query(
+                status=status_filter,
+                created_from=created_from,
+                created_to=created_to,
+                method=method,
+                allowed_statuses=TRANSACTION_STATUSES,
+                allowed_methods=TRANSACTION_METHODS,
+            )
+            with session_factory() as session:
+                page = list_transactions(
+                    session,
+                    user_id,
+                    limit,
+                    cursor,
+                    query.status,
+                    query.created_from,
+                    query.created_to,
+                    query.method,
+                )
+        except RequestValidationFailedError as exc:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, exc.violations[0].description, headers=NO_STORE_HEADERS
+            ) from None
+        except InvalidCursorError:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "invalid cursor", headers=NO_STORE_HEADERS
+            ) from None
+        response.headers.update(NO_STORE_HEADERS)
+        return TransactionListResponse(items=page.items, next_cursor=page.next_cursor)
+
     @app.post("/v1/me/transfers")
     def create_transfer(
         body: TransferRequest,
@@ -761,15 +824,29 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         created_to: Annotated[str | None, Query(max_length=64)] = None,
         method: Annotated[str | None, Query(max_length=16)] = None,
     ) -> PaymentListResponse:
-        start = _aware_datetime_param(created_from, "created_from")
-        end = _aware_datetime_param(created_to, "created_to")
-        if start is not None and end is not None and start >= end:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid date range")
-        if method is not None and method not in PAYMENT_METHODS:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid method")
+        try:
+            query = validate_payment_history_query(
+                limit=limit,
+                cursor=cursor,
+                state=state,
+                created_from=created_from,
+                created_to=created_to,
+                method=method,
+            )
+        except RequestValidationFailedError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.violations[0].description) from None
         try:
             with session_factory() as session:
-                page = list_payments(session, merchant_id, limit, cursor, state, start, end, method)
+                page = list_payments(
+                    session,
+                    merchant_id,
+                    query.limit,
+                    query.cursor,
+                    query.state,
+                    query.created_from,
+                    query.created_to,
+                    query.method,
+                )
         except InvalidCursorError:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid cursor") from None
         return PaymentListResponse(items=page.items, next_cursor=page.next_cursor)
@@ -1018,6 +1095,14 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         )
     )
     app.include_router(notification_router(session_factory, clock, merchant_for, consumer_for))
+    app.add_middleware(
+        RateLimitMiddleware,
+        limiter=TokenBucketLimiter(deps.charge.redis),
+        config=deps.rate_limits,
+        jwt_private_key_pem=deps.jwt_private_key_pem,
+        clock=deps.charge.clock,
+    )
+    install_observability(app)
     return app
 
 
@@ -1037,20 +1122,6 @@ def _operation_in_progress() -> JSONResponse:
     )
 
 
-def _aware_datetime_param(value: str | None, name: str) -> datetime | None:
-    """An ISO 8601 date-time with an offset, returned in UTC. Anything else (naive, date-only, or an instant
-    outside the UTC datetime range such as `9999-12-31T23:59:59-23:59`) → 400."""
-    if value is None:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value)
-        if parsed.utcoffset() is None:
-            raise ValueError
-        return parsed.astimezone(UTC)
-    except (ValueError, OverflowError):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"invalid {name}") from None
-
-
 def _no_store_idempotency_key(idempotency_key: str | None) -> str:
     try:
         return _require_idempotency_key(idempotency_key)
@@ -1059,12 +1130,10 @@ def _no_store_idempotency_key(idempotency_key: str | None) -> str:
 
 
 def _require_idempotency_key(idempotency_key: str | None) -> str:
-    """Visible ASCII only: a NUL would otherwise reach Postgres and fail as a 500."""
-    if not idempotency_key:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Idempotency-Key header is required")
-    if IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key) is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid Idempotency-Key header")
-    return idempotency_key
+    try:
+        return require_idempotency_key(idempotency_key, "Idempotency-Key header")
+    except RequestValidationFailedError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.violations[0].description) from None
 
 
 async def _reject_null_body(request: Request) -> None:
@@ -1079,6 +1148,9 @@ async def _validation_error_without_input(_request: Request, exc: Exception) -> 
     """FastAPI's default 422 echoes the rejected input; for a card that would be the PAN."""
     errors = exc.errors() if isinstance(exc, RequestValidationError) else []
     detail = [{"loc": list(error["loc"]), "msg": error["msg"], "type": error["type"]} for error in errors]
+    violations = [{"field": v.field, "description": v.description} for v in field_violations(errors)]
     return JSONResponse(
-        {"error": "validation_failed", "detail": detail}, status_code=422, headers=NO_STORE_HEADERS
+        {"error": "validation_failed", "detail": detail, "violations": violations},
+        status_code=422,
+        headers=NO_STORE_HEADERS,
     )

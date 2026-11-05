@@ -31,6 +31,7 @@ from ops_ai.investigation.service import CauseLabel, Intent, investigate
 from ops_ai.investigation.tools import FailureAggregate
 from ops_ai.memory.routes import build_memory_router
 from ops_ai.memory.session import SessionStore
+from ops_ai.observability.http import install_observability
 from ops_ai.scope import ForbiddenPrincipalError, OpsScope, Principal, Scope, UserScope, require_ops_role
 from ops_ai.search.embedder import Embedder, LocalHashEmbedder
 from ops_ai.search.incident_routes import create_incident_search_router
@@ -537,6 +538,7 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
             None if deps.redis is None else RedisStreamTransport(deps.redis),
         )
     )
+    install_observability(app)
     return app
 
 

@@ -1,6 +1,7 @@
 import json
 
 from redis import Redis
+from redis.typing import EncodableT, FieldT
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -13,7 +14,9 @@ def publish_pending(
 ) -> int:
     """XADDs unpublished outbox rows (FOR UPDATE SKIP LOCKED, id order) to the stream named by `topic`.
 
-    Stream entry fields: `event_id`, `payload` (JSON). Marks rows published; returns the count published.
+    Stream entry fields: the row's headers (e.g. `traceparent`, so consumers join the producing request's
+    trace), then `event_id` and `payload` (JSON), which no header can override. Marks rows published; returns
+    the count published.
     Delivery is at least once: a crash after XADD and before commit re-sends the row.
     """
     with session_factory.begin() as session:
@@ -26,6 +29,9 @@ def publish_pending(
         ).all()
         now = clock()
         for row in rows:
-            redis.xadd(row.topic, {"event_id": str(row.event_id), "payload": json.dumps(row.payload)})
+            fields: dict[FieldT, EncodableT] = {name: value for name, value in row.headers.items()}
+            fields["event_id"] = str(row.event_id)
+            fields["payload"] = json.dumps(row.payload)
+            redis.xadd(row.topic, fields)
             row.published_at = now
         return len(rows)

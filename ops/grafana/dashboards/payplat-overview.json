@@ -1,0 +1,604 @@
+{
+  "uid": "payplat-overview",
+  "title": "PayPlat overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "tags": [
+    "payplat"
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Gateway request rate by route",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "payplat-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "sum by (route, status) (rate(gateway_http_requests_total[5m]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Gateway latency p50/p95/p99 (POST /v1/payments)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "payplat-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(gateway_http_request_duration_seconds_bucket{route=\"/v1/payments\",method=\"POST\"}[5m])))",
+          "refId": "A",
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(gateway_http_request_duration_seconds_bucket{route=\"/v1/payments\",method=\"POST\"}[5m])))",
+          "refId": "B",
+          "legendFormat": "p95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(gateway_http_request_duration_seconds_bucket{route=\"/v1/payments\",method=\"POST\"}[5m])))",
+          "refId": "C",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Card failure ratio vs 1d baseline",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "payplat-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "payplat:card_failure_ratio:rate5m",
+          "refId": "A",
+          "legendFormat": "5m"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "payplat:card_failure_ratio:rate1d",
+          "refId": "B",
+          "legendFormat": "1d baseline"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Payment events by state",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "payplat-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "sum by (method, state) (rate(gateway_payment_events_total[5m]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Provider calls by outcome",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "payplat-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "sum by (route, outcome) (rate(gateway_provider_calls_total[5m]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Circuit state (0 closed, 1 open, 2 half-open)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "payplat-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "max by (route) (gateway_circuit_state)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Rate limiting (429s and fail-open)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "payplat-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "sum by (scope) (rate(gateway_rate_limit_rejected_total[5m]))",
+          "refId": "A",
+          "legendFormat": "rejected {{scope}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "sum by (scope) (rate(gateway_rate_limit_fail_open_total[5m]))",
+          "refId": "B",
+          "legendFormat": "fail-open {{scope}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Outbox backlog",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "payplat-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "max(gateway_outbox_pending)",
+          "refId": "A",
+          "legendFormat": "pending rows"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "max(gateway_outbox_oldest_pending_age_seconds)",
+          "refId": "B",
+          "legendFormat": "oldest age (s)"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Consumer lag / pending",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "payplat-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "max by (group) (ops_ai_consumer_lag)",
+          "refId": "A",
+          "legendFormat": "lag {{group}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "max by (group) (ops_ai_consumer_pending)",
+          "refId": "B",
+          "legendFormat": "pending {{group}}"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Events consumed by outcome",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "payplat-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "sum by (outcome) (rate(ops_ai_events_consumed_total[5m]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "LLM requests and fallbacks",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "payplat-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "sum by (model, outcome) (rate(ops_ai_llm_requests_total[5m]))",
+          "refId": "A",
+          "legendFormat": "{{model}} {{outcome}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "sum(rate(ops_ai_llm_fallback_total[5m]))",
+          "refId": "B",
+          "legendFormat": "fallback"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "LLM tokens (estimated)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "payplat-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "sum by (model, direction) (rate(ops_ai_llm_tokens_total[5m]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "LLM latency p95",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "payplat-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, model) (rate(ops_ai_llm_latency_seconds_bucket[5m])))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Fraud flags",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "payplat-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "payplat-prom"
+          },
+          "expr": "sum by (kind) (rate(ops_ai_fraud_flags_total[5m]))",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

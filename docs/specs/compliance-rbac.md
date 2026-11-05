@@ -20,10 +20,10 @@ on a merchant route is simply not a credential of that route (401).
 
 | action | roles | routes |
 |---|---|---|
-| public | anyone (no user role) | GET /healthz, GET /readyz, POST /v1/signup, POST /v1/sessions, POST /v1/user-tokens, POST /v1/ops/sessions; simulated card network (guarded by `X-Network-Token`, not a user role): POST /v1/network/disputes, POST /v1/network/disputes/{dispute_id}/resolution |
+| public | anyone (no user role) | GET /healthz, GET /readyz, GET /metrics, POST /v1/signup, POST /v1/sessions, POST /v1/user-tokens, POST /v1/ops/sessions; simulated card network (guarded by `X-Network-Token`, not a user role): POST /v1/network/disputes, POST /v1/network/disputes/{dispute_id}/resolution |
 | me.mfa | consumer | POST /v1/me/mfa/totp, POST /v1/me/mfa/totp/verify |
 | me.wallet.read | consumer | GET /v1/me/wallets, POST /v1/me/wallets |
-| me.transfer.read | consumer | GET /v1/me/transfers, GET /v1/me/payouts/{payout_id}, GET /v1/me/payments, GET /v1/me/disputes, GET /v1/me/notifications, POST /v1/me/notifications/{notification_id}/read |
+| me.transfer.read | consumer | GET /v1/me/transfers, GET /v1/me/transactions, GET /v1/me/payouts/{payout_id}, GET /v1/me/payments, GET /v1/me/disputes, GET /v1/me/notifications, POST /v1/me/notifications/{notification_id}/read |
 | me.transfer.create | consumer | POST /v1/me/transfers, POST /v1/me/top-ups, POST /v1/me/payouts, POST /v1/me/payments, POST /v1/me/payments/{payment_id}/refund-requests, POST /v1/me/payments/{payment_id}/disputes, POST /v1/me/notifications/{notification_id}/response |
 | me.profile.read / me.profile.rectify | consumer | GET / PATCH /v1/me/profile |
 | me.data.export / me.data.erase / me.data_requests.read | consumer | POST /v1/me/data-requests/export, POST /v1/me/data-requests/erasure, GET /v1/me/data-requests |

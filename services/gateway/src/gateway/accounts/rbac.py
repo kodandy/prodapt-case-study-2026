@@ -50,6 +50,7 @@ ROUTE_ACTIONS: Mapping[str, str] = MappingProxyType(
     {
         "GET /healthz": PUBLIC,
         "GET /readyz": PUBLIC,
+        "GET /metrics": PUBLIC,
         "POST /v1/signup": PUBLIC,
         "POST /v1/sessions": PUBLIC,
         "POST /v1/user-tokens": PUBLIC,
@@ -58,6 +59,7 @@ ROUTE_ACTIONS: Mapping[str, str] = MappingProxyType(
         "POST /v1/me/mfa/totp/verify": "me.mfa",
         "GET /v1/me/wallets": "me.wallet.read",
         "GET /v1/me/transfers": "me.transfer.read",
+        "GET /v1/me/transactions": "me.transfer.read",
         "POST /v1/me/transfers": "me.transfer.create",
         "GET /v1/me/profile": "me.profile.read",
         "PATCH /v1/me/profile": "me.profile.rectify",

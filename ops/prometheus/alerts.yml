@@ -1,0 +1,75 @@
+# Alert rules (P0-14). Unit tests: ops/prometheus/alerts.test.yml, run with `make alerts-test` (promtool in Docker).
+# Severity: page = act now (payments are failing or stuck), ticket = degraded but self-healing.
+groups:
+  - name: payments
+    rules:
+      # Card failure rate (declined|failed|unknown over all card events) more than 3x its trailing 1-day
+      # baseline, with a traffic floor so a handful of declines at night does not page.
+      - record: payplat:card_failure_ratio:rate5m
+        expr: |
+          sum(rate(gateway_payment_events_total{method="card", state=~"declined|failed|unknown"}[5m]))
+            / sum(rate(gateway_payment_events_total{method="card"}[5m]))
+      - record: payplat:card_failure_ratio:rate1d
+        expr: |
+          sum(rate(gateway_payment_events_total{method="card", state=~"declined|failed|unknown"}[1d]))
+            / sum(rate(gateway_payment_events_total{method="card"}[1d]))
+      - alert: CardFailureRateSpike
+        expr: |
+          payplat:card_failure_ratio:rate5m > 3 * payplat:card_failure_ratio:rate1d
+            and on() sum(rate(gateway_payment_events_total{method="card"}[5m])) > 0.2
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: Card failure rate is more than 3x the 1-day baseline
+          runbook: docs/production-readiness.md#runbook-card-failure-spike
+
+      - alert: ProviderErrorRateHigh
+        expr: |
+          sum by (route) (rate(gateway_provider_calls_total{outcome=~"timeout|error"}[5m]))
+            / sum by (route) (rate(gateway_provider_calls_total[5m])) > 0.1
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "Provider {{ $labels.route }}: more than 10% of calls time out or error"
+
+      - alert: ProviderCircuitOpen
+        expr: max by (route) (gateway_circuit_state) == 1
+        for: 1m
+        labels: { severity: page }
+        annotations:
+          summary: "Circuit for provider {{ $labels.route }} is open; charges decline with provider_unavailable"
+
+  - name: pipelines
+    rules:
+      - alert: OutboxBacklogStale
+        expr: max(gateway_outbox_oldest_pending_age_seconds) > 60
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: The oldest unpublished outbox row is older than 60s (relay stuck or Redis down)
+
+      - alert: ConsumerLagHigh
+        expr: max by (group) (ops_ai_consumer_lag) > 1000 or max by (group) (ops_ai_consumer_pending) > 100
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Consumer group {{ $labels.group }} is behind gw.payments.v1"
+
+      - alert: LlmFallbackActive
+        expr: sum(increase(ops_ai_llm_fallback_total[10m])) > 5
+        labels: { severity: ticket }
+        annotations:
+          summary: The assistant is answering from evidence only (LLM unavailable)
+
+      - alert: RateLimiterFailOpen
+        expr: sum(increase(gateway_rate_limit_fail_open_total[5m])) > 0
+        labels: { severity: ticket }
+        annotations:
+          summary: Rate limiting is failing open (Redis unreachable from the gateway)
+
+      - alert: ScrapeTargetDown
+        expr: up == 0
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "{{ $labels.job }} is not answering /metrics"
