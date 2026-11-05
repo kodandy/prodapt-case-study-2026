@@ -2,7 +2,7 @@ import dataclasses
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from ops_ai.assistant.evidence import EvidenceItem
 from ops_ai.assistant.llm_port import LlmPort, LlmRequest, LlmUnavailableError
 from ops_ai.assistant.service import MAX_QUESTION_CHARS, AnswerMode
+from ops_ai.feedback import thresholds
 from ops_ai.fraud_watch.analysis import CardTestingEpisode, FraudAnalysis, analyze_fraud
 from ops_ai.fraud_watch.models import FraudAlert
 from ops_ai.fraud_watch.watch import describe_cards, format_span
@@ -17,6 +18,10 @@ from ops_ai.ingest.models import PaymentFact
 from ops_ai.investigation.service import ToolCall
 from ops_ai.scope import Scope
 from ops_ai.tickets.models import Ticket
+
+if TYPE_CHECKING:
+    # feedback.thresholds imports fraud_watch.analysis, so the runtime import is the module (as in watch.py).
+    from ops_ai.feedback.thresholds import RuleVersion
 
 FraudIntent = Literal["card_testing", "unsupported"]
 FraudCause = Literal["card_testing", "no_card_testing", "unsupported"]
@@ -52,6 +57,8 @@ class FraudInvestigation:
     text: str | None
     """None in t2_fallback."""
     model: str | None
+    rule_version: int | None = None
+    """The merchant's fraud rule version applied (0 = baseline); None for an unsupported question."""
 
 
 UNSUPPORTED_FRAUD = FraudInvestigation(
@@ -76,7 +83,8 @@ def classify_fraud_intent(question: str) -> FraudIntent:
 def investigate_fraud(
     session: Session, scope: Scope, question: str, now: datetime, llm: LlmPort
 ) -> FraudInvestigation:
-    """Tools first: analyze_fraud over the 24 hours before now, then the alerts of the flagged episodes.
+    """Tools first: analyze_fraud over the 24 hours before now, flagged under the merchant's active rule
+    version (as the live watcher), then the alerts of the flagged episodes.
 
     The label, ids and numbers come from the tools; the LLM only narrates the evidence
     (LlmUnavailableError → t2_fallback with the same fields). Unsupported questions call no tool and no LLM.
@@ -85,12 +93,13 @@ def investigate_fraud(
     if classify_fraud_intent(bounded) == "unsupported":
         return UNSUPPORTED_FRAUD
     start = now - WINDOW
-    analysis = analyze_fraud(session, scope, start, now)
+    rule = thresholds.active_rule_version(session, scope)
+    analysis = _apply_rule(analyze_fraud(session, scope, start, now), rule)
     tool_calls = (ToolCall("analyze_fraud", {"start": start.isoformat(), "end": now.isoformat()}),)
     flagged = [episode for episode in analysis.episodes if episode.flagged]
     alerts = _alerts(session, scope, flagged)
     evidence = (
-        *(_episode_evidence(episode) for episode in flagged),
+        *(_episode_evidence(episode, rule) for episode in flagged),
         *(_alert_evidence(alert) for alert in alerts),
         *(_payment_evidence(session, scope, flagged[0]) if flagged else []),
     )
@@ -105,6 +114,7 @@ def investigate_fraud(
         mode="t2_fallback",
         text=None,
         model=None,
+        rule_version=rule.version,
     )
     session.close()
     try:
@@ -112,6 +122,17 @@ def investigate_fraud(
     except LlmUnavailableError:
         return result
     return dataclasses.replace(result, mode="llm", text=response.text, model=response.model)
+
+
+def _apply_rule(analysis: FraudAnalysis, rule: "RuleVersion") -> FraudAnalysis:
+    """The active version can only tighten the baseline flag; an episode it unflags has no reasons."""
+    episodes = tuple(
+        episode
+        if not episode.flagged or thresholds.is_flagged(episode, rule)
+        else dataclasses.replace(episode, flagged=False, reasons=())
+        for episode in analysis.episodes
+    )
+    return dataclasses.replace(analysis, episodes=episodes)
 
 
 def _alerts(session: Session, scope: Scope, flagged: list[CardTestingEpisode]) -> tuple[AlertRef, ...]:
@@ -142,7 +163,7 @@ def _percent(ratio: float) -> str:
     return f"{ratio * 100:.1f}%"
 
 
-def _episode_evidence(episode: CardTestingEpisode) -> EvidenceItem:
+def _episode_evidence(episode: CardTestingEpisode, rule: "RuleVersion") -> EvidenceItem:
     bins = ", ".join(episode.card_bins) if episode.card_bins else "none"
     return EvidenceItem(
         ref=f"episode:{episode.first_payment_id}",
@@ -150,7 +171,7 @@ def _episode_evidence(episode: CardTestingEpisode) -> EvidenceItem:
             f"{episode.micro_payments} micro card payments over {format_span(episode)} "
             f"({episode.start.isoformat()} to {episode.end.isoformat()}), "
             f"{describe_cards(episode.distinct_cards)}, micro share {_percent(episode.micro_share)}, "
-            f"decline ratio {_percent(episode.decline_ratio)}, BINs {bins}"
+            f"decline ratio {_percent(episode.decline_ratio)}, BINs {bins}, fraud rule v{rule.version}"
         ),
     )
 

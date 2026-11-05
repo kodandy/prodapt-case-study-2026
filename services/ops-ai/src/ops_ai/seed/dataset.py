@@ -4,6 +4,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from itertools import islice
+from typing import Literal
 
 from contracts.events import PaymentEventV1
 from sqlalchemy.dialects.postgresql import insert
@@ -39,7 +40,9 @@ def seed_shift(planted: PlantedScenarios, anchor: datetime) -> timedelta:
     return anchor - planted.sq1_window_end
 
 
-def to_payment_event(tx: CanonicalTransaction, shift: timedelta) -> PaymentEventV1 | None:
+def to_payment_event(
+    tx: CanonicalTransaction, shift: timedelta, origin: Literal["live", "backfill"] = "backfill"
+) -> PaymentEventV1 | None:
     """None for anything but a merchant card payment."""
     if tx.record_kind != "merchant_payment" or tx.payment_method != "card" or tx.merchant_id is None:
         return None
@@ -58,7 +61,7 @@ def to_payment_event(tx: CanonicalTransaction, shift: timedelta) -> PaymentEvent
             "event_id": uuid.uuid5(MERCHANT_NAMESPACE, f"seed:{tx.transaction_id}"),
             "event_type": event_type,
             "occurred_at": tx.timestamp + shift,
-            "origin": "backfill",
+            "origin": origin,
             "entity_version": 1,
             "payment_id": tx.transaction_id,
             "merchant_id": merchant_uuid(tx.merchant_id),
@@ -75,15 +78,28 @@ def to_payment_event(tx: CanonicalTransaction, shift: timedelta) -> PaymentEvent
 
 
 def seed_dataset(
-    session_factory: sessionmaker[Session], clock: Clock, log: ScenarioLog, anchor: datetime
+    session_factory: sessionmaker[Session],
+    clock: Clock,
+    log: ScenarioLog,
+    anchor: datetime,
+    *,
+    live_since: datetime | None = None,
 ) -> SeedResult:
     """Replays the log through the consumer projection, one transaction per batch, then upserts the incidents.
 
-    Idempotent: payments dedupe on event_id, so a re-run keeps the first anchor's history.
+    Every event is a backfill (no alert or ticket) unless `live_since` is set: events at or after it arrive as
+    the live stream would after the backfill cut-over, in time order after the backfill, so the fraud watcher
+    runs on them. Idempotent: payments dedupe on event_id, so a re-run keeps the first anchor's history.
     """
     shift = seed_shift(log.planted, anchor)
     kept = [tx for tx in log.transactions if tx.timestamp + shift <= anchor]
-    events = [event for event in (to_payment_event(tx, shift) for tx in kept) if event is not None]
+    backfill = [event for event in (to_payment_event(tx, shift) for tx in kept) if event is not None]
+    events = [event for event in backfill if live_since is None or event.occurred_at < live_since]
+    tail = [event for event in backfill if live_since is not None and event.occurred_at >= live_since]
+    events.extend(
+        event.model_copy(update={"origin": "live"})
+        for event in sorted(tail, key=lambda event: (event.occurred_at, event.payment_id))
+    )
     applied = 0
     for batch in _batches(events, BATCH_SIZE):
         with session_factory.begin() as session:

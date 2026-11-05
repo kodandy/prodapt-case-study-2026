@@ -243,6 +243,7 @@ class InvestigateResponse(BaseModel):
 
 
 EPISODE_PAYMENT_IDS_LIMIT = 100
+FRAUD_RULE_VERSION_HEADER = "X-Fraud-Rule-Version"
 
 
 class EpisodeOut(BaseModel):
@@ -369,7 +370,8 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
       → InvestigateTransferResponse with Cache-Control: no-store. Another sender's transfer and a missing one
       → the identical 404.
     - POST /v1/assistant/investigate-fraud (merchant token, same body as /ask) → InvestigateFraudResponse with
-      Cache-Control: no-store; now = deps.clock().
+      Cache-Control: no-store and X-Fraud-Rule-Version: <applied version> (absent for unsupported questions);
+      now = deps.clock().
     - POST /v1/assistant/explain-settlement (merchant token) {question, period?: YYYY-MM}
       → ExplainSettlementResponse with Cache-Control: no-store. No statement for the period → 404.
     - /ask also opens an escalation ticket when the assistant abstains or a human is asked for (B12.1).
@@ -500,6 +502,8 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
         with deps.session_factory() as session:
             result = investigate_fraud(session, scope, body.question, deps.clock(), deps.llm)
         response.headers["Cache-Control"] = "no-store"
+        if result.rule_version is not None:
+            response.headers[FRAUD_RULE_VERSION_HEADER] = str(result.rule_version)
         return InvestigateFraudResponse(
             intent=result.intent,
             cause_label=result.cause_label,
