@@ -281,3 +281,78 @@ All JSON, `Cache-Control: no-store` on agent / feedback / bulk / search response
   created_at}`.
 - `POST /v1/feedback/fraud-rules/revert` (merchant) `{version (>= 0)}` → 201 RuleVersionOut; unknown → 404
   `{"detail": "rule version not found"}`.
+
+## 6. Live watcher thresholds and rule actors (R2-7 follow-up, 11-05)
+
+Closes two R2-7 gaps: the live fraud watcher `watch_payment` used only the fixed baseline, and threshold versions did
+not record who acted. Purely additive: no existing table, column, response shape or dataclass changes (the existing
+`fraud_rule_versions` / `fraud_alerts` column sets, `RuleVersion`, `RuleVersionOut` and `FraudRulesOut` stay as they
+are), so a merchant without a rule version sees byte-identical alerts, tickets, ops alerts and log lines.
+
+### 6.0 Migration `d2b7e4a9c1f6` (revises `c4f1a8e2b7d3`, the single head before it), schema `ops_ai`
+
+| table | columns |
+|---|---|
+| `fraud_rule_version_actors` | PK (`merchant_id` UUID, `version` int); FK (`merchant_id`, `version`) → `fraud_rule_versions` (`merchant_id`, `version`) ON DELETE CASCADE; `actor` varchar(64) not null; `actor_role` varchar(32) not null CHECK in (`merchant_admin`,`merchant_support`); `created_at` timestamptz not null |
+| `fraud_alert_rule_versions` | `alert_id` UUID PK, FK → `fraud_alerts.alert_id` ON DELETE CASCADE; `merchant_id` UUID not null; `rule_version` int not null CHECK `rule_version >= 0`; `applied_at` timestamptz not null |
+
+Downgrade (to `c4f1a8e2b7d3`) drops both; upgrade restores them. Models: `FraudRuleVersionActor` in
+`ops_ai/feedback/models.py`, `FraudAlertRuleVersion` in `ops_ai/fraud_watch/models.py` (already registered modules in
+`ops_ai/schema.py`); `alembic check` reports no drift. After this migration there is still exactly one head.
+
+### 6.1 Acting principal on every threshold version — `ops_ai/feedback/thresholds.py`
+
+```python
+def actor_of(scope: Scope) -> str          # f"merchant:{scope.merchant_id}" (the token subject; merchant tokens
+                                            # carry no per-user id, so the principal is merchant + role)
+@dataclass(frozen=True)
+class RuleAuditEntry:
+    version: int
+    reason: str
+    feedback_id: uuid.UUID | None
+    actor: str | None        # None only for a version row without an actor row (e.g. written before 6.0)
+    actor_role: str | None
+    created_at: datetime
+def rule_audit(session, scope: Scope) -> list[RuleAuditEntry]
+    # the scope merchant's version rows LEFT JOIN their actor rows, newest version first; no baseline entry;
+    # never another merchant's rows
+```
+- Every new version row written through `append_rule_version` — i.e. by `record_feedback` (false / true positive that
+  moves the steps) and by `revert_rule` — also inserts one `fraud_rule_version_actors` row in the same transaction with
+  the same (`merchant_id`, `version`), `actor = actor_of(scope)`, `actor_role = scope.role`, `created_at = clock()`.
+  No actor row is written when no version row is written (a true positive at the baseline, a false positive at
+  `MAX_STEPS`, a revert to an unknown version → None).
+- The acting principal is the scope passed in, which routes build from the token only. A `merchant_support` token
+  that posts feedback or reverts records `actor_role = "merchant_support"`.
+- Signatures of `record_feedback`, `revert_rule`, `append_rule_version`, `active_rule_version`, `rule_history` and
+  the `RuleVersion` fields are unchanged; rolling back the transaction removes both the version and its actor row.
+
+Route (merchant token, `Cache-Control: no-store`, 401/403 as the other merchant routes):
+- `GET /v1/feedback/fraud-rules/audit` → 200 `{entries: [{version, reason, feedback_id, actor, actor_role,
+  created_at}]}` from `rule_audit`, newest first; `{entries: []}` for a merchant with no versions.
+
+### 6.2 Live watcher reads the active version — `ops_ai/fraud_watch/watch.py`
+
+```python
+def watch_payment(session, clock, event: PaymentEventV1) -> uuid.UUID | None   # signature unchanged
+def applied_rule_version(session, scope: Scope, alert_id: uuid.UUID) -> int | None
+    # the rule_version recorded for the scope merchant's alert; None when the alert has no record or belongs to
+    # another merchant
+```
+- Unchanged: the live / micro gate, the `analyze_fraud` window `[occurred_at - 30 min, occurred_at + 1 µs)` and the
+  choice of the episode holding `event.payment_id`.
+- New: `rule = active_rule_version(session, Scope(merchant_id=event.merchant_id))`, read in the same transaction.
+  The episode is flagged iff `episode.flagged and is_flagged(episode, rule)`: the active version can only tighten the
+  live watcher, never loosen it below the shipped baseline (a hand-edited looser row has no effect). Not flagged →
+  None, and no alert, ticket, ops alert or `fraud_alert_rule_versions` row is written.
+- Flagged → exactly as before (`fraud_alerts` upsert with the same `features`, ticket and ops alert on first insert,
+  the same single log line), plus an upsert of `fraud_alert_rule_versions` for the returned alert id:
+  insert (`alert_id`, `merchant_id = event.merchant_id`, `rule_version = rule.version`, `applied_at = clock()`), or on
+  conflict (`alert_id`) update `rule_version` and `applied_at` to the values of this evaluation. Version 0 is recorded
+  for a merchant on the baseline.
+- Examples (12 micro USD events 10 s apart, 4 distinct cards, the SQ3 live burst): baseline → alert, applied version
+  0; active version with steps 1 (12, 0.83, 4) → alert, applied version = that version number; active version with
+  steps 2 (14, 0.86, 5) → no alert, no ticket, no ops alert; a revert to version 0 after that → the next burst raises
+  an alert with applied version = the revert row's version number. One merchant's version never changes another
+  merchant's live alerting.
+- The SQ3 eval golden is unchanged (seeding writes no rule versions).
