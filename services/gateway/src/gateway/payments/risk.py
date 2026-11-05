@@ -10,6 +10,7 @@ from gateway.payments.disputes import PaymentNotFoundError
 from gateway.payments.models import Payment
 from gateway.payments.schemas import PaymentRiskView
 from gateway.payments.state import ATTEMPT_LEASE_SECONDS
+from gateway.resilience.circuit_breaker import PROVIDER_UNAVAILABLE
 
 HIGH_AMOUNT_MINOR = {"USD": 500_000, "EUR": 500_000, "JPY": 500_000, "INR": 40_000_000}
 VELOCITY_LIMIT = 3
@@ -63,7 +64,11 @@ def _card_activity(session: Session, now: datetime, card_fingerprint: str) -> tu
     transaction ends, so a sibling still waiting on the provider is seen as `created` and counts as a
     decline."""
     session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(card_fingerprint, 0))))
-    declined = and_(Payment.state == "declined", Payment.risk_blocked.is_(False))
+    declined = and_(
+        Payment.state == "declined",
+        Payment.risk_blocked.is_(False),
+        Payment.decline_code.is_distinct_from(PROVIDER_UNAVAILABLE),
+    )
     in_flight = and_(Payment.state == "created", Payment.created_at >= now - IN_FLIGHT_WINDOW)
     row = session.execute(
         select(

@@ -1,0 +1,429 @@
+# Unit tests for alerts.yml (promtool test rules). Run with `make alerts-test`.
+# Each group = one scenario: input_series (Arrange), eval_time (Act), exp_alerts (Assert).
+# Series sample interval is 1m = evaluation_interval, so "Nm" == sample index N.
+# Alerts with `for` become firing at the first evaluation where (ts - activeAt) >= for.
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ===========================================================================
+  # Recording rules: payplat:card_failure_ratio:*
+  # ===========================================================================
+
+  # Scenario: 10 failures (6 declined + 3 failed + 1 unknown) per 90 succeeded card events per minute.
+  # Non-card events (method=bank) with a 50/min decline rate must not enter the ratio. Expected ratio 10/100.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_payment_events_total{method="card",state="succeeded"}'
+        values: '0+90x20'
+      - series: 'gateway_payment_events_total{method="card",state="declined",decline_code="insufficient_funds"}'
+        values: '0+6x20'
+      - series: 'gateway_payment_events_total{method="card",state="failed"}'
+        values: '0+3x20'
+      - series: 'gateway_payment_events_total{method="card",state="unknown"}'
+        values: '0+1x20'
+      - series: 'gateway_payment_events_total{method="bank",state="declined"}'
+        values: '0+50x20'
+    promql_expr_test:
+      - expr: payplat:card_failure_ratio:rate5m
+        eval_time: 10m
+        exp_samples:
+          - labels: 'payplat:card_failure_ratio:rate5m'
+            value: 0.1
+      - expr: payplat:card_failure_ratio:rate1d
+        eval_time: 10m
+        exp_samples:
+          - labels: 'payplat:card_failure_ratio:rate1d'
+            value: 0.1
+
+  # ===========================================================================
+  # CardFailureRateSpike
+  # Baseline: ~25h of steady traffic. Series are built from two segments:
+  # samples 0..1485 use the baseline step, samples 1486..1500 the spike step
+  # (the segment join is continuous: the counter never decreases).
+  # ===========================================================================
+
+  # Scenario: baseline failure ratio 10% (10 declined / 90 succeeded per min), then for the last
+  # 15 min 60 declined / 90 succeeded per min (ratio 40%, ~4x baseline) at 2.5 req/s.
+  # The condition turns true at ~1489m, so at 1500m it has held for more than the 5m `for`.
+  # At 1492m it has been pending for less than 5m and must not be firing yet.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_payment_events_total{method="card",state="succeeded"}'
+        values: '0+90x1500'
+      - series: 'gateway_payment_events_total{method="card",state="declined",decline_code="insufficient_funds"}'
+        values: '0+10x1485 14910+60x14'
+    alert_rule_test:
+      - eval_time: 1492m
+        alertname: CardFailureRateSpike
+        exp_alerts: []
+      - eval_time: 1500m
+        alertname: CardFailureRateSpike
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: "Card failure rate is more than 3x the 1-day baseline"
+              runbook: "docs/production-readiness.md#runbook-card-failure-spike"
+
+  # Scenario: failure ratio jumps to 66% (6 declined / 3 succeeded per min, far above 3x the 10%
+  # baseline) but total traffic is 9 events/min = 0.15 req/s, below the 0.2 req/s floor. Must stay silent.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_payment_events_total{method="card",state="succeeded"}'
+        values: '0+9x1485 13368+3x14'
+      - series: 'gateway_payment_events_total{method="card",state="declined",decline_code="insufficient_funds"}'
+        values: '0+1x1485 1491+6x14'
+    alert_rule_test:
+      - eval_time: 1500m
+        alertname: CardFailureRateSpike
+        exp_alerts: []
+
+  # Scenario: traffic is high (100 events/min) and the failure ratio doubles from 5% to 10%,
+  # i.e. only ~2x the 1-day baseline (< 3x). Must stay silent.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_payment_events_total{method="card",state="succeeded"}'
+        values: '0+95x1485 141165+90x14'
+      - series: 'gateway_payment_events_total{method="card",state="declined",decline_code="insufficient_funds"}'
+        values: '0+5x1485 7435+10x14'
+    alert_rule_test:
+      - eval_time: 1500m
+        alertname: CardFailureRateSpike
+        exp_alerts: []
+
+  # ===========================================================================
+  # ProviderErrorRateHigh
+  # ===========================================================================
+
+  # Scenario: route psp_a has 20% timeout+error (10 timeout + 10 error per 80 success per min) from t=0,
+  # route psp_b is healthy. At 10m the condition has held for > 5m. Only psp_a fires.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_provider_calls_total{route="psp_a",outcome="success"}'
+        values: '0+80x15'
+      - series: 'gateway_provider_calls_total{route="psp_a",outcome="timeout"}'
+        values: '0+10x15'
+      - series: 'gateway_provider_calls_total{route="psp_a",outcome="error"}'
+        values: '0+10x15'
+      - series: 'gateway_provider_calls_total{route="psp_b",outcome="success"}'
+        values: '0+100x15'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ProviderErrorRateHigh
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              route: psp_a
+            exp_annotations:
+              summary: "Provider psp_a: more than 10% of calls time out or error"
+
+  # Scenario: 9% of calls time out or error (5 timeout + 4 error per 91 success per min), just under
+  # the 10% threshold, for a long time. Must stay silent.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_provider_calls_total{route="psp_a",outcome="success"}'
+        values: '0+91x15'
+      - series: 'gateway_provider_calls_total{route="psp_a",outcome="timeout"}'
+        values: '0+5x15'
+      - series: 'gateway_provider_calls_total{route="psp_a",outcome="error"}'
+        values: '0+4x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ProviderErrorRateHigh
+        exp_alerts: []
+
+  # Scenario: timeouts only start at 11m (30/min against 100 success/min). The ratio exceeds 10%
+  # at ~12m, so at 15m it has been pending for ~3m (< 5m `for`). Must not be firing yet.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_provider_calls_total{route="psp_a",outcome="success"}'
+        values: '0+100x20'
+      - series: 'gateway_provider_calls_total{route="psp_a",outcome="timeout"}'
+        values: '0+0x10 30+30x5'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ProviderErrorRateHigh
+        exp_alerts: []
+
+  # ===========================================================================
+  # ProviderCircuitOpen
+  # ===========================================================================
+
+  # Scenario: psp_a circuit reported by two gateway instances (max by route): gw-1 stays closed,
+  # gw-2 opens at 2m and stays open. psp_b stays closed.
+  # At 2m the alert is pending (0m of 1m) -> not firing. At 3m (exactly `for`=1m) and 5m -> firing.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_circuit_state{route="psp_a",instance="gw-1"}'
+        values: '0+0x10'
+      - series: 'gateway_circuit_state{route="psp_a",instance="gw-2"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1'
+      - series: 'gateway_circuit_state{route="psp_b",instance="gw-1"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ProviderCircuitOpen
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: ProviderCircuitOpen
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              route: psp_a
+            exp_annotations:
+              summary: "Circuit for provider psp_a is open; charges decline with provider_unavailable"
+      - eval_time: 5m
+        alertname: ProviderCircuitOpen
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              route: psp_a
+            exp_annotations:
+              summary: "Circuit for provider psp_a is open; charges decline with provider_unavailable"
+
+  # Scenario: circuit flaps open/closed every minute, so it is never open for a full 1m `for`.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_circuit_state{route="psp_a"}'
+        values: '1 0 1 0 1 0 1 0 1 0'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: ProviderCircuitOpen
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: ProviderCircuitOpen
+        exp_alerts: []
+
+  # ===========================================================================
+  # OutboxBacklogStale
+  # ===========================================================================
+
+  # Scenario: oldest pending outbox row is 61s old (just over the 60s threshold) on one instance,
+  # 5s on another (max wins), from t=0. At 1m pending, at 2m (exactly `for`=2m) firing.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_outbox_oldest_pending_age_seconds{instance="gw-1"}'
+        values: '61+0x10'
+      - series: 'gateway_outbox_oldest_pending_age_seconds{instance="gw-2"}'
+        values: '5+0x10'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: OutboxBacklogStale
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: OutboxBacklogStale
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: "The oldest unpublished outbox row is older than 60s (relay stuck or Redis down)"
+      - eval_time: 6m
+        alertname: OutboxBacklogStale
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: "The oldest unpublished outbox row is older than 60s (relay stuck or Redis down)"
+
+  # Scenario: oldest pending age is exactly 60s (threshold is strictly greater). Must stay silent.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_outbox_oldest_pending_age_seconds'
+        values: '60+0x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: OutboxBacklogStale
+        exp_alerts: []
+
+  # Scenario: backlog is stale (61s) for only two samples (0m, 1m) then drains to 0.
+  # At 2m the condition is already false, so the `for`=2m was never completed.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_outbox_oldest_pending_age_seconds'
+        values: '61 61 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: OutboxBacklogStale
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: OutboxBacklogStale
+        exp_alerts: []
+
+  # ===========================================================================
+  # ConsumerLagHigh (lag branch and pending branch of the `or`)
+  # ===========================================================================
+
+  # Scenario (lag branch): lag 1001 (just over 1000), pending 0, from t=0.
+  # At 4m pending for 4m -> not firing. At 5m (exactly `for`=5m) -> firing.
+  - interval: 1m
+    input_series:
+      - series: 'ops_ai_consumer_lag{group="ops-ai"}'
+        values: '1001+0x15'
+      - series: 'ops_ai_consumer_pending{group="ops-ai"}'
+        values: '0+0x15'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: ConsumerLagHigh
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: ConsumerLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              group: ops-ai
+            exp_annotations:
+              summary: "Consumer group ops-ai is behind gw.payments.v1"
+
+  # Scenario (pending branch): lag is low (10) but 101 messages are pending (just over 100).
+  # Only the right-hand side of `or` produces the alert.
+  - interval: 1m
+    input_series:
+      - series: 'ops_ai_consumer_lag{group="ops-ai"}'
+        values: '10+0x15'
+      - series: 'ops_ai_consumer_pending{group="ops-ai"}'
+        values: '101+0x15'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: ConsumerLagHigh
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: ConsumerLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              group: ops-ai
+            exp_annotations:
+              summary: "Consumer group ops-ai is behind gw.payments.v1"
+
+  # Scenario: lag exactly 1000 and pending exactly 100 (both thresholds are strictly greater). Silent.
+  - interval: 1m
+    input_series:
+      - series: 'ops_ai_consumer_lag{group="ops-ai"}'
+        values: '1000+0x15'
+      - series: 'ops_ai_consumer_pending{group="ops-ai"}'
+        values: '100+0x15'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ConsumerLagHigh
+        exp_alerts: []
+
+  # ===========================================================================
+  # LlmFallbackActive (no `for`; increase over 10m > 5)
+  # ===========================================================================
+
+  # Scenario: the fallback counter grows by 3 per minute (~27-30 per 10m window, well above 5).
+  - interval: 1m
+    input_series:
+      - series: 'ops_ai_llm_fallback_total'
+        values: '0+3x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LlmFallbackActive
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+            exp_annotations:
+              summary: "The assistant is answering from evidence only (LLM unavailable)"
+
+  # Scenario: a single blip of 2 fallbacks at 6m (<= 5 even with extrapolation). Silent at 8m.
+  # At 20m the blip has left the 10m window, so the increase is 0. Silent.
+  - interval: 1m
+    input_series:
+      - series: 'ops_ai_llm_fallback_total'
+        values: '0+0x5 2+0x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: LlmFallbackActive
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: LlmFallbackActive
+        exp_alerts: []
+
+  # ===========================================================================
+  # RateLimiterFailOpen (no `for`; increase over 5m > 0)
+  # ===========================================================================
+
+  # Scenario: scope=payments records a single fail-open event at 3m (counter 0 -> 1), scope=refunds is flat.
+  # At 4m the event is inside the 5m window -> fires. At 10m it has left the window -> silent.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_rate_limit_fail_open_total{scope="payments"}'
+        values: '0 0 0 1 1 1 1 1 1 1 1 1'
+      - series: 'gateway_rate_limit_fail_open_total{scope="refunds"}'
+        values: '3+0x11'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RateLimiterFailOpen
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+            exp_annotations:
+              summary: "Rate limiting is failing open (Redis unreachable from the gateway)"
+      - eval_time: 10m
+        alertname: RateLimiterFailOpen
+        exp_alerts: []
+
+  # Scenario: the counter exists but never moves (zero fail-open events). Silent.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_rate_limit_fail_open_total{scope="payments"}'
+        values: '7+0x15'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RateLimiterFailOpen
+        exp_alerts: []
+
+  # ===========================================================================
+  # ScrapeTargetDown
+  # ===========================================================================
+
+  # Scenario: gateway target is down from t=0, ops-ai target is up.
+  # At 1m pending, at 2m (exactly `for`=2m) firing. Alert keeps the up{} labels (job, instance).
+  - interval: 1m
+    input_series:
+      - series: 'up{job="gateway",instance="gateway:8000"}'
+        values: '0+0x10'
+      - series: 'up{job="ops-ai",instance="ops-ai:8001"}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: ScrapeTargetDown
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: ScrapeTargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              job: gateway
+              instance: "gateway:8000"
+            exp_annotations:
+              summary: "gateway is not answering /metrics"
+      - eval_time: 6m
+        alertname: ScrapeTargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              job: gateway
+              instance: "gateway:8000"
+            exp_annotations:
+              summary: "gateway is not answering /metrics"
+
+  # Scenario: target is down for two samples (2m, 3m) and recovers at 4m, one sample short of the
+  # 2m `for`. Never fires: silent at 3m (pending 1m), 4m (recovered) and 6m.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="gateway",instance="gateway:8000"}'
+        values: '1 1 0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ScrapeTargetDown
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ScrapeTargetDown
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: ScrapeTargetDown
+        exp_alerts: []

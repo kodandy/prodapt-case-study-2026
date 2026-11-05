@@ -767,7 +767,9 @@ def test_get_payment_by_id_404s_for_another_merchants_and_an_unknown_payment_hav
 
     # Assert
     assert (foreign.status_code, unknown.status_code) == (404, 404)
-    assert dict(foreign.headers) == dict(unknown.headers)
+    assert {k: v for k, v in foreign.headers.items() if k != "traceparent"} == {
+        k: v for k, v in unknown.headers.items() if k != "traceparent"
+    }
     assert foreign.headers["Pragma"] == "no-cache"
     assert unknown.headers["Pragma"] == "no-cache"
 

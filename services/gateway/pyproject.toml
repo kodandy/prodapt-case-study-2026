@@ -17,6 +17,9 @@ dependencies = [
   "pyotp>=2.9",
   "pyjwt[crypto]>=2.10.1",
   "cryptography>=43",
+  "prometheus-client>=0.21",
+  "opentelemetry-api>=1.28",
+  "opentelemetry-sdk>=1.28",
 ]
 
 [tool.uv.sources]

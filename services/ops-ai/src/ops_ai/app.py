@@ -26,6 +26,7 @@ from ops_ai.investigation.service import CauseLabel, Intent, investigate
 from ops_ai.investigation.tools import FailureAggregate
 from ops_ai.memory.routes import build_memory_router
 from ops_ai.memory.session import SessionStore
+from ops_ai.observability.http import install_observability
 from ops_ai.scope import Principal, Scope, UserScope
 from ops_ai.search.embedder import Embedder, LocalHashEmbedder
 from ops_ai.settlement.service import explain_payout
@@ -507,6 +508,7 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
     app.include_router(
         create_analytics_router(deps.session_factory, deps.clock, merchant_scope, analytics_ops_access)
     )
+    install_observability(app)
     return app
 
 

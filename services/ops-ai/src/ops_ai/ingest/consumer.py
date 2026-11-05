@@ -2,6 +2,7 @@ import json
 import logging
 
 from contracts.events import PAYMENTS_TOPIC, PaymentEventV1
+from opentelemetry import trace
 from pydantic import ValidationError
 from redis import Redis
 from redis.exceptions import ResponseError
@@ -14,6 +15,8 @@ from ops_ai.analytics.anomaly import observe_payment
 from ops_ai.clock import Clock
 from ops_ai.fraud_watch.watch import watch_payment
 from ops_ai.ingest.models import PaymentFact, ProcessedEvent
+from ops_ai.observability.metrics import EVENTS_CONSUMED, FRAUD_FLAGS, PAYMENT_FAILURES
+from ops_ai.observability.tracing import PROPAGATOR, TRACEPARENT, configure_tracing
 from ops_ai.search.embedder import LocalHashEmbedder, document_text, is_zero
 from ops_ai.search.models import SearchDocument
 
@@ -22,6 +25,8 @@ logger = logging.getLogger(__name__)
 PAYMENT_FACTS_GROUP = "ops-ai.payment-facts"
 PAYMENTS_DEAD_LETTER_TOPIC = "gw.payments.v1.dead"
 DEAD_LETTER_MAXLEN = 10_000
+CONSUME_SPAN_NAME = f"consume {PAYMENTS_TOPIC}"
+FAILURE_STATES = frozenset({"declined", "failed", "unknown"})
 _LOCAL_EMBEDDER = LocalHashEmbedder()
 
 
@@ -94,7 +99,8 @@ def apply_payment_event(session: Session, clock: Clock, event: PaymentEventV1) -
         .values(**document)
         .on_conflict_do_update(index_elements=["kind", "ref_id"], set_=document)
     )
-    watch_payment(session, clock, event)
+    if watch_payment(session, clock, event) is not None:
+        FRAUD_FLAGS.labels("card_testing").inc()
     _observe_isolated(session, clock, event)
     return True
 
@@ -141,16 +147,29 @@ def consume_payments(
         PAYMENT_FACTS_GROUP, consumer_name, {PAYMENTS_TOPIC: start_id}, count=count, block=block_ms
     )
     entries = _stream_entries(response)
+    tracer = configure_tracing("ops-ai").get_tracer(__name__)
     for entry_id, fields in entries:
-        try:
-            event = PaymentEventV1.model_validate(json.loads(fields["payload"]))
-        except (KeyError, ValueError, ValidationError) as error:
-            _dead_letter(redis, entry_id, fields.get("payload", ""), error)
-            continue
-        with session_factory.begin() as session:
-            apply_payment_event(session, clock, event)
-        redis.xack(PAYMENTS_TOPIC, PAYMENT_FACTS_GROUP, entry_id)
+        parent = PROPAGATOR.extract({TRACEPARENT: fields[TRACEPARENT]} if TRACEPARENT in fields else {})
+        with tracer.start_as_current_span(CONSUME_SPAN_NAME, context=parent, kind=trace.SpanKind.CONSUMER):
+            _handle_entry(session_factory, redis, clock, entry_id, fields)
     return len(entries)
+
+
+def _handle_entry(
+    session_factory: sessionmaker[Session], redis: Redis, clock: Clock, entry_id: str, fields: dict[str, str]
+) -> None:
+    try:
+        event = PaymentEventV1.model_validate(json.loads(fields["payload"]))
+    except (KeyError, ValueError, ValidationError) as error:
+        _dead_letter(redis, entry_id, fields.get("payload", ""), error)
+        EVENTS_CONSUMED.labels("dead_letter").inc()
+        return
+    with session_factory.begin() as session:
+        applied = apply_payment_event(session, clock, event)
+    redis.xack(PAYMENTS_TOPIC, PAYMENT_FACTS_GROUP, entry_id)
+    EVENTS_CONSUMED.labels("applied" if applied else "duplicate").inc()
+    if applied and event.state in FAILURE_STATES:
+        PAYMENT_FAILURES.labels(event.decline_code or "none").inc()
 
 
 def _dead_letter(redis: Redis, entry_id: str, payload: str, error: Exception) -> None:
