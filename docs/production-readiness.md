@@ -28,18 +28,18 @@ in [docs/perf](perf/README.md).
 | NFR-PERF (assistant) | Separate assistant SLO: p95 < 20 s, with fallback | Design only (latency SLO) | [Architecture §8](architecture-detail.md#8-claims-we-make-about-the-nfrs); fallback behavior is tested in [LLM tests](../services/ops-ai/src/ops_ai/observability/__tests__/test_llm_instrumentation.py), `test_complete_on_unavailable_counts_the_fallback_and_reraises_the_same_error`. |
 | NFR-SCALE | 100k TPS / 100M users | Design only | [Design P2-7](design.md#p2-7-100k-tps-topology): stateless replicas, partitioning, home-region sharding and Pub/Sub; sizing is an estimate. |
 | NFR-AVAIL | 99.999 % payment write-path availability (≈ 26 s/month error budget) | Design only (availability target) | [Design P2-2](design.md#p2-2-99999--availability): SPOFs, failover and error-budget policy. Single-container dependencies remain locally. |
-| NFR-SEC (transport) | TLS in transit | Implemented; separate verification (dev only) | [TLS nginx](../ops/tls/nginx-tls.conf), [certificate generator](../ops/tls/gen_dev_cert.py), [compose TLS profile](../compose.yaml). Managed production certificates and [service mTLS](design.md#mtls-between-services) are design only. |
+| NFR-SEC (transport) | TLS in transit | Implemented; separate verification (dev only) | [TLS nginx](../ops/tls/nginx-tls.conf), [certificate generator](../ops/tls/gen_dev_cert.py), [compose TLS profile](../compose.yaml). Merchant gRPC serves TLS from `GATEWAY_GRPC_TLS_CERT_PATH` / `GATEWAY_GRPC_TLS_KEY_PATH` and refuses to start without them unless `GATEWAY_GRPC_INSECURE=true` ([server](../services/gateway/src/gateway/merchant_api/grpc_server.py), [TLS tests](../services/gateway/src/gateway/merchant_api/__tests__/test_grpc_tls.py)); the compose demo sets that flag and publishes plaintext gRPC on 127.0.0.1 only. Managed production certificates and [service mTLS](design.md#mtls-between-services) are design only. |
 | NFR-SEC (stored data / keys) | Encryption at rest and key management | Design only (disk encryption / KMS) | [Design D6.2–D6.3](design.md#d62-totp-mfa-with-the-secret-sealed-by-aes-256-gcm), [P2-3](design.md#p2-3-pci-dss-scope-reduction), [P2-4](design.md#p2-4-data-residency-and-gdpr-erasure); TOTP field encryption exists, but does not establish disk encryption. |
 | NFR-COMP | Card tokenization / PCI-DSS, GDPR, AML / KYC | Design only (compliance scope and full controls) | [Design P2-3](design.md#p2-3-pci-dss-scope-reduction), [P2-4](design.md#p2-4-data-residency-and-gdpr-erasure), [re-verification](design.md#aml--kyc-re-verification-triggers). Test-card tokenization and PII separation exist; no PCI-DSS L1 or GDPR compliance claim. |
 | NFR-REL | Zero double charge; atomic transactions | Implemented and tested (bounded scenarios) | [Charge implementation](../services/gateway/src/gateway/payments/charge.py), [charge tests](../services/gateway/src/gateway/payments/__tests__/test_charge.py), [ledger tests](../services/gateway/src/gateway/payments/ledger/__tests__/test_ledger_service.py); [P0-1–4 gaps](requirements-traceability.md#p0-production-readiness--implemented-and-proved-by-tests-d-020) include missing real process-kill coverage and incomplete crash matrix. |
 | NFR-REL (provider) | Deadline, per-route breaker; never reroute `unknown` | Implemented and tested | [Wrapper](../services/gateway/src/gateway/resilience/circuit_breaker.py), [tests](../services/gateway/src/gateway/resilience/__tests__/test_resilient_provider.py): `test_charge_card_with_a_slow_provider_ends_unknown_and_calls_the_provider_once`; [queued-call tests](../services/gateway/src/gateway/resilience/__tests__/test_hardening.py). |
 | NFR-OBS (metrics) | HTTP rate/errors/latency, payment/fraud, provider, pipeline and LLM metrics | Implemented and tested (subset) | [Gateway metrics](../services/gateway/src/gateway/observability/metrics.py), [HTTP tests](../services/gateway/src/gateway/observability/__tests__/test_metrics_http.py): `test_request_observes_the_latency_histogram_once`; [AI metrics](../services/ops-ai/src/ops_ai/observability/metrics.py), [LLM tests](../services/ops-ai/src/ops_ai/observability/__tests__/test_llm_instrumentation.py). `gateway_http_request_duration_seconds`, `gateway_payment_events_total`, `ops_ai_payment_failures_total`, `ops_ai_fraud_flags_total`, `ops_ai_llm_tokens_total` (estimated, model `mock` for mock answers). Cost/eval score and reconciler-unknown metrics are missing. |
 | NFR-OBS (traces / logs) | W3C context across API → outbox → stream → consumer; trace-correlated logs | Implemented and tested (subset) | [Propagation tests](../tests/e2e/test_trace_propagation.py): `test_trace_id_of_the_gateway_request_reaches_the_ops_ai_consumer_span`, `test_the_llm_span_joins_the_trace_of_the_request_that_created_the_event` (explicit parent context in test); [gateway tracing](../services/gateway/src/gateway/observability/tracing.py), [AI tracing](../services/ops-ai/src/ops_ai/observability/tracing.py); [log canary](../tests/test_log_canary.py): `test_no_canary_secret_or_personal_data_appears_in_any_log_record_of_the_full_flow`. Captures in-process Python logs, not container stdout from every process. |
-| NFR-OBS (audit) | Append-only audit and operation correlation | Implemented and tested (operation rows only) | [Audit model](../services/gateway/src/gateway/audit/models.py), [charge tests](../services/gateway/src/gateway/payments/__tests__/test_charge.py), [design D6.6](design.md#d66-append-only-audit-written-in-the-same-transaction). P0-10 remains partial: no app-role grants, UPDATE/DELETE rejection test or rollback-on-audit-failure test. |
+| NFR-OBS (audit) | Append-only audit and operation correlation | Implemented and tested (operation rows only) | [Audit model](../services/gateway/src/gateway/audit/models.py), [charge tests](../services/gateway/src/gateway/payments/__tests__/test_charge.py), [append-only tests](../services/gateway/src/gateway/audit/__tests__/test_audit_append_only.py) (UPDATE/DELETE/TRUNCATE rejected as `gateway_app`, rollback when the audit insert fails), [design D6.6](design.md#d66-append-only-audit-written-in-the-same-transaction). P0-10 remains partial: the compose demo logs in as a superuser and only `SET ROLE`s to `gateway_app`, the relay and notifier do not use the role, and there is no hash chain. |
 | NFR-OBS (export / tools) | Production trace backend and tool spans | Design only | [Tracing setup](../services/gateway/src/gateway/observability/tracing.py) installs an SDK without an exporter; no OTLP deployment or tool spans. |
 | NFR-OBS (alerts / dashboard) | Failure spike, provider, lag and fallback detection; operational dashboard | Implemented; separate verification | [Rules](../ops/prometheus/alerts.yml), [promtool fixtures](../ops/prometheus/alerts.test.yml), [scrapes](../ops/prometheus/prometheus.yml), [PayPlat overview](../ops/grafana/dashboards/payplat-overview.json), [runbook](#runbook-card-failure-spike). `make alerts-test` is outside CI; no reconciler-unknown rule or configured external paging delivery. Live demo not recorded. |
 | NFR-GEO | Multi-region / cross-region failover and data residency | Design only | [Design P2-1](design.md#p2-1-multi-region-active-active) compares Spanner with per-region Cloud SQL plus saga/reconciliation; [P2-4](design.md#p2-4-data-residency-and-gdpr-erasure) specifies residency. No deployed multi-region system or failover drill. |
-| NFR-B2X | Consumer and merchant payment interfaces | Implemented and tested (subset) | [B1–B3](requirements-traceability.md#b1-user-account-management-with-sign-up-login-mfa-and-wallet-management), [B8](requirements-traceability.md#b8-restgrpc-apis-for-merchant-integrations-with-input-validation-guardrails-and-idempotency-enforcement), [B13](requirements-traceability.md#b13-simple-front-end-interface-for-user-and-merchant-interaction); [transfer tests](../services/gateway/src/gateway/wallets/__tests__/test_transfers.py), [charge tests](../services/gateway/src/gateway/payments/__tests__/test_charge.py). gRPC, FX and external payment rails remain unbuilt; not proof of all B2X capabilities. |
+| NFR-B2X | Consumer and merchant payment interfaces | Implemented and tested (subset) | [B1–B3](requirements-traceability.md#b1-user-account-management-with-sign-up-login-mfa-and-wallet-management), [B8](requirements-traceability.md#b8-restgrpc-apis-for-merchant-integrations-with-input-validation-guardrails-and-idempotency-enforcement), [B13](requirements-traceability.md#b13-simple-front-end-interface-for-user-and-merchant-interaction); [transfer tests](../services/gateway/src/gateway/wallets/__tests__/test_transfers.py), [charge tests](../services/gateway/src/gateway/payments/__tests__/test_charge.py). Merchant gRPC, FX legs and simulated `bank_transfer` / `upi` payouts exist (traceability B2.3, B2.5, B8.2); the payout rail is a simulator with no reconciler, and chargebacks of FX-settled charges are not FX-aware. Not proof of all B2X capabilities. |
 
 Payment event counters increment at outbox insert, before commit, so rollback can overcount. They
 count state changes, not distinct payments. Failure metrics use decline codes, not a complete
@@ -100,7 +100,9 @@ HTTP methods are labelled `OTHER`):
 
 - **M1:** Limiter shares the Redis pool and its timeouts with payment coordination.
 - **M2:** Per-bearer buckets do not bound API-key guessing; edge `limit_req` is design only.
-- **M3:** Non-timeout provider exceptions are re-raised; safe unknown-outcome classification is incomplete.
+- **M3:** Provider timeouts, connection errors and `ProviderRequestError` (a non-decline rejection such as a Stripe
+  4xx) finalize as `unknown`; any other provider exception is still re-raised, leaving the attempt `created` until
+  its lease expires.
 - **M4:** Breaker admission tokens / stale outcomes are not tracked across state transitions.
 - **M5:** `/metrics` remains unauthenticated on the app port; only the nginx public proxy blocks it.
 - **L2:** Span exception recording can capture sensitive exception details.
@@ -109,6 +111,39 @@ HTTP methods are labelled `OTHER`):
 - **L7:** Dev certificates expire after 30 days but existing pairs are reused without expiry renewal;
   dev nginx sets HSTS (`max-age=300`).
 - **L8:** Provider `lookup()` passes through without a deadline.
+- **Breaker accounting:** `ResilientProvider` counts every provider exception as a breaker failure, including
+  `ProviderRequestError` (a request the provider rejected, e.g. a Stripe 4xx that is not a card decline), so a burst
+  of bad requests can open the circuit for healthy traffic
+  ([wrapper](../services/gateway/src/gateway/resilience/circuit_breaker.py), `ResilientProvider.charge`).
+
+Other open gaps, with the document that holds the detail:
+
+- **Reconciler:** nothing resolves `unknown` card payments or `unknown` payouts, or reclaims expired attempt leases;
+  a crash between the provider call and finalization leaves that key answering 409. `settle_payout` is the entry
+  point a payout reconciler would call (traceability B2.5, P0-4; [design D3.3](design.md#d33-an-unknown-outcome-is-stored-as-202-and-never-retried-with-a-new-key)).
+- **Card payment latency:** the k6 p99 < 2 s target for card `POST /v1/payments` was not met locally
+  (p99 2.82 s at 2 req/s; see NFR-PERF above and [docs/perf](perf/README.md)).
+- **gRPC TLS in the demo:** TLS is implemented and tested, but the compose demo runs plaintext gRPC bound to
+  127.0.0.1 (`GATEWAY_GRPC_INSECURE=true`); any deployment beyond loopback must set the certificate paths.
+- **`/metrics` without auth:** see M5. Both APIs serve `/metrics` with no credential on their app port; only the web
+  nginx proxy returns 404 for it.
+- **Interim ops admin token:** ops dispute resolution still accepts `X-Ops-Admin-Token` when no Bearer credential is
+  sent (traceability P0-9, B3.3).
+- **FX chargebacks:** a refund of an FX-settled charge reverses at the charge's rate, but a chargeback posts in the
+  payment currency without FX legs (traceability B2.3; `gw/payments/disputes.py`).
+- **KYC-rejected users:** a `rejected` user is refused every transfer, payout and consumer card payment
+  (`ensure_not_rejected`, screening); the accepted residuals (check-then-act window, audit rows bounded only by the
+  fail-open rate limit, block per account not per person) are in
+  [compliance-rbac spec, "Known residuals of M3"](specs/compliance-rbac.md).
+- **Ops analytics (R2-8):** ops reads and `POST /v1/ops/ops-ai-tokens` issuance are not audited, the stateless ops-ai
+  token stays valid up to 900 s after an ops user is disabled or demoted, and both ops roles read every merchant
+  ([analytics spec §4](specs/analytics.md#4-api-ops_aianalyticsroutescreate_analytics_router)).
+- **R2 partials:** R2-1 and R2-2 (no dispute records reach ops-ai, so the dispute judge answers `skipped` by default;
+  the root-cause judge is opt-in with `POST /v1/assistant/investigate?judge=true`), R2-7 (the SQ3 assistant still uses
+  the baseline rule; the rule actor is per merchant, not per person), R2-8 (above) and the other rows marked Partial in
+  [requirements-traceability.md](requirements-traceability.md).
+- **Load-sensitive test:** `test_openai_llm.py::test_complete_gives_the_fallback_only_the_remaining_budget` failed once
+  under heavy machine load (`openai: http 503` where it expected `openai: timeout`) and passed on rerun.
 
 ## Runbook: card failure spike
 
