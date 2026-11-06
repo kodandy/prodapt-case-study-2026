@@ -377,6 +377,8 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
     - /ask also opens an escalation ticket when the assistant abstains or a human is asked for (B12.1).
     - GET /v1/tickets, GET /v1/tickets/{id}, POST /v1/tickets/{id}/transition (merchant token):
       see ops_ai.tickets.api.
+    - POST /v1/assistant/failures (merchant token, or ops token with ?merchant_id=<uuid>): see
+      ops_ai.assistant.routes.
     - GET /v1/ops/compliance/erasures (ops token): see ops_ai.compliance.api.
     - GET /v1/ops/analytics/{alerts,forecast,chargeback-risk} (ops token): see ops_ai.analytics.routes.
     Missing/invalid/expired token → 401 {"detail": "invalid token"}. A valid token of another kind (user or
@@ -570,7 +572,7 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
             )
         )
 
-    app.include_router(create_assistant_router(deps, merchant_scope, principal_from_token))
+    app.include_router(create_assistant_router(deps, principal_from_token))
     app.include_router(create_ticket_router(deps.session_factory, deps.clock, merchant_scope))
     app.include_router(
         create_analytics_router(deps.session_factory, deps.clock, merchant_scope, analytics_ops_access)
