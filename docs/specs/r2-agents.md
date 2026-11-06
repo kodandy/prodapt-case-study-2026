@@ -370,6 +370,12 @@ Downgrade (to `c4f1a8e2b7d3`) drops both; upgrade restores them. Models: `FraudR
 `ops_ai/feedback/models.py`, `FraudAlertRuleVersion` in `ops_ai/fraud_watch/models.py` (already registered modules in
 `ops_ai/schema.py`); `alembic check` reports no drift. After this migration there is still exactly one head.
 
+Migration `f3c8a1d6e9b4` (revises `e5a9c3f17b28`, 11-06) adds two columns to `fraud_rule_version_actors`:
+`actor_kind` varchar(32) not null, server default `merchant_principal`, CHECK in (`api_key`,`merchant_principal`);
+`actor_id` UUID null; CHECK `(actor_kind = 'api_key') = (actor_id IS NOT NULL)`. Existing rows get
+`merchant_principal` with no id. Downgrade (to `e5a9c3f17b28`) drops both checks and both columns; the other columns
+and rows are kept.
+
 ### 6.1 Acting principal on every threshold version — `ops_ai/feedback/thresholds.py`
 
 ```python
@@ -394,6 +400,28 @@ def rule_audit(session, scope: Scope) -> list[RuleAuditEntry]
   `MAX_STEPS`, a revert to an unknown version → None).
 - The acting principal is the scope passed in, which routes build from the token only. A `merchant_support` token
   that posts feedback or reverts records `actor_role = "merchant_support"`.
+- Per-actor id (11-06): there are no merchant human user accounts in this system, so the individual acting identity
+  of a merchant request is the gateway API key. Merchant tokens carry `api_key_id` and the verified token yields
+  `Scope.api_key_id` (`docs/specs/compliance-rbac.md` section 3). `append_rule_version` writes it into the same
+  actor row, in the same transaction as the version row, from the scope only (request bodies forbid extra fields,
+  so a body naming an `api_key_id` is 422 and writes nothing):
+
+```python
+ActorKind = Literal["api_key", "merchant_principal"]
+@dataclass(frozen=True)
+class RuleActorIdentity:
+    actor_kind: ActorKind
+    actor_id: uuid.UUID | None   # the api_keys.id when actor_kind == "api_key", else None
+def actor_identity_of(scope: Scope) -> RuleActorIdentity
+    # ("api_key", scope.api_key_id) when the token named a key, else ("merchant_principal", None): a token without
+    # the claim records that no key was named, never a guessed id
+def rule_actor_identity(session, scope: Scope, version: int) -> RuleActorIdentity | None
+    # the scope merchant's stored identity for that version; None when there is no actor row or the version belongs
+    # to another merchant; a stored row that breaks the kind / id pairing raises ValueError
+```
+- The identity is stored and readable through `rule_actor_identity` only. It is **not exposed over HTTP**: the history
+  and audit responses and `RuleAuditEntry` are unchanged, and `actor` stays `merchant:<id>`. Rows written before
+  migration `f3c8a1d6e9b4` read as `("merchant_principal", None)`.
 - Signatures of `record_feedback`, `revert_rule`, `append_rule_version`, `active_rule_version`, `rule_history` and
   the `RuleVersion` fields are unchanged; rolling back the transaction removes both the version and its actor row.
 

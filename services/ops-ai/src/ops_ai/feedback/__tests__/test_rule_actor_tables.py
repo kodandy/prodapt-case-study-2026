@@ -222,6 +222,8 @@ def test_actor_columns_have_the_exact_specified_types_lengths_and_nullability(en
         "version": ("integer", "NO", None),
         "actor": ("character varying", "NO", 64),
         "actor_role": ("character varying", "NO", 32),
+        "actor_kind": ("character varying", "NO", 32),
+        "actor_id": ("uuid", "YES", None),
         "created_at": ("timestamp with time zone", "NO", None),
     }
 

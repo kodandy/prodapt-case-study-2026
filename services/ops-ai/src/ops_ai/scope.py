@@ -14,6 +14,8 @@ class Scope:
 
     merchant_id: uuid.UUID
     role: MerchantRole = "merchant_admin"
+    api_key_id: uuid.UUID | None = None
+    """The gateway API key behind the token (merchants have no user accounts); None if the token has none."""
 
 
 @dataclass(frozen=True)

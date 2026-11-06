@@ -1,7 +1,8 @@
 """Per-merchant, versioned card-testing thresholds driven by ops feedback (R2-7).
 
 Every change is a new append-only row, so the history is the audit trail and any version can be restored.
-Each row also records the acting principal (the token scope that wrote it) in `fraud_rule_version_actors`.
+Each row also records the acting principal (the token scope that wrote it) in `fraud_rule_version_actors`,
+including the acting API key when the verified token names one (`actor_identity_of`).
 The ladder only tightens: no step is looser than the shipped baseline in `fraud_watch.rules`.
 """
 
@@ -9,6 +10,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 from sqlalchemy import Row, Select, select
 from sqlalchemy.orm import Session
@@ -46,6 +48,18 @@ class RuleAuditEntry:
     created_at: datetime
 
 
+ActorKind = Literal["api_key", "merchant_principal"]
+
+
+@dataclass(frozen=True)
+class RuleActorIdentity:
+    """Who acted, finer than the principal: the gateway API key, or the merchant principal if no key is known.
+    Merchants have no user accounts, so an API key is the finest acting identity; it is never guessed."""
+
+    actor_kind: ActorKind
+    actor_id: uuid.UUID | None
+
+
 @dataclass(frozen=True)
 class KeysetPage[T]:
     items: list[T]
@@ -68,6 +82,30 @@ BASELINE = RuleVersion(
 def actor_of(scope: Scope) -> str:
     """The token subject of a merchant principal; merchant tokens carry no per-user id."""
     return f"merchant:{scope.merchant_id}"
+
+
+def actor_identity_of(scope: Scope) -> RuleActorIdentity:
+    """The API key named by the verified token, else the merchant principal with no id."""
+    if scope.api_key_id is None:
+        return RuleActorIdentity(actor_kind="merchant_principal", actor_id=None)
+    return RuleActorIdentity(actor_kind="api_key", actor_id=scope.api_key_id)
+
+
+def rule_actor_identity(session: Session, scope: Scope, version: int) -> RuleActorIdentity | None:
+    """The acting identity of the scope merchant's `version`; None if it has no actor row (or is not theirs).
+    A row written before 11-06 reads as the merchant principal with no id."""
+    row = session.execute(
+        select(FraudRuleVersionActor.actor_kind, FraudRuleVersionActor.actor_id).where(
+            FraudRuleVersionActor.merchant_id == scope.merchant_id, FraudRuleVersionActor.version == version
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    if row.actor_kind == "api_key" and row.actor_id is not None:
+        return RuleActorIdentity(actor_kind="api_key", actor_id=row.actor_id)
+    if row.actor_kind == "merchant_principal" and row.actor_id is None:
+        return RuleActorIdentity(actor_kind="merchant_principal", actor_id=None)
+    raise ValueError("inconsistent stored actor identity")
 
 
 def clamp_steps(steps: int) -> int:
@@ -215,12 +253,15 @@ def append_rule_version(
     )
     session.add(row)
     session.flush()
+    identity = actor_identity_of(scope)
     session.add(
         FraudRuleVersionActor(
             merchant_id=scope.merchant_id,
             version=row.version,
             actor=actor_of(scope),
             actor_role=scope.role,
+            actor_kind=identity.actor_kind,
+            actor_id=identity.actor_id,
             created_at=row.created_at,
         )
     )

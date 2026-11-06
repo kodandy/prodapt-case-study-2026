@@ -26,7 +26,7 @@ from gateway.accounts.models import User
 from gateway.accounts.rbac import MerchantRole, is_allowed
 from gateway.accounts.service import (
     EmailAlreadyRegisteredError,
-    authenticate_api_key_role,
+    authenticate_api_key_principal,
     find_login,
     sign_up,
     verify_login,
@@ -262,6 +262,7 @@ class PayoutRequest(BaseModel):
 class MerchantPrincipal:
     merchant_id: uuid.UUID
     role: MerchantRole
+    api_key_id: uuid.UUID
 
 
 class OpsSessionRequest(BaseModel):
@@ -400,13 +401,14 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
             if credentials is None:
                 raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing api key")
             with session_factory() as session:
-                found = authenticate_api_key_role(session, credentials.credentials, deps.api_key_pepper)
+                found = authenticate_api_key_principal(session, credentials.credentials, deps.api_key_pepper)
             if found is None:
                 raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid api key")
-            merchant_id, role = found
-            if not is_allowed(role, action):
+            if not is_allowed(found.role, action):
                 raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
-            return MerchantPrincipal(merchant_id=merchant_id, role=role)
+            return MerchantPrincipal(
+                merchant_id=found.merchant_id, role=found.role, api_key_id=found.api_key_id
+            )
 
         return dependency
 
@@ -559,7 +561,11 @@ def create_app(deps: GatewayAppDeps) -> FastAPI:
         if deps.jwt_private_key_pem is None:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "token issuing not configured")
         token = issue_merchant_token(
-            deps.jwt_private_key_pem, principal.merchant_id, deps.charge.clock(), role=principal.role
+            deps.jwt_private_key_pem,
+            principal.merchant_id,
+            deps.charge.clock(),
+            role=principal.role,
+            api_key_id=principal.api_key_id,
         )
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"

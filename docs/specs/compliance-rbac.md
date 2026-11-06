@@ -117,8 +117,15 @@ with `principal: Annotated[OpsPrincipal, Depends(ops_guard.require("dispute.reso
 
 ## 3. ops-ai principal (`ops_ai.scope`, `ops_ai.auth`)
 
-- `Scope(merchant_id, role: MerchantRole = "merchant_admin")`; merchant tokens with roles exactly
-  `["merchant_admin"]` or `["merchant_support"]` are accepted.
+- `Scope(merchant_id, role: MerchantRole = "merchant_admin", api_key_id: UUID | None = None)`; merchant tokens
+  with roles exactly `["merchant_admin"]` or `["merchant_support"]` are accepted.
+- Acting identity (R2-7, 11-06): merchants have no human user accounts in this system; the only merchant
+  credential is an API key, so the API key is the acting identity. `POST /v1/merchant-tokens` resolves the key
+  with `authenticate_api_key_principal` (`gw/accounts/service.py`, returns merchant, role and the `api_keys.id`)
+  and `issue_merchant_token(..., api_key_id=...)` adds the claim `api_key_id` (canonical UUID string). ops-ai
+  sets `Scope.api_key_id` from that claim only: a malformed value is 401 `invalid api_key_id claim`, the claim
+  on a user or ops token is refused, and a token without it (issued before 11-06) yields `api_key_id = None`
+  rather than a guessed id. Ops tokens already name the individual (`sub == "ops:<ops_user_id>"`).
 - `OpsScope(ops_user_id, role: OpsRole)`; `Principal = Scope | UserScope | OpsScope`. A token carries exactly
   one of `merchant_id` / `user_id` / `ops_user_id`; an ops token needs `sub == "ops:<ops_user_id>"` and roles
   exactly `[role]` with role in `OPS_ROLES`.

@@ -23,6 +23,15 @@ _password_hasher = PasswordHasher()
 
 
 @dataclass(frozen=True)
+class ApiKeyPrincipal:
+    """A merchant API key: the acting identity of a merchant request (merchants have no user accounts)."""
+
+    merchant_id: uuid.UUID
+    role: MerchantRole
+    api_key_id: uuid.UUID
+
+
+@dataclass(frozen=True)
 class SignUpResult:
     user_id: uuid.UUID
     wallet_account_id: uuid.UUID
@@ -213,10 +222,20 @@ def authenticate_api_key_role(
     session: Session, api_key: str, api_key_pepper: str
 ) -> tuple[uuid.UUID, MerchantRole] | None:
     """The merchant id and the key's role for a valid key, else None. An unknown stored role is refused."""
+    principal = authenticate_api_key_principal(session, api_key, api_key_pepper)
+    if principal is None:
+        return None
+    return principal.merchant_id, principal.role
+
+
+def authenticate_api_key_principal(
+    session: Session, api_key: str, api_key_pepper: str
+) -> ApiKeyPrincipal | None:
+    """The key's merchant, role and id for a valid key, else None. An unknown stored role is refused."""
     if not api_key.startswith(API_KEY_PREFIX):
         return None
     row = session.execute(
-        select(ApiKey.merchant_id, ApiKey.role).where(
+        select(ApiKey.id, ApiKey.merchant_id, ApiKey.role).where(
             ApiKey.key_hash == _hash_api_key(api_key, api_key_pepper)
         )
     ).one_or_none()
@@ -224,5 +243,5 @@ def authenticate_api_key_role(
         return None
     for role in MERCHANT_ROLES:
         if role == row.role:
-            return row.merchant_id, role
+            return ApiKeyPrincipal(merchant_id=row.merchant_id, role=role, api_key_id=row.id)
     return None
