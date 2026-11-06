@@ -121,12 +121,24 @@ def excerpt_for(sentence: str, summary: str) -> str:
     return window.strip()
 
 
+def _quotable_spans(summary: str) -> set[str]:
+    """Every run of whole consecutive sentences of `summary`, whitespace-normalised, final period dropped."""
+    parts = [" ".join(part.split()) for part in _SENTENCE_END.split(summary.strip()) if part.strip()]
+    return {
+        " ".join(parts[start:end]).rstrip(".")
+        for start in range(len(parts))
+        for end in range(start + 1, len(parts) + 1)
+    }
+
+
 def _quoted_source(sentence: str, evidence: Sequence[EvidenceItem]) -> EvidenceItem | None:
-    quote = " ".join(_BULLET.sub("", sentence).split())
+    """A quote counts only when it is whole sentences of one summary: a substring could drop a digit or a
+    `not` and still match."""
+    quote = " ".join(_BULLET.sub("", sentence).split()).rstrip(".")
     if len(quote) < MIN_QUOTE_CHARS:
         return None
     for item in evidence:
-        if quote in " ".join(item.summary.split()):
+        if quote in _quotable_spans(item.summary):
             return item
     return None
 

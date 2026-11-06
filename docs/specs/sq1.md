@@ -318,7 +318,8 @@ making grounded the default is that one line (plus updating the tests that pin t
     uses, cut back to a word boundary);
   - any cited ref is not relevant evidence of this turn (not retrieved, or retrieved but not relevant) →
     dropped, listed in `unsupported_sentences` with `reason="unknown_ref"` and its refs;
-  - no ref: kept only when it quotes one summary verbatim (≥ 12 characters, bullet and whitespace normalised),
+  - no ref: kept only when it quotes whole consecutive sentences of one summary verbatim (≥ 12 characters, bullet,
+    whitespace and a final period normalised; a substring that drops a digit or a `not` does not count),
     attributed to that item; otherwise dropped with `reason="no_citation"`.
   `text` is the kept sentences, one per line; none kept → `CANNOT_ANSWER_TEXT` with `grounded=false`.
 - **Outage.** `LlmUnavailableError` → `t2_fallback`, `text=null`, `grounded=false`, empty citations (the

@@ -224,3 +224,46 @@ def test_ground_answer_with_no_supported_sentence_returns_the_cannot_answer_text
     # Assert
     assert (grounding.grounded, grounding.text, grounding.citations) == (False, CANNOT_ANSWER_TEXT, ())
     assert [u.reason for u in grounding.unsupported] == ["no_citation"]
+
+
+def test_ground_answer_drops_an_uncited_sentence_that_quotes_only_the_tail_of_a_number() -> None:
+    # Arrange
+    evidence = (
+        EvidenceItem(
+            ref="aggregate:decline_code:insufficient_funds",
+            summary="15 declined payments with decline code insufficient_funds",
+        ),
+    )
+    text = "5 declined payments with decline code insufficient_funds"
+
+    # Act
+    grounding = ground_answer(text, evidence)
+
+    # Assert
+    assert (grounding.grounded, grounding.citations) == (False, ())
+    assert grounding.unsupported == (UnsupportedSentence(sentence=text, reason="no_citation", refs=()),)
+
+
+def test_ground_answer_drops_an_uncited_sentence_that_quotes_a_summary_without_its_negation() -> None:
+    # Arrange
+    evidence = (EvidenceItem(ref="dispute:D-1", summary="Dispute was not won by merchant acq_a."),)
+    text = "Dispute won by merchant acq_a."
+
+    # Act
+    grounding = ground_answer(text, evidence)
+
+    # Assert
+    assert (grounding.grounded, grounding.citations) == (False, ())
+    assert [u.reason for u in grounding.unsupported] == ["no_citation"]
+
+
+def test_ground_answer_keeps_an_uncited_quote_of_a_whole_summary_without_its_final_period() -> None:
+    # Arrange
+    text = "3 declined payments with decline code card_declined."
+
+    # Act
+    grounding = ground_answer(text, EVIDENCE)
+
+    # Assert
+    assert grounding.grounded is True
+    assert [source.ref for cited in grounding.citations for source in cited.sources] == [AGGREGATE.ref]

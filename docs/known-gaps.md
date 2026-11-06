@@ -70,9 +70,10 @@ and is kept current per item:
   structuring advice, no numbers absent from the evidence, and cited `[ref]`s are not checked against the evidence
   refs). Before sending it masks Luhn-valid card numbers, strips evidence tags and caps sizes, but sends no less data
   than that. It has been tested against a local fake server only, not the real API.
-- RAG `/v1/assistant/ask` does not tie each sentence of its answer to a retrieved source. A sentence-level grounded mode behind `?grounded=true` (cited refs checked against
-  this turn's relevant evidence, uncited sentences dropped, explicit "cannot answer") exists on the unmerged branch
-  `worker/r1-5-ragcite`; it was left out of the submission because it was not reviewed in time.
+- RAG `/v1/assistant/ask` ties each sentence to a retrieved source only with `?grounded=true` (R1-5); the default
+  body is unchanged. In grounded mode a sentence made only of `[ref]`s passes as grounded although it states nothing,
+  and refs past the OpenAI prompt cap (`MAX_EVIDENCE_ITEMS`) still validate if the model guesses them (they are this
+  turn's relevant evidence, so no scope leak).
 - Card masking is a heuristic: a card number written with separators other than space, tab, `-`, `.`, `/` or `_`
   (such as `,`, `:` or `|`), or with more than three of them between digits, reaches the model unmasked.
 - LLM failures fall back to the deterministic answer and increment `ops_ai_llm_fallback_total`, but the counter has no
