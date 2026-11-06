@@ -32,6 +32,11 @@ const MESSAGES: ReadonlyMap<string, string> = new Map([
   ["network_error", "Could not reach the server. Check your connection and try again."],
   ["not_signed_in", "Please sign in first."],
   ["validation_failed", "Some fields are not valid."],
+  ["too many attempts", "Too many failed attempts. Try again later."],
+  ["forbidden", "Your role cannot open this view."],
+  ["totp_required", "Enter the 6-digit code from your authenticator app."],
+  ["missing_credentials", "Enter your email and password."],
+  ["invalid ops session", "Your ops session has ended. Sign in again."],
 ]);
 
 /** A user-facing message for a code; unknown codes get a generic message that never echoes the code. */

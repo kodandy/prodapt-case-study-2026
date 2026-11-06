@@ -51,6 +51,22 @@ function CurrencyBlock(props: { item: CurrencyForecast; horizonDays: number }): 
   );
 }
 
+/** The forecast body without loading; the ops console reuses it for a merchant chosen by ops staff. */
+export function ForecastView(props: { data: ForecastResponse }): ReactNode {
+  const { data } = props;
+  if (data.currencies.length === 0) {
+    return <p className="muted">{`No captured payments in the last ${data.history_days} days.`}</p>;
+  }
+  return (
+    <>
+      <p className="hint">Solid line: daily captured volume. Dashed line: expected payouts, with the shaded 95% range.</p>
+      {data.currencies.map((item) => (
+        <CurrencyBlock key={item.currency} item={item} horizonDays={data.horizon_days} />
+      ))}
+    </>
+  );
+}
+
 export function ForecastPanel(): ReactNode {
   const { client } = useServices();
   const [data, setData] = useState<ForecastResponse | null>(null);
@@ -79,18 +95,7 @@ export function ForecastPanel(): ReactNode {
     <section aria-labelledby="forecast-title">
       <h2 id="forecast-title">Settlement forecast</h2>
       {error === null ? null : <p role="alert">{error}</p>}
-      {data === null ? null : data.currencies.length === 0 ? (
-        <p className="muted">{`No captured payments in the last ${data.history_days} days.`}</p>
-      ) : (
-        <>
-          <p className="hint">
-            Solid line: daily captured volume. Dashed line: expected payouts, with the shaded 95% range.
-          </p>
-          {data.currencies.map((item) => (
-            <CurrencyBlock key={item.currency} item={item} horizonDays={data.horizon_days} />
-          ))}
-        </>
-      )}
+      {data === null ? null : <ForecastView data={data} />}
     </section>
   );
 }

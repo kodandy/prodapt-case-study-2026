@@ -1,4 +1,15 @@
+import type { AnomalyAlert } from "../dashboard/types";
 import type { AssistantAnswer } from "../merchant/types";
+
+/** GET /v1/ops/analytics/alerts (ops token): the merchant alert plus its merchant. */
+export interface OpsAnomalyAlert extends AnomalyAlert {
+  merchant_id: string;
+}
+
+export interface OpsAlertsResponse {
+  server_time: string;
+  items: OpsAnomalyAlert[];
+}
 
 export interface FailureWindow {
   start: string;

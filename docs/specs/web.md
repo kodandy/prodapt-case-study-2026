@@ -86,11 +86,29 @@ authz, refundable amount and idempotency, so client checks are only convenience.
 All assistant text is rendered as plain text (React escaping; no `dangerouslySetInnerHTML`, no markdown renderer).
 
 ### Ops console (B13.3, an addition)
-Not built in this cut. ops-ai has no ops principal (tokens carry exactly one of `merchant_id` / `user_id`) and no
-list endpoints for alerts or tickets. Building the console needs a new role and new authz, which is high-risk work
-without time for review. The merchant screen's fraud investigation already shows alerts with evidence. Design:
-an `ops_analyst` role issued by an SSO-backed login, with read endpoints for alerts, tickets and flagged
-transactions. Traceability B13.3: Design.
+Two ways in, both under the "Ops console" tab:
+
+- **Ops staff sign-in (ops principal).** `OpsSignIn` asks for email, password and the 6-digit authenticator code and
+  calls the existing gateway login `POST /api/gw/v1/ops/sessions` (argon2id + TOTP, 900 s session, lockout answers
+  429). The client refuses to send without a 6-digit code, but the server stays the authority for TOTP. With the
+  session token it calls the existing `POST /api/gw/v1/ops/ops-ai-tokens` and keeps both tokens in a separate
+  memory-only store (`web/src/lib/opsSession.ts`, never web storage, never logged, never rendered). The user is
+  signed in only when both calls succeed. The console then shows cross-merchant anomaly alerts
+  (`GET /api/ops/v1/ops/analytics/alerts`, polled every 15 s with the `since` cursor) and, for a merchant id typed in
+  or picked from an alert, the settlement forecast and chargeback risk (`/v1/ops/analytics/forecast` and
+  `/chargeback-risk` with `merchant_id`). Every ops-ai call carries the ops-ai token, never the session token and never
+  the merchant key. A 401 on the ops-ai token triggers one refresh through the session; a 401 that survives, or a
+  401 on the session, clears the ops store and returns to the sign-in form. A 403 keeps the session and shows
+  "Your role cannot open this view." No server endpoint was added and nginx needed no change: `/api/gw/` and
+  `/api/ops/` already proxy these paths, and the routes nginx 404s on purpose stay blocked.
+- **Merchant-scoped demo.** Without an ops account, the merchant API key opens the earlier panels (NL failure query,
+  flagged transactions, ticket queue, alerts) scoped to that one merchant and labelled as having no ops role.
+
+Residuals: there is no ops logout endpoint, so "Sign out" drops the tokens in the browser but the session stays valid
+on the server for up to 900 s, and the stateless ops-ai token stays valid for up to 900 s after an ops user is
+disabled; ops reads and ops-ai token issuance are not audited (`docs/specs/analytics.md` §4); tickets, the failure
+query and the flagged scan remain merchant-only routes, so the ops principal does not see them; approvals are not
+built; there is no Playwright smoke for ops sign-in because no make target provisions an ops user with a TOTP secret.
 
 ## Prerequisite P-1 — `GET /v1/me/transfers` (gateway)
 
@@ -128,7 +146,8 @@ transactions. Traceability B13.3: Design.
 - The merchant API key is exposed to the browser (local demo only; production design in decision 5).
 - No card checkout UI (decision 6).
 - No user refund or dispute screen.
-- No ops console (B13.3 Design).
+- Ops console is partial: the ops principal sees cross-merchant alerts and per-merchant forecast and chargeback
+  risk only; no ops logout endpoint, no approvals, no Playwright ops smoke (B13.3 Partial).
 - Memory-only tokens do not survive a reload and do not protect against XSS.
 - `POST /v1/user-tokens` issues an ops-ai user token from email and password without TOTP. The web client does not
   use it, and the gap is recorded for the production design.
