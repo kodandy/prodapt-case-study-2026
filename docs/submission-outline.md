@@ -1,6 +1,7 @@
 # Submission outline (scope anchor, 2026-11-03)
 
-Draft. This file fixes what the submission claims, what it does not, and what the demo shows. The design doc, the
+Historical planning record (2026-11-03), kept for context; it is not updated. The current status of every item is in
+[requirements-traceability.md](requirements-traceability.md). This file fixed what the submission claims, what it does not, and what the demo shows. The design doc, the
 diagram, the README and the slides are written from it. Agreed with Sol on 2026-11-03
 (`~/.claude/logs/consults/20261103-145215-consult.md`). Open scope decisions were settled on 2026-11-03 (section 7).
 
