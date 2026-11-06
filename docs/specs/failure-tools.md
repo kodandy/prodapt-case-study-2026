@@ -323,7 +323,8 @@ def answer_with_tools(session_factory, scope: S, question: str, now: datetime, r
 ## 11. Routes — `assistant/routes.py` (mounted by `create_app`)
 
 `OpsAiAppDeps` gains `tool_llm: ToolCallingLlm | None = None` and `playbook: Playbook` (default `load_playbook()`).
-- `POST /v1/assistant/failures` (merchant token, body `{question}` with extra fields → 422) → 200 with
+- `POST /v1/assistant/failures` (merchant token, or ops token with `?merchant_id=`; body `{question}` with extra
+  fields → 422) → 200 with
   `Cache-Control: no-store` and keys exactly `query`, `abstained`, `mode`, `text`, `model`, `comparison`, `timeline`,
   `reasons`, `facts`, `hypotheses`, `how_to_confirm`, `fixes`, `claims`, `tool_calls`, `evidence`.
   `query` = {start, end, method, status, country, currency, source, unapplied_filters} (no merchant id);
@@ -333,6 +334,23 @@ def answer_with_tools(session_factory, scope: S, question: str, now: datetime, r
   exactly `abstained`, `mode`, `text`, `model`, `planner_model`, `claims`, `tool_calls`, `rejected_calls`,
   `evidence`; `Cache-Control: no-store`. Planner = `deps.tool_llm` or `RuleBasedToolPlanner()`.
 - Missing/invalid token → 401 `{"detail": "invalid token"}`; a user token on `/failures` → 403.
+- Principals on `/failures` (dependency `failure_scope` in `assistant/routes.py`; authentication runs first, so
+  401 and 403 always come before a 422):
+  - merchant token (`merchant_admin` or `merchant_support`): unchanged, the merchant comes from the token only. A
+    `merchant_id` query parameter (any value, the token's own merchant included) → 422
+    `{"detail": "merchant_id is taken from the token"}` with `Cache-Control: no-store`, before any work.
+  - ops token (`ops_agent` or `ops_lead`, the ops-ai token issued at ops sign-in by `POST /v1/ops/ops-ai-tokens`;
+    checked by `scope.require_ops_role`): must name exactly one merchant with `?merchant_id=<uuid>`. Missing,
+    empty, not a canonical lower-case hyphenated UUID (braces, `urn:uuid:`, bare hex and upper case are rejected, as for the token claim), repeated, or any implicit "all" → 422 `{"detail": "merchant_id is required for ops staff"}`
+    with `Cache-Control: no-store`, before any work. There is no all-merchants failure query: the investigation
+    is per merchant, like `/v1/ops/analytics/forecast` and `/chargeback-risk` (docs/specs/analytics.md section 4).
+    The named merchant becomes `Scope(merchant_id=...)` and the response equals what that merchant's own token
+    gets (same keys, same masking: no merchant id in `query`, no `raw_codes` in `reasons`). The body stays
+    `{question}`; `merchant_id` in the body is 422 for every principal.
+  - any other principal (user token) → 403 `{"detail": "forbidden"}`; an ops token on `/query` stays 403.
+  - Logging: ops reads on `/failures` record nothing beyond the request metrics and traces by route template that
+    every route has, the same as the other ops-ai ops reads; tokens are never logged. The audit gap is the one
+    listed in docs/specs/analytics.md section 4 "Known residuals".
 - `main.py`: with OPENAI_API_KEY set, `tool_llm = OpenAiToolCallingLlm(...)` with the same model settings; else None.
 
 ## 12. Ops alerts (B11.2, ops-ai side) — `alerts/`
