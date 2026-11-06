@@ -86,7 +86,9 @@ def test_page_size_bounds_are_fifty_by_default_and_two_hundred_at_most() -> None
 
 @pytest.mark.parametrize("kind", ["history", "audit"])
 @pytest.mark.parametrize("version", [1, 7, 12345])
-def test_a_cursor_round_trips_to_its_version_for_its_kind_and_merchant(kind: CursorKind, version: int) -> None:
+def test_a_cursor_round_trips_to_its_version_for_its_kind_and_merchant(
+    kind: CursorKind, version: int
+) -> None:
     # Arrange
     cursor = encode_cursor(kind, MERCHANT, version)
 
@@ -138,7 +140,7 @@ def test_a_history_cursor_is_rejected_by_the_audit_kind() -> None:
         _b64(f"history:{MERCHANT.hex}:5".encode()),
         _b64(b"history:not-a-uuid:5"),
         _b64(f"HISTORY:{MERCHANT}:5".encode()),
-        _b64(f"history:{MERCHANT}:٥".encode()),
+        _b64(f"history:{MERCHANT}:{chr(0x0665)}".encode()),
         _b64(b"\xff\xfe\xfd"),
         _b64(f"history:{MERCHANT}:{'9' * 40}".encode()),
     ],

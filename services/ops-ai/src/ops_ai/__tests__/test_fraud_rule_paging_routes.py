@@ -87,8 +87,9 @@ def _insert_versions(session_factory: sessionmaker[Session], merchant_id: uuid.U
             created_at = TEST_NOW + timedelta(minutes=version)
             session.execute(
                 text(
-                    "INSERT INTO ops_ai.fraud_rule_versions (merchant_id, version, steps, min_micro_payments, "
-                    "min_micro_share, min_distinct_cards, reason, feedback_id, created_at) VALUES "
+                    "INSERT INTO ops_ai.fraud_rule_versions (merchant_id, version, steps, "
+                    "min_micro_payments, min_micro_share, min_distinct_cards, reason, feedback_id, "
+                    "created_at) VALUES "
                     "(:merchant, :version, 1, 12, 0.83, 4, 'revert:v0', NULL, :created_at)"
                 ),
                 {"merchant": merchant_id, "version": version, "created_at": created_at},
@@ -156,9 +157,10 @@ def test_the_paged_rules_keep_the_newest_version_as_active_on_every_page(
     _insert_versions(session_factory, MERCHANT, 4)
     headers = _headers(key_pair)
     first = client.get(RULES_ROUTE, headers=headers, params={"limit": 3})
+    params = {"limit": 3, "cursor": first.json()["next_cursor"]}
 
     # Act
-    second = client.get(RULES_ROUTE, headers=headers, params={"limit": 3, "cursor": first.json()["next_cursor"]})
+    second = client.get(RULES_ROUTE, headers=headers, params=params)
 
     # Assert
     assert set(second.json()) == {"active", "history", "next_cursor"}

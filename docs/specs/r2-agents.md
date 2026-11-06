@@ -419,7 +419,7 @@ def decode_cursor(cursor: str, kind: CursorKind, merchant_id: uuid.UUID) -> int
 
 ```python
 @dataclass(frozen=True)
-class KeysetPage(Generic[T]):
+class KeysetPage[T]:
     items: list[T]
     next_before: int | None   # the last item's version when more rows exist below it, else None
 def rule_history_page(session, scope, limit: int, before: int | None) -> KeysetPage[RuleVersion]

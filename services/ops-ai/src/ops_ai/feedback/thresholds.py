@@ -6,10 +6,11 @@ The ladder only tightens: no step is looser than the shipped baseline in `fraud_
 """
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import Row, Select, select
 from sqlalchemy.orm import Session
 
 from ops_ai.clock import Clock
@@ -43,6 +44,13 @@ class RuleAuditEntry:
     """None only for a version row without an actor row (written before actors were recorded)."""
     actor_role: str | None
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class KeysetPage[T]:
+    items: list[T]
+    next_before: int | None
+    """The last item's version when more rows exist below it, else None."""
 
 
 BASELINE = RuleVersion(
@@ -98,17 +106,17 @@ def active_rule_version(session: Session, scope: Scope) -> RuleVersion:
     return BASELINE if row is None else _to_rule(row)
 
 
-def rule_history(session: Session, scope: Scope) -> list[RuleVersion]:
-    rows = session.execute(
+def _history_query(scope: Scope) -> Select[FraudRuleVersion]:
+    return (
         select(FraudRuleVersion)
         .where(FraudRuleVersion.merchant_id == scope.merchant_id)
         .order_by(FraudRuleVersion.version.desc())
-    ).scalars()
-    return [_to_rule(row) for row in rows]
+    )
 
 
-def rule_audit(session: Session, scope: Scope) -> list[RuleAuditEntry]:
-    rows = session.execute(
+def _audit_query(scope: Scope) -> Select[int, str, uuid.UUID | None, datetime, str, str]:
+    """The actor columns come from an outer join, so they are None for a version without an actor row."""
+    return (
         select(
             FraudRuleVersion.version,
             FraudRuleVersion.reason,
@@ -125,17 +133,53 @@ def rule_audit(session: Session, scope: Scope) -> list[RuleAuditEntry]:
         .where(FraudRuleVersion.merchant_id == scope.merchant_id)
         .order_by(FraudRuleVersion.version.desc())
     )
-    return [
-        RuleAuditEntry(
-            version=row.version,
-            reason=row.reason,
-            feedback_id=row.feedback_id,
-            actor=row.actor,
-            actor_role=row.actor_role,
-            created_at=row.created_at,
-        )
-        for row in rows
-    ]
+
+
+def _to_audit_entry(row: Row[int, str, uuid.UUID | None, datetime, str, str]) -> RuleAuditEntry:
+    return RuleAuditEntry(
+        version=row.version,
+        reason=row.reason,
+        feedback_id=row.feedback_id,
+        actor=row.actor,
+        actor_role=row.actor_role,
+        created_at=row.created_at,
+    )
+
+
+def _keyset_page[T](items: list[T], limit: int, version_of: Callable[[T], int]) -> KeysetPage[T]:
+    page = items[:limit]
+    next_before = version_of(page[-1]) if len(items) > limit else None
+    return KeysetPage(items=page, next_before=next_before)
+
+
+def rule_history(session: Session, scope: Scope) -> list[RuleVersion]:
+    return [_to_rule(row) for row in session.execute(_history_query(scope)).scalars()]
+
+
+def rule_history_page(
+    session: Session, scope: Scope, limit: int, before: int | None
+) -> KeysetPage[RuleVersion]:
+    """At most `limit` of the scope merchant's versions below `before` (all when None), newest first."""
+    query = _history_query(scope)
+    if before is not None:
+        query = query.where(FraudRuleVersion.version < before)
+    rules = [_to_rule(row) for row in session.execute(query.limit(limit + 1)).scalars()]
+    return _keyset_page(rules, limit, lambda rule: rule.version)
+
+
+def rule_audit(session: Session, scope: Scope) -> list[RuleAuditEntry]:
+    return [_to_audit_entry(row) for row in session.execute(_audit_query(scope))]
+
+
+def rule_audit_page(
+    session: Session, scope: Scope, limit: int, before: int | None
+) -> KeysetPage[RuleAuditEntry]:
+    """At most `limit` of the scope merchant's audit entries below `before` (all when None), newest first."""
+    query = _audit_query(scope)
+    if before is not None:
+        query = query.where(FraudRuleVersion.version < before)
+    entries = [_to_audit_entry(row) for row in session.execute(query.limit(limit + 1))]
+    return _keyset_page(entries, limit, lambda entry: entry.version)
 
 
 def is_flagged(episode: CardTestingEpisode, rule: RuleVersion) -> bool:
