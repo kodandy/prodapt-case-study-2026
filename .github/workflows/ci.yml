@@ -22,3 +22,5 @@ jobs:
           persist-credentials: false
       - name: make ci
         run: make ci
+      - name: make alerts-test
+        run: make alerts-test
