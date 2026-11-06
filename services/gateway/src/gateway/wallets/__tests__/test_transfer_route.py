@@ -29,6 +29,7 @@ VERIFY = "/v1/me/mfa/totp/verify"
 ALICE = "alice@example.com"
 BOB = "bob@example.com"
 PASSWORD = "route-test-password-7Q"
+SAME_COUNTRY = "US"  # sender and recipient share a country, so P2P transfers stay domestic
 TOTP_KEY = "test-totp-encryption-key-0123456789abcdef"
 STEP_SECONDS = 30
 MAX_AMOUNT_MINOR = 10**12
@@ -83,6 +84,11 @@ def _sign_up(
     with session_factory() as session:
         result = sign_up(session, clock, email, PASSWORD, currency=currency)
         session.commit()
+    with session_factory.begin() as session:
+        session.execute(
+            text("UPDATE gateway.users SET country = :country WHERE id = :id"),
+            {"country": SAME_COUNTRY, "id": result.user_id},
+        )
     return result.user_id
 
 

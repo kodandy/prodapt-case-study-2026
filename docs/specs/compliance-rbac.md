@@ -166,11 +166,19 @@ recipient_email=None)) -> ScreeningResult(triggered, cross_border, high_risk, bl
 its own committed transaction (user row locked): when a rule fires the user moves to `pending` (unless already
 `pending`), one open `kyc_reviews` row holds the union of fired rules, an audit row `kyc.review_opened`
 (summary: rules, operation kind; no amounts tied to names, no email) and an outbox event
-`compliance.kyc_review_required` are written. High-risk = cross-border transfer (both countries known and
-different) or a payout whose amount plus the user's same-currency payouts of the last 24 h (pending, unknown or
+`compliance.kyc_review_required` are written. High-risk = cross-border transfer or a payout whose amount plus the user's same-currency payouts of the last 24 h (pending, unknown or
 succeeded; failed ones do not count) reaches the amount threshold. `blocked` = high-risk and status after
 screening is not `verified`, or any operation (transfer or payout) by a `rejected` user. Non-failed payouts also count as sent volume
-(volume_24h) and as sent operations (velocity); a blocked attempt writes `kyc.operation_blocked`. `POST /v1/me/transfers` screens first and
+(volume_24h) and as sent operations (velocity); a blocked attempt writes `kyc.operation_blocked`
+(summary adds `sender_country_unknown` / `recipient_country_unknown`). A transfer to a live recipient (a user that
+is not erased and not the sender) is screened as cross-border when the two countries differ or when either
+country is unknown (R2-10): an unknown country is treated as cross-border for screening, it is not a fact that the
+transfer crosses a border. No country is inferred (never from the FX currency), and an unknown country opens no
+extra rule or review: block + audit only. A transfer to an email that is no user, to an erased user or to oneself
+is not screened as cross-border, so it keeps its existing `transfer` error. The 403 body is the same for every
+block, so it does not reveal whether the recipient has no country; the user's remedy is KYC verification.
+Residual: the country is self-declared (a user can claim the recipient's country via `/v1/me/profile`); the real
+fix is a KYC-document-verified country. `POST /v1/me/transfers` screens first and
 answers 403 `{"error": "kyc_reverification_required"}` (no-store) when blocked. `POST /v1/me/payouts` screens the same
 way (kind `payout`) under the same per-user operation lock: blocked → 403
 `{"error": "kyc_reverification_required"}`, no payout row and no funds held; the lock held by another

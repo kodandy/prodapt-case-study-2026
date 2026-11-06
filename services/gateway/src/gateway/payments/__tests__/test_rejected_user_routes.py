@@ -31,6 +31,7 @@ PAYMENTS = "/v1/me/payments"
 ALICE = "alice@example.com"
 BOB = "bob@example.com"
 PASSWORD = "rejected-user-password-7Q"
+SAME_COUNTRY = "US"  # sender and recipient share a country, so P2P transfers stay domestic
 APPROVE_PAN = "4242424242424242"
 NO_STORE = "no-store"
 KYC_REFUSAL = {"error": "kyc_reverification_required"}
@@ -107,6 +108,11 @@ def _user(env: Env, email: str, kyc_status: str | None = None) -> uuid.UUID:
     with env.session_factory() as session:
         result = sign_up(session, env.clock, email, PASSWORD)
         session.commit()
+    with env.session_factory.begin() as session:
+        session.execute(
+            text("UPDATE gateway.users SET country = :country WHERE id = :id"),
+            {"country": SAME_COUNTRY, "id": result.user_id},
+        )
     with env.session_factory.begin() as session:
         top_up_wallet(session, env.clock, result.user_id, "USD", FUNDS_MINOR)
         if kyc_status is not None:

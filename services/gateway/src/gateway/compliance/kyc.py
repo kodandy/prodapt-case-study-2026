@@ -139,7 +139,8 @@ def screen_operation(
         if user is None:
             raise UnknownUserError
         now = clock()
-        recipient_country = _recipient_country(session, request)
+        recipient = _live_recipient(session, request, user.id)
+        recipient_country = None if recipient is None else recipient.country
         payout_volume = _payout_volume(session, user_id, request.currency, now - VOLUME_WINDOW)
         facts = KycFacts(
             amount_minor=request.amount_minor,
@@ -157,11 +158,13 @@ def screen_operation(
         triggered = evaluate_kyc_rules(facts, now)
         if triggered:
             flag_for_review(session, clock, user, triggered, request.kind)
-        cross_border = (
-            request.kind == "transfer"
-            and user.country is not None
-            and recipient_country is not None
-            and user.country != recipient_country
+        # An unknown country on either side is screened as cross-border: it cannot be ruled out, it is not
+        # a fact. A recipient that is no live user (or the sender) is left to `transfer` to refuse as before.
+        screened_pair = request.kind == "transfer" and recipient is not None
+        sender_country_unknown = screened_pair and user.country is None
+        recipient_country_unknown = screened_pair and recipient_country is None
+        cross_border = screened_pair and (
+            sender_country_unknown or recipient_country_unknown or user.country != recipient_country
         )
         large_payout = request.kind == "payout" and (
             request.amount_minor + payout_volume >= amount_threshold(request.currency)
@@ -182,6 +185,8 @@ def screen_operation(
                     "cross_border": cross_border,
                     "large_payout": large_payout,
                     "kyc_status": user.kyc_status,
+                    "sender_country_unknown": sender_country_unknown,
+                    "recipient_country_unknown": recipient_country_unknown,
                 },
             )
         return ScreeningResult(
@@ -356,11 +361,23 @@ def _high_risk_pair(sender: str | None, recipient: str | None) -> bool:
     return sender in HIGH_RISK_COUNTRIES or recipient in HIGH_RISK_COUNTRIES
 
 
-def _recipient_country(session: Session, request: OperationRequest) -> str | None:
+@dataclass(frozen=True)
+class _Recipient:
+    country: str | None
+
+
+def _live_recipient(session: Session, request: OperationRequest, sender_id: uuid.UUID) -> _Recipient | None:
+    """None when the transfer has no recipient that `transfer` would credit: no such email, an erased user
+    or the sender itself, so screening never changes which error those requests get."""
     if request.kind != "transfer" or request.recipient_email is None:
         return None
     email = request.recipient_email.strip().lower()
-    return session.scalar(select(User.country).where(User.email == email))
+    row = session.execute(
+        select(User.id, User.country, User.erased_at).where(User.email == email)
+    ).one_or_none()
+    if row is None or row.erased_at is not None or row.id == sender_id:
+        return None
+    return _Recipient(country=row.country)
 
 
 def _sent_volume(session: Session, user_id: uuid.UUID, currency: str, since: datetime) -> int:
