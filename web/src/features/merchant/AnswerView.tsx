@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { GroundedCitations } from "./GroundedCitations";
 import type { AssistantAnswer } from "./types";
 
 const PAYMENT_REF = /^payment:([0-9a-f-]{36})$/;
@@ -16,6 +17,7 @@ export function AnswerView(props: {
         Mode: {answer.mode === "llm" ? `LLM${answer.model === null ? "" : ` (${answer.model})`}` : "deterministic fallback"}
       </p>
       {answer.text === null ? null : <p className="answer-text">{answer.text}</p>}
+      {answer.grounded === undefined ? null : <GroundedCitations answer={answer} />}
       {answer.suggested_fixes === undefined || answer.suggested_fixes.length === 0 ? null : (
         <>
           <h4>Suggested fixes</h4>
