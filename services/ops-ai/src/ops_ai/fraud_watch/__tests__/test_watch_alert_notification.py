@@ -139,7 +139,9 @@ def test_the_payload_carries_the_alert_merchant_count_and_features_at_raise_time
     assert payload["raised_at"] == CLOCK_T1.isoformat()
 
 
-def test_the_payload_holds_no_payment_id_card_ref_bin_or_last4(session_factory: sessionmaker[Session]) -> None:
+def test_the_payload_holds_no_payment_id_card_ref_bin_or_last4(
+    session_factory: sessionmaker[Session],
+) -> None:
     # Arrange
     events = _burst()
 
@@ -165,7 +167,9 @@ def test_later_events_of_the_same_episode_enqueue_no_second_notification(
 
     # Act
     _deliver_all(
-        session_factory, _burst(count=3, first_n=13, start=BASE + timedelta(seconds=120)), MutableClock(CLOCK_T2)
+        session_factory,
+        _burst(count=3, first_n=13, start=BASE + timedelta(seconds=120)),
+        MutableClock(CLOCK_T2),
     )
 
     # Assert
@@ -210,7 +214,9 @@ def test_a_single_card_series_enqueues_no_notification(session_factory: sessionm
     assert _notifications(session_factory) == []
 
 
-def test_the_notification_is_written_in_the_watcher_transaction(session_factory: sessionmaker[Session]) -> None:
+def test_the_notification_is_written_in_the_watcher_transaction(
+    session_factory: sessionmaker[Session],
+) -> None:
     # Arrange
     events = _burst()
 

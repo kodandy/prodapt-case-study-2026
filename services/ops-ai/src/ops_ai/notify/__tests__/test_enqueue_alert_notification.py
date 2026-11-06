@@ -120,7 +120,9 @@ def test_the_notification_id_is_deterministic_per_alert_and_differs_between_aler
     assert ids[0] != first
 
 
-def test_enqueue_inserts_one_pending_row_with_the_full_payload(session_factory: sessionmaker[Session]) -> None:
+def test_enqueue_inserts_one_pending_row_with_the_full_payload(
+    session_factory: sessionmaker[Session],
+) -> None:
     # Arrange
     clock = FixedClock(RAISED_AT)
     fraud_alert_id = _fraud_alert(session_factory)

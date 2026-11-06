@@ -176,6 +176,17 @@ services:
     restart: unless-stopped
     depends_on: *ops-ai-deps
 
+  # Outbound fraud alert notifications (docs/specs/sq3.md N-4). Without a webhook URL it uses the log sink.
+  ops-ai-notifier:
+    image: payplat-app
+    environment:
+      <<: *app-env
+      OPS_AI_ALERT_WEBHOOK_URL: ${OPS_AI_ALERT_WEBHOOK_URL:-}
+      OPS_AI_ALERT_WEBHOOK_SECRET: ${OPS_AI_ALERT_WEBHOOK_SECRET:-}
+    command: ["python", "-m", "ops_ai.notify"]
+    restart: unless-stopped
+    depends_on: *ops-ai-deps
+
   demo:
     profiles: ["demo"]
     image: payplat-app
@@ -193,6 +204,7 @@ services:
       relay: { condition: service_started }
       notifier: { condition: service_started }
       ops-ai-consumer: { condition: service_started }
+      ops-ai-notifier: { condition: service_started }
 
   # --- web client (docs/specs/web.md). Node runs only in pinned images. ---
 

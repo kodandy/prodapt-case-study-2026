@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import ClassVar
 
 import httpx
 import pytest
@@ -225,7 +226,7 @@ def test_a_missing_or_short_secret_is_refused_without_echoing_it(secret: str | N
 
 
 class _Receiver(BaseHTTPRequestHandler):
-    received: list[tuple[dict[str, str], bytes]] = []
+    received: ClassVar[list[tuple[dict[str, str], bytes]]] = []
 
     def do_POST(self) -> None:
         length = int(self.headers["Content-Length"])
@@ -265,7 +266,13 @@ def test_a_pending_notification_reaches_a_loopback_webhook_signed_and_once(
                 "started_at, last_seen_at, payment_count, features, created_at) VALUES (:alert_id, :key, "
                 ":merchant_id, 'card_testing', :first, :at, :at, 12, '{}'::jsonb, :at)"
             ),
-            {"alert_id": alert_id, "key": f"k:{alert_id}", "merchant_id": MERCHANT, "first": uuid.uuid4(), "at": NOW},
+            {
+                "alert_id": alert_id,
+                "key": f"k:{alert_id}",
+                "merchant_id": MERCHANT,
+                "first": uuid.uuid4(),
+                "at": NOW,
+            },
         )
         notification_id = enqueue_alert_notification(
             session,

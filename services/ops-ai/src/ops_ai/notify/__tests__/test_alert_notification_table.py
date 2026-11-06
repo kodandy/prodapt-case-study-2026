@@ -50,7 +50,9 @@ def _fraud_alert(session_factory: sessionmaker[Session]) -> uuid.UUID:
     return alert_id
 
 
-def _notify(session_factory: sessionmaker[Session], fraud_alert_id: uuid.UUID, status: str = "pending") -> None:
+def _notify(
+    session_factory: sessionmaker[Session], fraud_alert_id: uuid.UUID, status: str = "pending"
+) -> None:
     with session_factory.begin() as session:
         session.execute(
             INSERT_NOTIFICATION,
@@ -71,7 +73,8 @@ def _count(session_factory: sessionmaker[Session]) -> int:
 
 def _columns(engine: Engine) -> dict[str, tuple[str, str, int | None]]:
     query = text(
-        "SELECT column_name, data_type, is_nullable, character_maximum_length FROM information_schema.columns "
+        "SELECT column_name, data_type, is_nullable, character_maximum_length "
+        "FROM information_schema.columns "
         "WHERE table_schema = 'ops_ai' AND table_name = 'alert_notifications'"
     )
     families = {"integer": "integer-like", "bigint": "integer-like", "smallint": "integer-like"}
@@ -90,7 +93,9 @@ def _tables(engine: Engine) -> list[str]:
 
 
 def _index_definitions(engine: Engine) -> list[str]:
-    query = text("SELECT indexdef FROM pg_indexes WHERE schemaname = 'ops_ai' AND tablename = 'alert_notifications'")
+    query = text(
+        "SELECT indexdef FROM pg_indexes WHERE schemaname = 'ops_ai' AND tablename = 'alert_notifications'"
+    )
     with engine.connect() as conn:
         return list(conn.execute(query).scalars())
 
@@ -128,7 +133,9 @@ def test_the_indexes_are_the_primary_key_the_unique_alert_and_status_created_at(
     # Assert
     assert any("UNIQUE" in d and "(notification_id)" in d for d in indexes)
     assert any("UNIQUE" in d and "(fraud_alert_id)" in d for d in indexes)
-    assert any("ix_alert_notifications_status_created_at" in d and "(status, created_at)" in d for d in indexes)
+    assert any(
+        "ix_alert_notifications_status_created_at" in d and "(status, created_at)" in d for d in indexes
+    )
 
 
 def test_a_second_notification_for_the_same_alert_is_rejected(session_factory: sessionmaker[Session]) -> None:
@@ -162,7 +169,9 @@ def test_an_unknown_status_is_rejected(session_factory: sessionmaker[Session]) -
     assert _count(session_factory) == 0
 
 
-def test_deleting_the_fraud_alert_cascades_to_its_notification(session_factory: sessionmaker[Session]) -> None:
+def test_deleting_the_fraud_alert_cascades_to_its_notification(
+    session_factory: sessionmaker[Session],
+) -> None:
     # Arrange
     alert_id = _fraud_alert(session_factory)
     _notify(session_factory, alert_id)
