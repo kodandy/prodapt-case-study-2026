@@ -23,7 +23,12 @@ from ops_ai.judge.schemas import (
 )
 from ops_ai.scope import Scope
 
-__all__ = ["GATEWAY_EVIDENCE_KIND", "UNSPECIFIED_REASON_CODE", "PostgresDisputeRecordSource"]
+__all__ = [
+    "GATEWAY_EVIDENCE_KIND",
+    "UNSPECIFIED_REASON_CODE",
+    "PostgresDisputeRecordSource",
+    "SessionDisputeRecordSource",
+]
 
 GATEWAY_EVIDENCE_KIND = "merchant_statement"
 UNSPECIFIED_REASON_CODE = "unspecified"
@@ -52,30 +57,50 @@ class PostgresDisputeRecordSource:
 
     def dispute_records(self, scope: Scope, limit: int) -> Sequence[DisputeWorkflowRecord]:
         with self._session_factory() as session:
-            workflows = list(
-                session.execute(
-                    select(DisputeWorkflow)
-                    .where(DisputeWorkflow.merchant_id == scope.merchant_id)
-                    .order_by(DisputeWorkflow.updated_at.desc(), DisputeWorkflow.dispute_id)
-                    .limit(limit)
-                ).scalars()
-            )
-            if not workflows:
-                return []
-            steps_by_dispute: dict[uuid.UUID, list[DisputeWorkflowStep]] = defaultdict(list)
-            for step in session.execute(
-                select(DisputeWorkflowStep)
-                .where(DisputeWorkflowStep.dispute_id.in_([workflow.dispute_id for workflow in workflows]))
-                .order_by(DisputeWorkflowStep.dispute_id, DisputeWorkflowStep.entity_version)
-            ).scalars():
-                steps_by_dispute[step.dispute_id].append(step)
-            records: list[DisputeWorkflowRecord] = []
-            for workflow in workflows:
-                steps = steps_by_dispute[workflow.dispute_id]
-                if [step.entity_version for step in steps] != list(range(1, workflow.entity_version + 1)):
-                    continue
-                records.append(_record(workflow, steps))
-            return records
+            return _load(session, scope, limit)
+
+    def bound(self, session: Session) -> "SessionDisputeRecordSource":
+        """The same reads through the caller's session (one request, one pooled connection)."""
+        return SessionDisputeRecordSource(session)
+
+
+class SessionDisputeRecordSource:
+    """PostgresDisputeRecordSource bound to a caller's session. Reads in a SAVEPOINT, so a failed read rolls
+    back only itself and leaves the caller's transaction usable."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def dispute_records(self, scope: Scope, limit: int) -> Sequence[DisputeWorkflowRecord]:
+        with self._session.begin_nested():
+            return _load(self._session, scope, limit)
+
+
+def _load(session: Session, scope: Scope, limit: int) -> list[DisputeWorkflowRecord]:
+    workflows = list(
+        session.execute(
+            select(DisputeWorkflow)
+            .where(DisputeWorkflow.merchant_id == scope.merchant_id)
+            .order_by(DisputeWorkflow.updated_at.desc(), DisputeWorkflow.dispute_id)
+            .limit(limit)
+        ).scalars()
+    )
+    if not workflows:
+        return []
+    steps_by_dispute: dict[uuid.UUID, list[DisputeWorkflowStep]] = defaultdict(list)
+    for step in session.execute(
+        select(DisputeWorkflowStep)
+        .where(DisputeWorkflowStep.dispute_id.in_([workflow.dispute_id for workflow in workflows]))
+        .order_by(DisputeWorkflowStep.dispute_id, DisputeWorkflowStep.entity_version)
+    ).scalars():
+        steps_by_dispute[step.dispute_id].append(step)
+    records: list[DisputeWorkflowRecord] = []
+    for workflow in workflows:
+        steps = steps_by_dispute[workflow.dispute_id]
+        if [step.entity_version for step in steps] != list(range(1, workflow.entity_version + 1)):
+            continue
+        records.append(_record(workflow, steps))
+    return records
 
 
 def _record(workflow: DisputeWorkflow, steps: Sequence[DisputeWorkflowStep]) -> DisputeWorkflowRecord:

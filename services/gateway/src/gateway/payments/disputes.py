@@ -62,6 +62,10 @@ class InvalidDisputeTransitionError(Exception):
     pass
 
 
+class UnknownDisputeActorError(Exception):
+    """An actor role the dispute workflow has no event label for: raised before anything is written."""
+
+
 def open_dispute(
     session_factory: sessionmaker[Session],
     clock: Clock,
@@ -105,6 +109,7 @@ def open_dispute_in_session(
     actor_role: str = "card_network",
 ) -> DisputeView:
     """`open_dispute` inside the caller's transaction (the caller commits or rolls back)."""
+    event_actor = _opener_label(actor_role, payer_user_id)
     if not valid_dispute_reason(reason):
         raise InvalidDisputeReasonError
     payment = lock_payment(session, payment_id, payer_user_id=payer_user_id)
@@ -150,7 +155,7 @@ def open_dispute_in_session(
         dispute,
         payment,
         (None, "opened"),
-        "consumer" if actor_role == "consumer" else "card_network",
+        event_actor,
     )
     add_notification(
         session,
@@ -221,6 +226,7 @@ def resolve_dispute(
     (`dispute_update`)."""
     if outcome not in ("won", "lost"):
         raise ValueError(f"unknown dispute outcome: {outcome!r}")
+    event_actor = _resolver_label(actor_role)
     with session_factory.begin() as session:
         dispute = _lock_dispute(session, dispute_id)
         if dispute is None:
@@ -259,7 +265,7 @@ def resolve_dispute(
             dispute,
             payment,
             ("under_review", outcome),
-            "card_network" if actor_role == "card_network" else "ops_lead",
+            event_actor,
         )
         payload = _notice_payload(dispute)
         add_notification(
@@ -341,8 +347,9 @@ def _add_dispute_event(
 ) -> None:
     """One gw.disputes.v1 outbox row in the caller's transaction (docs/specs/disputes-notifications.md).
 
-    A free-text reason (consumer "not me", anything not shaped like a network code) is sent as None, and the
-    evidence text never leaves the gateway: both can carry personal data.
+    The reason is sent as a network reason code only when a card network opened the dispute and it is shaped
+    like one; a consumer's reason (even "13.1") and any free text are sent as None. The evidence text never
+    leaves the gateway: both can carry personal data.
     """
     from_state, to_state = transition
     lost = to_state == "lost"
@@ -357,7 +364,7 @@ def _add_dispute_event(
         from_state=from_state,
         to_state=to_state,
         actor_role=actor_role,
-        network_reason_code=dispute.reason if _NETWORK_REASON_CODE.fullmatch(dispute.reason) else None,
+        network_reason_code=_network_reason_code(session, dispute),
         currency=dispute.currency,
         payment_amount_minor=payment.amount_minor,
         refunded_minor=payment.refunded_minor,
@@ -375,6 +382,35 @@ def _add_dispute_event(
             published_at=None,
         )
     )
+
+
+def _opener_label(actor_role: str, payer_user_id: uuid.UUID | None) -> DisputeActorRole:
+    """Fails closed: "consumer" only for the payer's own open, "card_network" only for the network."""
+    if actor_role == "card_network":
+        return "card_network"
+    if actor_role == "consumer" and payer_user_id is not None:
+        return "consumer"
+    raise UnknownDisputeActorError
+
+
+def _resolver_label(actor_role: str) -> DisputeActorRole:
+    if actor_role == "card_network":
+        return "card_network"
+    if actor_role == "ops_lead":
+        return "ops_lead"
+    raise UnknownDisputeActorError
+
+
+def _network_reason_code(session: Session, dispute: Dispute) -> str | None:
+    """The opener comes from the append-only audit row; with none, no reason code is sent (fail closed)."""
+    opener_role = session.scalar(
+        select(AuditLog.actor_role)
+        .where(AuditLog.action == "dispute.opened", AuditLog.target == f"dispute:{dispute.id}")
+        .limit(1)
+    )
+    if opener_role != "card_network" or not _NETWORK_REASON_CODE.fullmatch(dispute.reason):
+        return None
+    return dispute.reason
 
 
 def _notice_payload(dispute: Dispute) -> dict[str, object]:

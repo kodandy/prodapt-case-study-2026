@@ -67,11 +67,14 @@ DisputeEventState = Literal["opened", "under_review", "won", "lost"]
 DisputeActorRole = Literal["card_network", "consumer", "merchant", "ops_lead"]
 DisputeEventType = Literal["dispute.opened", "dispute.evidence_submitted", "dispute.resolved"]
 NETWORK_REASON_CODE_PATTERN = r"^[0-9]{1,2}(\.[0-9]{1,2}){1,2}$"
+DISPUTE_MAX_AMOUNT_MINOR = 10**12
+"""The gateway API ceiling (gateway.payments.schemas.MAX_AMOUNT_MINOR); nothing larger is a real dispute."""
 _EVENT_STATES: dict[DisputeEventType, frozenset[DisputeEventState]] = {
     "dispute.opened": frozenset({"opened"}),
     "dispute.evidence_submitted": frozenset({"under_review"}),
     "dispute.resolved": frozenset({"won", "lost"}),
 }
+_STATE_VERSIONS: dict[DisputeEventState, int] = {"opened": 1, "under_review": 2, "won": 3, "lost": 3}
 
 
 class DisputeEventV1(BaseModel):
@@ -88,7 +91,7 @@ class DisputeEventV1(BaseModel):
     event_type: DisputeEventType
     occurred_at: AwareDatetime
     origin: EventOrigin = "live"
-    entity_version: int = Field(ge=1)
+    entity_version: int = Field(ge=1, le=3)
     dispute_id: uuid.UUID
     payment_id: uuid.UUID
     merchant_id: uuid.UUID
@@ -97,15 +100,17 @@ class DisputeEventV1(BaseModel):
     actor_role: DisputeActorRole
     network_reason_code: str | None = Field(pattern=NETWORK_REASON_CODE_PATTERN)
     """The dispute reason when it is a card-network code (e.g. "13.1"); None for a free-text reason."""
-    currency: str = Field(min_length=3, max_length=3)
-    payment_amount_minor: int = Field(gt=0)
-    refunded_minor: int = Field(ge=0)
-    dispute_amount_minor: int = Field(gt=0)
-    chargeback_minor: int = Field(ge=0)
-    chargeback_fee_minor: int = Field(ge=0)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    payment_amount_minor: int = Field(gt=0, le=DISPUTE_MAX_AMOUNT_MINOR)
+    refunded_minor: int = Field(ge=0, le=DISPUTE_MAX_AMOUNT_MINOR)
+    dispute_amount_minor: int = Field(gt=0, le=DISPUTE_MAX_AMOUNT_MINOR)
+    chargeback_minor: int = Field(ge=0, le=DISPUTE_MAX_AMOUNT_MINOR)
+    chargeback_fee_minor: int = Field(ge=0, le=DISPUTE_MAX_AMOUNT_MINOR)
 
     @model_validator(mode="after")
     def _event_type_matches_state(self) -> "DisputeEventV1":
         if self.to_state not in _EVENT_STATES[self.event_type]:
             raise ValueError(f"event_type {self.event_type} does not match to_state {self.to_state}")
+        if self.entity_version != _STATE_VERSIONS[self.to_state]:
+            raise ValueError(f"entity_version {self.entity_version} does not match to_state {self.to_state}")
         return self

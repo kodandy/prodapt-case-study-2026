@@ -27,7 +27,12 @@ from ops_ai.assistant.llm_port import LlmPort, LlmRequest, LlmUnavailableError
 from ops_ai.assistant.service import MAX_QUESTION_CHARS, AnswerMode
 from ops_ai.feedback.thresholds import is_flagged
 from ops_ai.investigation.service import ToolCall
-from ops_ai.judge.dispute_summary import DisputeJudgement, DisputeRecordSource, judge_merchant_disputes
+from ops_ai.judge.dispute_summary import (
+    DisputeJudgement,
+    DisputeRecordSource,
+    SessionBindableDisputeRecordSource,
+    judge_merchant_disputes,
+)
 from ops_ai.scope import Scope
 from ops_ai.settlement.statement import SettlementStatement
 
@@ -116,6 +121,8 @@ class MerchantRun:
         dispute_records: DisputeRecordSource | None = None,
     ) -> None:
         self.scope = scope
+        if isinstance(dispute_records, SessionBindableDisputeRecordSource):
+            dispute_records = dispute_records.bound(session)
         self.dispute_records = dispute_records
         self.now = now
         self.bus = bus

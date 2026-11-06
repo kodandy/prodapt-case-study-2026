@@ -56,8 +56,9 @@ Service changes in `gateway/payments/disputes.py` (backward compatible):
   (`contracts.events.DisputeEventV1`) in the same transaction (R2-1 / R2-2, contract and ops-ai projection in
   `docs/specs/evaluation-judge.md` §6.4.1). Actor category: `consumer` for the consumer route, otherwise
   `card_network` on open; `merchant` on evidence; `card_network` for the network resolution, otherwise
-  `ops_lead`. The reason is sent only when it is shaped like a network code; free text and evidence text stay
-  in the gateway.
+  `ops_lead`. An unknown actor role, or `consumer` without a payer, raises `UnknownDisputeActorError` before any
+  write (fail closed). The reason is sent only when the dispute was opened by `card_network` and it is shaped
+  like a network code; free text and evidence text stay in the gateway.
 - `list_merchant_disputes(session, merchant_id, limit, cursor, state=None) -> DisputePage`,
   `list_user_disputes(session, user_id, limit, cursor) -> DisputePage` (`DisputePage{items: list[DisputeView],
   next_cursor}`).

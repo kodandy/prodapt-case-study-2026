@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import pytest
 from contracts.events import DISPUTES_TOPIC, DisputeEventV1
-from gateway.accounts.service import create_merchant
+from gateway.accounts.service import create_merchant, sign_up
 from gateway.clock import FixedClock
 from gateway.payments.charge import ChargeDeps, charge_card
 from gateway.payments.disputes import (
@@ -158,7 +158,12 @@ def test_a_consumer_opened_dispute_with_a_free_text_reason_carries_no_reason_cod
     # Arrange
     h = _harness(session_factory, clock)
     payment_id = _charge(h)
-    payer = uuid.uuid4()
+    with session_factory.begin() as session:
+        payer = sign_up(session, clock, f"{uuid.uuid4().hex}@example.com", "outbox-payer-test-pw-41").user_id
+        session.execute(
+            text("UPDATE gateway.payments SET payer_user_id = :payer WHERE id = :payment_id"),
+            {"payer": payer, "payment_id": payment_id},
+        )
 
     # Act
     open_dispute(
@@ -166,6 +171,7 @@ def test_a_consumer_opened_dispute_with_a_free_text_reason_carries_no_reason_cod
         clock,
         payment_id,
         "not me - Jane Roe",
+        payer_user_id=payer,
         actor_id=f"user:{payer}",
         actor_role="consumer",
     )

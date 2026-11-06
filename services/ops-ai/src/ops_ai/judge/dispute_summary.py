@@ -3,7 +3,9 @@
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal, Protocol, runtime_checkable
+
+from sqlalchemy.orm import Session
 
 from ops_ai.judge.dispute import judge_dispute
 from ops_ai.judge.schemas import DisputeVerdict, DisputeWorkflowRecord, Verdict
@@ -14,6 +16,7 @@ __all__ = [
     "DisputeJudgement",
     "DisputeJudgementStatus",
     "DisputeRecordSource",
+    "SessionBindableDisputeRecordSource",
     "judge_merchant_disputes",
 ]
 
@@ -26,6 +29,14 @@ DisputeJudgementStatus = Literal["judged", "skipped"]
 
 class DisputeRecordSource(Protocol):
     def dispute_records(self, scope: Scope, limit: int) -> Sequence[DisputeWorkflowRecord]: ...
+
+
+@runtime_checkable
+class SessionBindableDisputeRecordSource(Protocol):
+    """A DB-backed source that can read through the caller's session, so one investigate request holds one
+    pooled connection instead of checking out a second one per request."""
+
+    def bound(self, session: Session) -> DisputeRecordSource: ...
 
 
 @dataclass(frozen=True)

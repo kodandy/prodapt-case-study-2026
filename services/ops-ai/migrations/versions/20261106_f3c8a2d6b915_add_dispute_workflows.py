@@ -66,3 +66,5 @@ def downgrade() -> None:
         "ix_ops_ai_dispute_workflows_merchant_updated_at", table_name="dispute_workflows", schema="ops_ai"
     )
     op.drop_table("dispute_workflows", schema="ops_ai")
+    # Without its dedupe rows a replay after re-upgrading rebuilds the projection instead of skipping it.
+    op.execute("DELETE FROM ops_ai.processed_events WHERE consumer = 'ops-ai.dispute-workflows'")

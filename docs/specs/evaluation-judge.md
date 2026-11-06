@@ -359,24 +359,35 @@ class DisputeEventV1:
     event_id: uuid.UUID
     event_type: Literal["dispute.opened", "dispute.evidence_submitted", "dispute.resolved"]  # must match to_state
     occurred_at: AwareDatetime; origin: EventOrigin = "live"
-    entity_version: int (>=1)    # opened 1, under_review 2, won|lost 3: the step's position
+    entity_version: int (1..3)   # opened 1, under_review 2, won|lost 3: must match to_state
     dispute_id: uuid.UUID; payment_id: uuid.UUID; merchant_id: uuid.UUID
     from_state: DisputeState | None; to_state: DisputeState
     actor_role: Literal["card_network", "consumer", "merchant", "ops_lead"]
     network_reason_code: str | None   # pattern ^[0-9]{1,2}(\.[0-9]{1,2}){1,2}$; None for a free-text reason
-    currency: str (3); payment_amount_minor: int (>0); refunded_minor: int (>=0)
+    currency: str (^[A-Z]{3}$); payment_amount_minor: int (>0); refunded_minor: int (>=0)
     dispute_amount_minor: int (>0); chargeback_minor: int (>=0); chargeback_fee_minor: int (>=0)
+    # every amount <= DISPUTE_MAX_AMOUNT_MINOR (10**12, the gateway MAX_AMOUNT_MINOR)
 ```
 No PAN, BIN, last4, payer id, free-text reason or evidence text (the latter two can carry personal data). Gateway
 actor mapping: network routes → `card_network`; consumer route / inbox "not me" → `consumer`; evidence →
-`merchant`; ops resolution → `ops_lead`. Chargeback and fee are non-zero only on `lost`.
+`merchant`; ops resolution → `ops_lead`. The mapping fails closed: an unknown role, or `consumer` without a
+payer, raises `UnknownDisputeActorError` before any write. `network_reason_code` is sent only when the dispute
+was opened by `card_network` (read from the `dispute.opened` audit row). Chargeback and fee are non-zero only
+on `lost`.
 
 Projection (`ops_ai.ingest.disputes`, group `ops-ai.dispute-workflows`, run by the ingest worker after payments
 and compliance): `apply_dispute_event` dedupes on `processed_events(consumer, event_id)` in the same transaction,
 upserts `ops_ai.dispute_workflows` (one row per dispute; the highest `entity_version` wins, so out-of-order
 delivery converges) and inserts `ops_ai.dispute_workflow_steps` (PK `(dispute_id, entity_version)`). A dispute's
-merchant is fixed by its first event: an event naming another merchant is consumed and dropped. A malformed
-entry goes to `gw.disputes.v1.dead` (logged by entry id and error class only) and is acked.
+merchant is fixed by its first event: the upsert's `WHERE entity_version < new AND merchant_id = event's` makes
+the guard atomic, and an event naming another merchant is consumed, dropped and logged as a warning with the
+dispute id and event id only. An entry that does not parse or validate (any exception, including
+RecursionError and invalid UTF-8, which the worker's Redis client decodes with replacement), or whose apply
+raises `DataError` / `IntegrityError`, goes to `gw.disputes.v1.dead` and is acked, so it is never retried
+forever; other DB errors (e.g. `OperationalError`) leave it pending for retry. The dead-letter entry keeps
+`source_entry_id`, the error class, the payload's top-level keys and its SHA-256, never the raw payload. The
+consumer-lag sampler also covers `gw.disputes.v1` / `ops-ai.dispute-workflows`. Downgrading the migration
+deletes that consumer's `processed_events`, so a replay after re-upgrading rebuilds the projection.
 
 `PostgresDisputeRecordSource.dispute_records(scope, limit)` filters on `scope.merchant_id` in SQL, orders by
 `updated_at` desc, applies `limit`, and leaves out a dispute whose steps `1..entity_version` have not all arrived.
@@ -389,6 +400,10 @@ always `needs_review` (`outcome_supported_by_evidence`), because the gateway doe
 ```python
 class DisputeRecordSource(Protocol):
     def dispute_records(self, scope: Scope, limit: int) -> Sequence[DisputeWorkflowRecord]: ...
+
+@runtime_checkable
+class SessionBindableDisputeRecordSource(Protocol):  # MerchantRun binds it to the request session
+    def bound(self, session: Session) -> DisputeRecordSource: ...   # reads in a SAVEPOINT, one connection
 
 DisputeJudgementStatus = Literal["judged", "skipped"]
 
