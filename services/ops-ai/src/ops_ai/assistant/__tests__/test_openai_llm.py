@@ -567,14 +567,15 @@ def test_complete_raises_within_the_budget_and_makes_no_fallback_request_when_th
 
 
 def test_complete_gives_the_fallback_only_the_remaining_budget(serve: ServeFake) -> None:
-    # Arrange: the primary burns 0.7 s of a 1.0 s budget, then the fallback hangs
+    # Arrange: the primary burns 0.5 s of a 2.0 s budget (1.5 s of slack for a loaded CI host), then the
+    # fallback hangs past the whole budget; a fallback given a fresh budget would end at about 2.5 s
     server = serve(
         [
-            ScriptedReply(status=503, delay_seconds=0.7, json_body={}),
-            ScriptedReply(delay_seconds=TIMEOUT_DELAY_SECONDS, json_body={}),
+            ScriptedReply(status=503, delay_seconds=0.5, json_body={}),
+            ScriptedReply(delay_seconds=3.0, json_body={}),
         ]
     )
-    adapter = _adapter(server.base_url, fallback_model=FALLBACK_MODEL, budget_seconds=1.0)
+    adapter = _adapter(server.base_url, fallback_model=FALLBACK_MODEL, budget_seconds=2.0)
     started = time.monotonic()
 
     # Act
@@ -583,7 +584,7 @@ def test_complete_gives_the_fallback_only_the_remaining_budget(serve: ServeFake)
     # Assert
     elapsed = time.monotonic() - started
     assert str(error) == "openai: timeout"
-    assert elapsed < 1.4
+    assert elapsed < 2.4
     assert server.models() == [CHAT_MODEL, FALLBACK_MODEL]
 
 
