@@ -448,8 +448,8 @@ and is kept current per item:
   burst.
 - Card testing: seeded payments carry no card identity, so seeded episodes report distinct cards as unknown.
 - Card testing: false-positive feedback raises versioned per-merchant thresholds (R2-7) that the live watch applies,
-  falling back to the baseline; the SQ3 `investigate-fraud` assistant still uses the baseline rule, and the rule
-  actor is the merchant principal and role, not a person.
+  falling back to the baseline; the SQ3 `investigate-fraud` assistant applies the same active version
+  (`X-Fraud-Rule-Version`). The rule actor is the merchant principal and role, not a person.
 - Tickets: the lifecycle (`open → assigned → resolved`) exists on merchant-token routes; ops-staff principals are not
   wired to the ticket routes.
 - Card testing: the rule is easy to evade once known (amounts just above 1.00, gaps over 120 s, or diluting with

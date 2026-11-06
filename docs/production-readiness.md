@@ -139,8 +139,8 @@ Other open gaps, with the document that holds the detail:
   token stays valid up to 900 s after an ops user is disabled or demoted, and both ops roles read every merchant
   ([analytics spec §4](specs/analytics.md#4-api-ops_aianalyticsroutescreate_analytics_router)).
 - **R2 partials:** R2-1 and R2-2 (no dispute records reach ops-ai, so the dispute judge answers `skipped` by default;
-  the root-cause judge is opt-in with `POST /v1/assistant/investigate?judge=true`), R2-7 (the SQ3 assistant still uses
-  the baseline rule; the rule actor is per merchant, not per person), R2-8 (above) and the other rows marked Partial in
+  the root-cause judge is opt-in with `POST /v1/assistant/investigate?judge=true`), R2-7 (the rule actor is per
+  merchant, not per person; rule history is unpaged), R2-8 (above) and the other rows marked Partial in
   [requirements-traceability.md](requirements-traceability.md).
 - **Load-sensitive test:** `test_openai_llm.py::test_complete_gives_the_fallback_only_the_remaining_budget` failed once
   under heavy machine load (`openai: http 503` where it expected `openai: timeout`) and passed on rerun.
