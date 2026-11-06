@@ -9,6 +9,15 @@ Status (2026-11-05): the services run end to end as long-running compose service
 queries (SQ1–SQ4) over HTTP against a freshly seeded stack; the captured inputs and outputs are in
 [Sample queries](#sample-queries-sq1sq4). A React web client (`web/`) runs with `make web-up`.
 
+## Deliverables
+
+| Deliverable | File |
+|---|---|
+| Architecture diagram (DL1) | [docs/architecture.png](docs/architecture.png) / [docs/architecture.pdf](docs/architecture.pdf) |
+| Design decisions and trade-offs (DL2) | [docs/design.md](docs/design.md) |
+| Code + README with E2E examples (DL3) | this README, [Sample queries](#sample-queries-sq1sq4) |
+| 10-minute presentation (DL4, draft) | [docs/presentation.md](docs/presentation.md) |
+
 ## Layout
 
 | Path | What |
@@ -251,8 +260,10 @@ What it shows: both the live burst (12 micro payments, 4 cards, half declined) a
 all declined) are flagged as card testing with the features that tripped the rule, and each raised an alert with a
 ticket in the `fraud` queue: the seed CLI delivers the last 24 hours before its anchor as the live stream
 (`--live-tail-hours`, default 24; 0 = backfill only), so the planted burst goes through the same watcher as the demo's
-live charges. Seeded payments carry no card identity. No alert notification beyond the `ops_alerts` row and the ticket
-is shown here; SQ3 stays Partial in `docs/requirements-traceability.md` for that reason.
+live charges. Seeded payments carry no card identity. Each new alert also enqueues one outbound notification in the
+watcher transaction, which `ops-ai-notifier` (started by `make demo`) delivers to a signed webhook when
+`OPS_AI_ALERT_WEBHOOK_URL` is set, else to a log line; the demo wires no receiver, so the notification shows only in
+that service's log, not in the output above. SQ3 is Done in `docs/requirements-traceability.md`.
 
 ### SQ4: plain-English settlement summary — why the payout differs
 
