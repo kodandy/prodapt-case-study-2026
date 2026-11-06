@@ -188,8 +188,10 @@ how to confirm them, and ranks fixes from the playbook:
 What it shows: the failure rate is 14.9% in the last 6 hours against 1.8% over the 7 days before (8.3×), 32 of the 36
 failures are `issuer_unavailable` on BIN 400000, and the fix is to reroute that BIN; `/investigate` cites the past
 incident `inc_0001` and the live declined charge from `make demo`. On `/failures` the ranked fixes come from the
-playbook and carry no incident reference in this run (`incident_refs` is empty), and the `make eval` SQ1 golden still
-targets `/investigate`, not `/failures`.
+playbook and carry no incident reference in this run (`incident_refs` is empty): `/failures` searches incidents by
+keyword only and finds none on the seed. `make eval` runs SQ1 on both routes: `sq1_bin_outage` on `/investigate`
+(with the incident citation) and `sq1_failure_route` on `/failures` (BIN 400000, `issuer_unavailable` as top reason
+and top fix, no `incident:` ref expected).
 
 ### SQ2: international transfer declined despite sufficient funds — which rule fired
 
