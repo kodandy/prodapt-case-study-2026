@@ -1,7 +1,9 @@
-# AI-Powered Payment Gateway Platform — 10 分プレゼン / 10-minute presentation (DL4, draft)
+# AI-Powered Payment Gateway Platform — 10 分プレゼン / 10-minute presentation (DL4)
 
 > EN: 12 slides + 2 appendix slides. Each slide has an English title and a 1–2 line English summary of its claim,
 > evidence and constraint; the slide body and speaker notes are in Japanese.
+>
+> Slides: [slides.pdf](slides.pdf) (rendered with marp-cli from [slides.md](slides.md); English slides, Japanese speaker notes from this file).
 
 本編 12 枚 + Appendix 2 枚。スライドは `---` 区切りで、各スライドの `Note:` 以下が speaker notes。
 
