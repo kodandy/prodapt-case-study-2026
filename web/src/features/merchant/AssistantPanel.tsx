@@ -1,6 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import { errorMessageOf, useServices } from "../../app/services";
 import { AnswerView } from "./AnswerView";
+import { AssistantQueryPanel } from "./AssistantQueryPanel";
 import type { AssistantAnswer } from "./types";
 
 const MODES = [
@@ -65,6 +66,7 @@ export function AssistantPanel(props: {
       {answer === null ? null : (
         <AnswerView answer={answer} knownPaymentIds={props.knownPaymentIds} onOpenPayment={props.onOpenPayment} />
       )}
+      <AssistantQueryPanel />
     </section>
   );
 }
