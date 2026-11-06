@@ -146,7 +146,7 @@ are included in its Status cells.
 
 | ID | Requirement | Status | Evidence |
 | --- | --- | --- | --- |
-| NFR-PERF | Card p99 < 2 s, error rate < 1 %; assistant p95 < 20 s | Measured locally (card latency target not met); assistant SLO design only | [Readiness](production-readiness.md), [load results](perf/README.md) |
+| NFR-PERF | Card p99 < 2 s, error rate < 1 %; assistant p95 < 20 s | Measured locally (card p99 met at 2 req/s, not at 40 req/s); assistant SLO design only | [Readiness](production-readiness.md), [load results](perf/README.md) |
 | NFR-SCALE | 100k TPS / 100M users | Design only | [Readiness](production-readiness.md), design P2-7 |
 | NFR-AVAIL | 99.999 % payment write-path availability | Design only | [Readiness](production-readiness.md), design P2-2 |
 | NFR-SEC | TLS in transit; encryption at rest and key management | Dev TLS implemented with separate verification; disk encryption / KMS design only | [Transport and stored data](production-readiness.md#security-transport-and-data-at-rest) |

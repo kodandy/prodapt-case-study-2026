@@ -279,14 +279,15 @@ k6 on `POST /v1/payments` (card). Target: **p99 < 2 s and error < 1 %** (`docs/p
 
 | Offered load | Measured throughput / completed | p50 | p95 | p99 | Errors | Target |
 |---|---|---:|---:|---:|---:|---|
-| 2 req/s | 181 requests, none dropped | 405 ms | 1.91 s | **2.82 s** | 0 % | **Not met** |
+| 2 req/s (shared VM, 11-05) | 181 requests, none dropped | 405 ms | 1.91 s | 2.82 s | 0 % | Not met |
+| 2 req/s (less loaded VM, 11-06) | 181 requests, none dropped | 72 ms | 524 ms | **1.25 s** | 0 % | **Met** |
 | 40 req/s | saturates at ≈ 7 req/s; 745 completed, 2,856 iterations dropped | 24.9 s | 41.4 s | 44.5 s | 0 % | **Not met** |
 
 - Environment: a **shared laptop VM** next to other compose stacks; the load hits **3 test cards**, and each card takes a lock
 - **Design only** (no code, no measurement): 100k TPS / 100M users (P2-7), 99.999 % (P2-2), multi-region (P2-1)
 
 <!--
-0:45。目標は満たしていない、と最初に言う。error は 0 % で、5xx もない。遅さの主因は、3 枚のカードにかかる
+0:45。2 req/s では目標を満たす（負荷の少ない VM で p99 1.25 s）。40 req/s では満たしていない、と最初に言う。error は 0 % で、5xx もない。遅さの主因は、3 枚のカードにかかる
 per-card lock の待ち行列。40 req/s を投入しても実際に捌けたのは約 7 req/s で、待ちは数十秒まで伸びた。
 つまりこれは hot card の競合試験で、本番構成（多数のカード、gateway の水平 replica）を測ったものではない。
 切り分けには 2 つ要る。(1) 専用マシン、(2) 多数の tokenised card を混ぜた負荷。
@@ -326,7 +327,7 @@ PR-1（同一 key 20 並列で provider 呼び出しが 1 回になるテスト�
 
 **Next steps, in this order**: ① build the reconciler (converge C1/C5, resolve `unknown`) ② re-measure on a dedicated environment with many cards ③ Redis ACL + per-service DB roles ④ add a key and run LLM-judged eval in CI
 
-**Summary**: SQ1–SQ4 run end to end with tool evidence and checks. The correctness core (idempotency, ledger) is pinned by tests, **with one known concurrent-test failure**. The performance target is **missed** and production scale is **unmeasured**, and both are labelled that way.
+**Summary**: SQ1–SQ4 run end to end with tool evidence and checks. The correctness core (idempotency, ledger) is pinned by tests, **with one known concurrent-test failure**. The performance target is **met only at 2 req/s** (less loaded VM; **missed** at 40 req/s) and production scale is **unmeasured**, and both are labelled that way.
 
 <!--
 0:35。順番の理由。reconciler は正しさの穴なので、性能より先にやる。再計測は、設計判断の前提を確かめるため。

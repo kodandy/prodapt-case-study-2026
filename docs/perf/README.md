@@ -24,13 +24,22 @@ Target (NFR-PERF): p99 < 2 s, error rate < 1 %. A 402 decline counts as a correc
 | [rate40](k6-summary-rate40.json) | 40 req/s | 745 (2,856 iterations dropped: 200 VUs exhausted) | 24.9 s | 41.4 s | 44.5 s | 45.1 s | 0.00 % | No |
 | [rate2](k6-summary-rate2.json) | 2 req/s | 181 (none dropped) | 405 ms | 1.91 s | 2.82 s | 2.90 s | 0.00 % | No |
 
+## Re-run on a less loaded VM (2026-11-06, measured once)
+
+Same script and gateway, `RATE=2 make perf`, against a fresh `make demo` stack. The VM held 3 other compose stacks
+(two idle demo stacks and one running the web CI at about 120 % CPU) instead of about 14.
+
+| Run | Offered rate | Requests completed | p50 | p95 | p99 | max | Error rate | p99 < 2 s |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [rate2-quiet](k6-summary-rate2-quiet.json) | 2 req/s | 181 (none dropped) | 72 ms | 524 ms | 1.25 s | 1.32 s | 0.00 % | Yes |
+
 ## Reading
 
 - No request failed (0 % errors in both runs), and none was answered 5xx.
-- The latency target is **not met** in this environment. At 40 req/s the service saturates at about
+- At 2 req/s the target is **met** on the less loaded VM (p99 1.25 s, re-run above); the 2.82 s of the first run came
+  from the shared VM. At 40 req/s it is **not met**: at 40 req/s the service saturates at about
   7 completed req/s: requests queue behind the per-card lock on 3 cards, and latency grows to tens of
-  seconds. At 2 req/s the median is 405 ms, but the tail (p95 1.9 s, p99 2.8 s) is above target on the
-  shared VM.
+  seconds. 40 req/s has not been re-run on the less loaded VM.
 - What this does and does not show: it is a hot-card contention test on an overloaded laptop. It does not
   measure the production design (many cards, horizontal gateway replicas, see
   [Design P2-7](../design.md#p2-7-100k-tps-topology)). A clean measurement needs a dedicated machine and a load mix with
