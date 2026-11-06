@@ -103,9 +103,14 @@ _MISSING = _Missing()
 def _resolve(body: Mapping[str, object], dotted: str) -> object:
     node: object = body
     for part in dotted.split("."):
-        if not isinstance(node, Mapping) or part not in node:
+        if isinstance(node, Mapping):
+            if part not in node:
+                return _MISSING
+            node = node[part]
+        elif isinstance(node, list) and part.isdecimal() and int(part) < len(node):
+            node = node[int(part)]
+        else:
             return _MISSING
-        node = node[part]
     return node
 
 

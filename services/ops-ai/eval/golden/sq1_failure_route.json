@@ -1,0 +1,62 @@
+{
+  "case_id": "sq1_failure_route",
+  "sample_query": "SQ1",
+  "route": "/v1/assistant/failures",
+  "principal": "sq1_merchant",
+  "body": {
+    "question": "15% of my card payments are failing this afternoon — what is the root cause and how do we fix it?"
+  },
+  "expect": {
+    "status": 200,
+    "fields": {
+      "abstained": false,
+      "query.method": "card",
+      "comparison.elevated": true,
+      "comparison.window.by_bin.0.card_bin": "400000",
+      "reasons.0.taxonomy_code": "issuer_unavailable",
+      "fixes.0.taxonomy_code": "issuer_unavailable"
+    },
+    "evidence_ref_prefixes": [
+      "aggregate:window",
+      "aggregate:baseline",
+      "comparison:baseline",
+      "aggregate:bin:400000",
+      "change:bin_onset:400000",
+      "change:new_decline_code:issuer_unavailable",
+      "reason:issuer_unavailable",
+      "payment:"
+    ],
+    "required_terms": ["400000", "issuer_unavailable"],
+    "tool_calls": [
+      "compare_baseline",
+      "change_timeline",
+      "failure_reasons",
+      "search_incidents",
+      "list_failed_payments"
+    ]
+  },
+  "thresholds": {"faithfulness": 0.9, "answer_relevancy": 1.0, "evidence_ref_coverage": 1.0},
+  "hypotheses": {
+    "items": [
+      {
+        "hypothesis_id": "h_integration",
+        "cause_code": "merchant_integration_error",
+        "statement": "A checkout release broke the card form, so payments fail before authorisation.",
+        "evidence_refs": ["aggregate:baseline", "incident:inc_9999"]
+      },
+      {
+        "hypothesis_id": "h_acquirer",
+        "cause_code": "acquirer_outage",
+        "statement": "The acquirer is degraded for every BIN during the window.",
+        "evidence_refs": ["aggregate:window"]
+      },
+      {
+        "hypothesis_id": "h_bin",
+        "cause_code": "issuer_outage_on_bin",
+        "statement": "The issuer behind BIN 400000 is unavailable during the window; other BINs are normal.",
+        "evidence_refs": ["aggregate:bin:400000", "aggregate:window", "reason:issuer_unavailable"]
+      }
+    ],
+    "expected_order": ["h_bin", "h_acquirer", "h_integration"]
+  }
+}

@@ -101,7 +101,7 @@ def _write_case(directory: Path, filename: str, data: dict[str, object]) -> None
     (directory / filename).write_text(json.dumps(data))
 
 
-def test_load_golden_cases_returns_the_six_shipped_cases_sorted_by_case_id() -> None:
+def test_load_golden_cases_returns_the_seven_shipped_cases_sorted_by_case_id() -> None:
     # Arrange / Act
     cases = load_golden_cases(GOLDEN_DIR)
 
@@ -110,6 +110,7 @@ def test_load_golden_cases_returns_the_six_shipped_cases_sorted_by_case_id() -> 
         "isolation_quiet_merchant",
         "isolation_user_on_merchant_route",
         "sq1_bin_outage",
+        "sq1_failure_route",
         "sq2_cross_border_limit",
         "sq3_card_testing",
         "sq4_settlement_gap",
