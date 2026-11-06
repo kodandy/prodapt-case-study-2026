@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 DisputeState = Literal["opened", "under_review", "won", "lost"]
-ActorRole = Literal["card_network", "merchant", "ops_lead"]
+ActorRole = Literal["card_network", "consumer", "merchant", "ops_lead"]
 Verdict = Literal["valid", "needs_review", "invalid"]
 LlmStatus = Literal["skipped", "used", "rejected", "unavailable"]
 Severity = Literal["hard", "soft"]

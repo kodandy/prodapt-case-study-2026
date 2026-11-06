@@ -12,6 +12,7 @@ from ops_ai.clock import system_clock
 from ops_ai.config import load_ops_ai_settings
 from ops_ai.db import make_engine, make_session_factory
 from ops_ai.health import check_ready
+from ops_ai.judge.dispute_records import PostgresDisputeRecordSource
 from ops_ai.observability.llm import InstrumentedLlm
 from ops_ai.observability.tracing import configure_logging
 from ops_ai.search.embedder import Embedder, LocalHashEmbedder
@@ -69,5 +70,6 @@ def build_app_from_env() -> FastAPI:
             embedder=embedder,
             redis=redis,
             judge_llm=None if isinstance(llm, MockLlm) else InstrumentedLlm(llm),
+            dispute_records=PostgresDisputeRecordSource(session_factory),
         )
     )

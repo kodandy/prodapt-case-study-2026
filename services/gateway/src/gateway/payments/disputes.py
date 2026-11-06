@@ -1,15 +1,26 @@
+import re
 import unicodedata
 import uuid
+from datetime import datetime
 from typing import Literal
 
+from contracts.events import (
+    DISPUTES_TOPIC,
+    NETWORK_REASON_CODE_PATTERN,
+    DisputeActorRole,
+    DisputeEventState,
+    DisputeEventType,
+    DisputeEventV1,
+)
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from gateway.audit.models import AuditLog
 from gateway.clock import Clock
 from gateway.notifications.records import add_notification
+from gateway.outbox.models import OutboxEvent
 from gateway.payments.ledger.service import PostingLine, ensure_account, post_journal
-from gateway.payments.models import Dispute
+from gateway.payments.models import Dispute, Payment
 from gateway.payments.refunds import lock_payment, refundable_minor
 from gateway.payments.schemas import DisputeView
 
@@ -18,6 +29,9 @@ MAX_REASON_LENGTH = 64
 CHARGEBACK_FEE_MINOR = {"USD": 1500, "EUR": 1500, "JPY": 2000, "INR": 120000}
 
 DisputeOutcome = Literal["won", "lost"]
+
+_EVENT_VERSIONS: dict[DisputeEventState, int] = {"opened": 1, "under_review": 2, "won": 3, "lost": 3}
+_NETWORK_REASON_CODE = re.compile(NETWORK_REASON_CODE_PATTERN)
 
 
 class PaymentNotFoundError(Exception):
@@ -129,6 +143,15 @@ def open_dispute_in_session(
     payment.updated_at = now
     session.flush()
     _audit(session, clock, actor_id, actor_role, "dispute.opened", dispute, {"amount_minor": amount})
+    _add_dispute_event(
+        session,
+        now,
+        "dispute.opened",
+        dispute,
+        payment,
+        (None, "opened"),
+        "consumer" if actor_role == "consumer" else "card_network",
+    )
     add_notification(
         session,
         now,
@@ -156,10 +179,23 @@ def submit_evidence(
             raise DisputeNotFoundError
         if dispute.state != "opened":
             raise InvalidDisputeTransitionError
+        now = clock()
         dispute.state = "under_review"
         dispute.evidence_text = text
-        dispute.updated_at = clock()
+        dispute.updated_at = now
         session.flush()
+        payment = session.get(Payment, dispute.payment_id)
+        if payment is None:
+            raise DisputeNotFoundError
+        _add_dispute_event(
+            session,
+            now,
+            "dispute.evidence_submitted",
+            dispute,
+            payment,
+            ("opened", "under_review"),
+            "merchant",
+        )
         _audit(
             session,
             clock,
@@ -215,6 +251,15 @@ def resolve_dispute(
             "dispute.resolved",
             dispute,
             {"outcome": outcome, "chargeback_fee_minor": dispute.chargeback_fee_minor},
+        )
+        _add_dispute_event(
+            session,
+            now,
+            "dispute.resolved",
+            dispute,
+            payment,
+            ("under_review", outcome),
+            "card_network" if actor_role == "card_network" else "ops_lead",
         )
         payload = _notice_payload(dispute)
         add_notification(
@@ -281,6 +326,53 @@ def _audit(
             summary={"payment_id": str(dispute.payment_id), "state": dispute.state, **summary},
             correlation_id=uuid.uuid4().hex,
             occurred_at=clock(),
+        )
+    )
+
+
+def _add_dispute_event(
+    session: Session,
+    now: datetime,
+    event_type: DisputeEventType,
+    dispute: Dispute,
+    payment: Payment,
+    transition: tuple[DisputeEventState | None, DisputeEventState],
+    actor_role: DisputeActorRole,
+) -> None:
+    """One gw.disputes.v1 outbox row in the caller's transaction (docs/specs/disputes-notifications.md).
+
+    A free-text reason (consumer "not me", anything not shaped like a network code) is sent as None, and the
+    evidence text never leaves the gateway: both can carry personal data.
+    """
+    from_state, to_state = transition
+    lost = to_state == "lost"
+    event = DisputeEventV1(
+        event_id=uuid.uuid4(),
+        event_type=event_type,
+        occurred_at=now,
+        entity_version=_EVENT_VERSIONS[to_state],
+        dispute_id=dispute.id,
+        payment_id=dispute.payment_id,
+        merchant_id=dispute.merchant_id,
+        from_state=from_state,
+        to_state=to_state,
+        actor_role=actor_role,
+        network_reason_code=dispute.reason if _NETWORK_REASON_CODE.fullmatch(dispute.reason) else None,
+        currency=dispute.currency,
+        payment_amount_minor=payment.amount_minor,
+        refunded_minor=payment.refunded_minor,
+        dispute_amount_minor=dispute.amount_minor,
+        chargeback_minor=dispute.amount_minor if lost else 0,
+        chargeback_fee_minor=dispute.chargeback_fee_minor if lost else 0,
+    )
+    session.add(
+        OutboxEvent(
+            event_id=event.event_id,
+            topic=DISPUTES_TOPIC,
+            payload=event.model_dump(mode="json"),
+            headers={},
+            created_at=now,
+            published_at=None,
         )
     )
 

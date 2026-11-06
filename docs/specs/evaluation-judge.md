@@ -241,7 +241,7 @@ schema-validated (pydantic, `extra="forbid"`, ≤ 8 KiB, fences allowed); an inv
 Input (`ops_ai.judge.schemas`, pydantic `extra="forbid"`, frozen):
 ```python
 DisputeState = Literal["opened", "under_review", "won", "lost"]
-ActorRole = Literal["card_network", "merchant", "ops_lead"]
+ActorRole = Literal["card_network", "consumer", "merchant", "ops_lead"]
 class DisputeTransition: from_state: DisputeState | None; to_state: DisputeState; actor_role: ActorRole; at: datetime
 class DisputeEvidence: evidence_id: str; kind: str; submitted_at: datetime
 class DisputeWorkflowRecord:
@@ -253,8 +253,8 @@ class DisputeWorkflowRecord:
     outcome: Literal["won", "lost"] | None
     chargeback_minor: int (>=0); chargeback_fee_minor: int (>=0)
 ```
-Legal transitions (mirror `gateway/payments/disputes.py`): `None → opened` by `card_network`;
-`opened → under_review` by `merchant`; `under_review → won|lost` by `card_network` or `ops_lead`.
+Legal transitions (mirror `gateway/payments/disputes.py`): `None → opened` by `card_network` or `consumer`
+(the consumer route and the inbox "not me" open disputes, B3.3); `opened → under_review` by `merchant`; `under_review → won|lost` by `card_network` or `ops_lead`.
 
 Reason catalog `REASON_CODES: Mapping[str, ReasonCode]` (`category`, `compelling_evidence: frozenset[str]`):
 `10.4` fraud card-absent {avs_cvv_match, 3ds_authentication, prior_undisputed_history, device_ip_match};
@@ -345,9 +345,46 @@ pass nothing new get exactly the old output.
 
 #### 6.4.1 Dispute agent (`ops_ai.judge.dispute_summary`, called from `ops_ai.agents.supervisor`)
 
-No gateway dispute workflow (transitions, evidence, reason code) reaches ops-ai today; the only dispute signal is
-the settlement chargeback flag (`tickets/sources.py`). So records come from an injected port, and the default
-deployment has none (`skipped`). Fabricating transitions from the chargeback flag is ruled out.
+Records come from an injected port. The default deployment (`ops_ai.main.build_app_from_env`) sets
+`PostgresDisputeRecordSource` (`ops_ai.judge.dispute_records`), which reads the projection of the gateway's
+dispute workflow feed below; `create_app` itself still defaults to None (`skipped`), so tests and callers that
+build `OpsAiAppDeps` directly are unchanged. Fabricating transitions from the chargeback flag is ruled out.
+
+Feed (`contracts.events.DisputeEventV1` on `gw.disputes.v1`, `extra="forbid"`, frozen): one event per gateway
+transition, written to the gateway outbox in the same transaction as the dispute change
+(`gateway.payments.disputes._add_dispute_event`; a rejected or rolled-back change writes none).
+```python
+DISPUTES_TOPIC = "gw.disputes.v1"
+class DisputeEventV1:
+    event_id: uuid.UUID
+    event_type: Literal["dispute.opened", "dispute.evidence_submitted", "dispute.resolved"]  # must match to_state
+    occurred_at: AwareDatetime; origin: EventOrigin = "live"
+    entity_version: int (>=1)    # opened 1, under_review 2, won|lost 3: the step's position
+    dispute_id: uuid.UUID; payment_id: uuid.UUID; merchant_id: uuid.UUID
+    from_state: DisputeState | None; to_state: DisputeState
+    actor_role: Literal["card_network", "consumer", "merchant", "ops_lead"]
+    network_reason_code: str | None   # pattern ^[0-9]{1,2}(\.[0-9]{1,2}){1,2}$; None for a free-text reason
+    currency: str (3); payment_amount_minor: int (>0); refunded_minor: int (>=0)
+    dispute_amount_minor: int (>0); chargeback_minor: int (>=0); chargeback_fee_minor: int (>=0)
+```
+No PAN, BIN, last4, payer id, free-text reason or evidence text (the latter two can carry personal data). Gateway
+actor mapping: network routes → `card_network`; consumer route / inbox "not me" → `consumer`; evidence →
+`merchant`; ops resolution → `ops_lead`. Chargeback and fee are non-zero only on `lost`.
+
+Projection (`ops_ai.ingest.disputes`, group `ops-ai.dispute-workflows`, run by the ingest worker after payments
+and compliance): `apply_dispute_event` dedupes on `processed_events(consumer, event_id)` in the same transaction,
+upserts `ops_ai.dispute_workflows` (one row per dispute; the highest `entity_version` wins, so out-of-order
+delivery converges) and inserts `ops_ai.dispute_workflow_steps` (PK `(dispute_id, entity_version)`). A dispute's
+merchant is fixed by its first event: an event naming another merchant is consumed and dropped. A malformed
+entry goes to `gw.disputes.v1.dead` (logged by entry id and error class only) and is acked.
+
+`PostgresDisputeRecordSource.dispute_records(scope, limit)` filters on `scope.merchant_id` in SQL, orders by
+`updated_at` desc, applies `limit`, and leaves out a dispute whose steps `1..entity_version` have not all arrived.
+Mapping: each step → a transition; each `dispute.evidence_submitted` step → one evidence item (`evidence_id` =
+the event id, `kind` = `GATEWAY_EVIDENCE_KIND` = `"merchant_statement"`, not compelling for any catalog code);
+`evidence_considered` = all evidence when resolved, else empty; a missing reason code → `UNSPECIFIED_REASON_CODE`
+= `"unspecified"` (soft `reason_code_known` failure → `needs_review`). Consequence: a gateway `won` dispute is
+always `needs_review` (`outcome_supported_by_evidence`), because the gateway does not model evidence kinds.
 
 ```python
 class DisputeRecordSource(Protocol):

@@ -52,6 +52,12 @@ Service changes in `gateway/payments/disputes.py` (backward compatible):
   differs raises `PaymentNotFoundError`. Also inserts a `dispute_opened` notification for the merchant.
 - `resolve_dispute(..., actor_id, actor_role="ops_lead")`. Inserts `dispute_resolved` for the merchant and,
   when the payment has a payer, `dispute_update` for the payer.
+- Every successful open, evidence submission and resolution also adds one `gw.disputes.v1` outbox row
+  (`contracts.events.DisputeEventV1`) in the same transaction (R2-1 / R2-2, contract and ops-ai projection in
+  `docs/specs/evaluation-judge.md` §6.4.1). Actor category: `consumer` for the consumer route, otherwise
+  `card_network` on open; `merchant` on evidence; `card_network` for the network resolution, otherwise
+  `ops_lead`. The reason is sent only when it is shaped like a network code; free text and evidence text stay
+  in the gateway.
 - `list_merchant_disputes(session, merchant_id, limit, cursor, state=None) -> DisputePage`,
   `list_user_disputes(session, user_id, limit, cursor) -> DisputePage` (`DisputePage{items: list[DisputeView],
   next_cursor}`).

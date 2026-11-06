@@ -51,7 +51,7 @@ _LEGAL: frozenset[tuple[DisputeState | None, DisputeState]] = frozenset(
     {(None, "opened"), ("opened", "under_review"), ("under_review", "won"), ("under_review", "lost")}
 )
 _ACTORS: Mapping[DisputeState, frozenset[ActorRole]] = {
-    "opened": frozenset({"card_network"}),
+    "opened": frozenset({"card_network", "consumer"}),
     "under_review": frozenset({"merchant"}),
     "won": frozenset({"card_network", "ops_lead"}),
     "lost": frozenset({"card_network", "ops_lead"}),
