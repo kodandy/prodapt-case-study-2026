@@ -20,7 +20,7 @@ flowchart LR
   browser(["Browser<br/>user / merchant / ops SPA"])
   merchantsrv(["Merchant server<br/>server-to-server"])
   receiver(["Alert receiver<br/>operator-configured HTTPS webhook"]):::ext
-  openai(["OpenAI API<br/>Responses: gpt-4.1-mini, nano fallback<br/>Embeddings: text-embedding-3-small<br/>(document vectors by backfill CLI)<br/>only when OPENAI_API_KEY is set,<br/>otherwise MockLlm + LocalHashEmbedder"]):::ext
+  openai(["OpenAI API<br/>Responses: gpt-4.1-mini, nano fallback<br/>Embeddings: text-embedding-3-small<br/>(document vectors by backfill CLI)<br/>chat only when OPENAI_API_KEY is set; embeddings only<br/>with OPS_AI_EMBEDDER=openai (compose: unset),<br/>otherwise MockLlm + LocalHashEmbedder (hash, not semantic)"]):::ext
 
   subgraph host["compose project payplat · host ports on 127.0.0.1"]
     web["web<br/>nginx + Vite SPA bundle<br/>:8082 → 80 (web-tls :8443, profile tls)"]

@@ -228,7 +228,7 @@ The LLM can propose. It never approves. This is the only command on the port. No
 - A versioned fix playbook per taxonomy code supplies the suggested fixes, enriched with matching resolution notes from RAG.
 
 ### Search
-- Full-text search and pgvector are fused with RRF.
+- Full-text search and pgvector are fused with RRF. The default embedder is `LocalHashEmbedder` (feature hashing, spelling-level, not semantic); compose does not pass `OPS_AI_EMBEDDER`. OpenAI embeddings are optional (`OPS_AI_EMBEDDER=openai` plus `OPENAI_API_KEY`) and need the backfill (`python -m ops_ai.search backfill`) to fill the document column.
 - The keyword side sits behind an interface, so Japanese tokenization (e.g. pg_bigm) can be swapped in later.
 
 ### Investigation tools (P0: read-only)
@@ -386,7 +386,7 @@ Working copy; moves to `docs/production-readiness.md` in Phase 5 (DOC-1).
 | P99 < 2 s | Applies to `POST /v1/payments` (card) at the stated local load, with error rate alongside. The AI assistant has its own SLO: p95 < 20 s, with fallback. |
 | 100k TPS / 100M users | Production design only (§7 P2). Local load-test numbers are reported as measured, nothing more. |
 | 99.999 % / cross-region failover | Multi-region design: one home region per account, single writer there; cross-region transfers via a saga with eventual consistency. RPO/RTO are design targets. No claim of lossless global failover. |
-| "E2E encryption" | TLS in transit (nginx in the demo; service-to-service mTLS is design-only) plus field encryption for the TOTP secret and PII. It is not end-to-end encryption in the messaging sense. |
+| "E2E encryption" | TLS only on browser → nginx, and only with `make tls-up` (dev certificate); nginx → web, web → APIs, Postgres and Redis are plaintext in the demo, and service-to-service mTLS is design-only. Field encryption covers only the TOTP secret (AES-256-GCM), not other personal data. It is not end-to-end encryption in the messaging sense. |
 | Card tokenization / PCI-DSS | PAN never stored; test PANs only; vault keeps token, BIN, last4, fingerprint. PCI-DSS L1 is not claimed. |
 | GDPR | A retention and erasure table per store (gateway PII table, search documents, conversations and memory, audit, outbox, backups). Events carry pseudonymous ids only; PII sits in one erasable table; free-text fields are crypto-shredded per user key; the ledger keeps pseudonymous postings for legal retention. Implemented: PII separation. The rest is design-only. |
 | AML / KYC | KYC status and tier drive transfer limits; sanctions is a stub. Re-verification triggers are design-only. |

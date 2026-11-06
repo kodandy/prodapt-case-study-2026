@@ -70,8 +70,13 @@ No `.env` file and no `OPENAI_API_KEY` are needed: without a key the assistant u
 | `relay` | Outbox relay: publishes committed outbox rows to the Redis stream |
 | `ops-ai-api` | Ops assistant HTTP API on `127.0.0.1:8081` |
 | `ops-ai-consumer` | Stream consumer that builds the ops-ai projection and search index |
+| `notifier` | Gateway notification worker (`gateway.notifications.worker`): delivers pending notification records. Started by `make demo` as a dependency of the `demo` service |
+| `ops-ai-notifier` | Outbound fraud alert notifications (`ops_ai.notify`); log sink unless `OPS_AI_ALERT_WEBHOOK_URL` is set. Started by `make demo` as a dependency of the `demo` service |
+| `gateway-grpc` | Merchant gRPC API on `127.0.0.1:50051`, plaintext in the demo (`GATEWAY_GRPC_INSECURE=true`). Not started by `make demo`: `docker compose up -d gateway-grpc` |
+| `web` | nginx serving the Vite SPA and proxying `/api/gw/` and `/api/ops/` to the APIs, on `127.0.0.1:8082`. Started by `make web-up`, not by `make demo` |
 
-All services use one image (`docker/app.Dockerfile`, non-root). The APIs have a healthcheck on `/readyz`, which checks
+All Python services use one image (`docker/app.Dockerfile`, non-root); `web` is built from `web/Dockerfile`
+(Node build stage, `nginx:1.28.0-alpine` runtime). The APIs have a healthcheck on `/readyz`, which checks
 Postgres and Redis. Each service mounts only its own secrets subdirectory, read-only. The gateway gets the HMAC keys and
 the JWT private key, and ops-ai gets only the public key.
 
@@ -385,7 +390,9 @@ and is kept current per item:
 - `demo-secrets` recreates only missing files. If only the private key is deleted, the old public key stays and tokens
   stop verifying; drop the volumes (`make demo-down && docker compose --profile demo down -v`, which also drops the
   demo database) to start over.
-- The ops-ai engine does not set `hide_parameters` yet.
+- Both runtime engines set `hide_parameters=True` (`services/gateway/src/gateway/db.py`,
+  `services/ops-ai/src/ops_ai/db.py`), but only the gateway has a test for it
+  (`gateway/__tests__/test_db.py`); the Alembic `migrations/env.py` engines of both services do not set it.
 - RBAC (P0-9): routes merged after the policy table was fixed (wallets, top-ups, payouts, consumer payments,
   disputes, notifications) reuse an existing action with the same role set instead of their own action names, so the
   policy cannot yet grant them separately. The generated route × role matrix checks every route with exact 401/403.
