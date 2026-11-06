@@ -357,3 +357,82 @@ unflagged with `reasons == ()`, no alert, no fixes, no evidence, version 2.
 - The printed line is unchanged; `payment_facts` are the same with or without the tail (S-1).
 - A second run with the same arguments adds no alert, ticket or ops alert and reports 0 payments applied.
 - Tests: `ops_ai/seed/__tests__/test_seed_cli_live_tail.py`.
+
+## Outbound alert notification channel (11-06)
+
+Closes the SQ3 residual "notification stops at the `ops_alerts` row and the ticket, no external channel"
+(`requirements-traceability.md` SQ3). The gateway's merchant notifications read the gateway outbox, which ops-ai
+must not write, and `ops_alert_deliveries` is pinned to one `redis_stream` row per ops alert by its tests; so the
+channel is its own outbox table in ops-ai, written in the watcher transaction and drained by a separate worker that
+makes the only network call.
+
+### N-1. Outbox table — one Alembic migration after `d2b7e4a9c1f6`
+
+`ops_ai.alert_notifications` (model `AlertNotification` in `ops_ai.notify.models`, registered in `ops_ai.schema`):
+`notification_id` UUID PK; `fraud_alert_id` UUID NOT NULL, unique, FK → `fraud_alerts.alert_id` ON DELETE CASCADE;
+`merchant_id` UUID NOT NULL; `payload` JSONB NOT NULL; `status` varchar(16) CHECK in `pending`, `delivered`,
+`failed`; `attempts` Integer NOT NULL server default 0; `last_error` varchar(64) nullable; `created_at` NOT NULL;
+`delivered_at` nullable; index `ix_alert_notifications_status_created_at` on `(status, created_at)`.
+Upgrade and downgrade both run (existing migration test pattern); `alembic check` stays clean.
+
+### N-2. Enqueue — `ops_ai.notify`
+
+```python
+ALERT_NOTIFICATION_SCHEMA = "payplat.fraud_alert.v1"
+NOTIFIED_FEATURES = ("micro_payments", "card_payments", "micro_share", "distinct_cards", "declined",
+                     "decline_ratio", "currencies", "reasons")
+def alert_notification_id(fraud_alert_id: uuid.UUID) -> uuid.UUID   # uuid5, deterministic per alert
+def enqueue_alert_notification(session, clock, *, fraud_alert_id, merchant_id, kind, payment_count,
+                               features: Mapping[str, object]) -> uuid.UUID | None
+```
+
+- Inserts one `pending` row, `attempts = 0`, `created_at = clock()`, `ON CONFLICT (fraud_alert_id) DO NOTHING`;
+  returns the notification id, or None when the alert already has one. Does not commit; no network call.
+- `payload` = `{"schema", "notification_id", "alert_id" (the fraud alert id), "kind", "merchant_id",
+  "payment_count", "features", "raised_at"}` (ids as strings, `raised_at` ISO-8601 of `clock()`).
+  `features` keeps only the `NOTIFIED_FEATURES` keys present in the input: `card_bins` (leading PAN digits) and any
+  other key are dropped. No payment id, card ref, BIN, last 4, token or secret is ever in the payload.
+- `watch_payment` calls it in the same transaction when it inserts a new fraud alert (after the ticket and ops
+  alert), with the episode features and `payment_count = micro_payments` at raise time. An alert refresh enqueues
+  nothing, so a redelivered or later event of the same episode adds no second notification.
+
+### N-3. Delivery — at least once, outside the watcher transaction
+
+```python
+MAX_NOTIFICATION_ATTEMPTS = 5
+class AlertSinkError(Exception): reason: str        # short, fixed-form; never a URL, header or body
+@dataclass(frozen=True) class AlertNotificationMessage(notification_id: uuid.UUID, body: bytes)
+class AlertSink(Protocol): def send(self, message: AlertNotificationMessage, now: datetime) -> None
+def deliver_alert_notifications(session_factory, sink: AlertSink, clock, limit: int = 100) -> int
+```
+
+- Reads `pending` rows oldest first (`created_at`, `notification_id`), `FOR UPDATE SKIP LOCKED`, at most `limit`.
+  `body` = the payload as compact JSON with sorted keys (UTF-8).
+- Success → `delivered`, `delivered_at = clock()`, `last_error` None; counts in the return value.
+- `AlertSinkError` → `attempts + 1`, `last_error = reason[:64]`; at `MAX_NOTIFICATION_ATTEMPTS` → `failed`, never
+  retried. A delivered or failed row is never sent again. A crash after the send and before the commit resends: the
+  receiver dedupes on `notification_id` (= `Idempotency-Key`).
+
+### N-4. Sinks and configuration
+
+- `LogAlertSink` (default): logs one INFO line `alert notification sent notification_id=<id> sink=log` through
+  `ops_ai.notify.sinks`; offline, so `make demo` and `make eval` need no network.
+- `WebhookAlertSink(url, secret, client: httpx.Client)`: `POST url` with the body and the headers
+  `Content-Type: application/json`, `Idempotency-Key: <notification_id>`, `X-Payplat-Timestamp: <int(now) unix s>`,
+  `X-Payplat-Signature: v1=<hex HMAC-SHA256(secret, f"{timestamp}." + body)>`. 2xx → success; any other status →
+  `AlertSinkError("http_<status>")` (redirects are not followed); `httpx.HTTPError` → `AlertSinkError(<class name>)`.
+  Its `repr` holds neither the URL nor the secret.
+- `load_alert_sink(environ: Mapping[str, str]) -> AlertSink`:
+  - `OPS_AI_ALERT_WEBHOOK_URL` unset or empty → `LogAlertSink`.
+  - Set → the URL must be `https`, or `http` with a loopback host (`127.0.0.1`, `::1`, `localhost`), with a host and
+    no userinfo, query or fragment; `OPS_AI_ALERT_WEBHOOK_SECRET` must be set with at least 32 characters. Otherwise
+    `ValueError` with a fixed message that holds neither the URL nor the secret. The client has a 5 s timeout and
+    `follow_redirects=False`.
+- Worker: `python -m ops_ai.notify [--once]` (compose service `ops-ai-notifier`, also started by the `demo` service).
+  Nothing logs the URL, the secret, the signature or the body.
+
+### N-5. Tests (new files only)
+
+`ops_ai/notify/__tests__/test_alert_notification_table.py`, `test_enqueue_alert_notification.py`,
+`test_deliver_alert_notifications.py`, `test_alert_sinks.py`, and
+`ops_ai/fraud_watch/__tests__/test_watch_alert_notification.py`.
