@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { errorMessageOf, useServices } from "../../app/services";
 import { formatAmount, formatPercent, formatUtcMinute } from "./format";
 import type { ChargebackModel, ChargebackRiskResponse, RiskItem } from "./types";
+import { TableScroll } from "../../components/TableScroll";
 
 const RISK_LIMIT = 20;
 
@@ -52,27 +53,29 @@ export function ChargebackRiskView(props: { data: ChargebackRiskResponse }): Rea
       {data.items.length === 0 ? (
         <p className="muted">No recent captured payments to score.</p>
       ) : (
-        <table>
-          <caption className="sr-only">Payments ranked by chargeback probability</caption>
-          <thead>
-            <tr>
-              <th scope="col">Payment</th>
-              <th scope="col">Time</th>
-              <th scope="col" className="num">
-                Amount
-              </th>
-              <th scope="col" className="num">
-                Probability
-              </th>
-              <th scope="col">Top factor</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.items.map((item) => (
-              <RiskRow key={item.payment_id} item={item} />
-            ))}
-          </tbody>
-        </table>
+        <TableScroll label="Chargeback risk table">
+          <table>
+            <caption className="sr-only">Payments ranked by chargeback probability</caption>
+            <thead>
+              <tr>
+                <th scope="col">Payment</th>
+                <th scope="col">Time</th>
+                <th scope="col" className="num">
+                  Amount
+                </th>
+                <th scope="col" className="num">
+                  Probability
+                </th>
+                <th scope="col">Top factor</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.items.map((item) => (
+                <RiskRow key={item.payment_id} item={item} />
+              ))}
+            </tbody>
+          </table>
+        </TableScroll>
       )}
     </>
   );

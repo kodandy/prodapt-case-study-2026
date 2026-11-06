@@ -3,6 +3,7 @@ import { errorMessageOf, useServices } from "../../app/services";
 import type { ApiResult } from "../../lib/api";
 import { formatUtcMinute } from "../dashboard/format";
 import type { Ticket, TicketList, TicketStatus } from "./types";
+import { TableScroll } from "../../components/TableScroll";
 
 const TICKET_LIMIT = 50;
 /** Until ops roles exist the console acts with the merchant token, so it signs assignments as itself. */
@@ -110,32 +111,34 @@ export function TicketQueuePanel(): ReactNode {
       {tickets === null ? null : tickets.length === 0 ? (
         <p className="muted">No tickets.</p>
       ) : (
-        <table>
-          <caption className="sr-only">Tickets</caption>
-          <thead>
-            <tr>
-              <th scope="col">Title</th>
-              <th scope="col">Queue</th>
-              <th scope="col">Priority</th>
-              <th scope="col">Status</th>
-              <th scope="col">Assignee</th>
-              <th scope="col">Created</th>
-              <th scope="col">
-                <span className="sr-only">Actions</span>
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {tickets.map((ticket) => (
-              <TicketRow
-                key={ticket.ticket_id}
-                ticket={ticket}
-                busy={busyId !== null}
-                onMove={(transition) => void move(ticket.ticket_id, transition)}
-              />
-            ))}
-          </tbody>
-        </table>
+        <TableScroll label="Ticket queue table">
+          <table>
+            <caption className="sr-only">Tickets</caption>
+            <thead>
+              <tr>
+                <th scope="col">Title</th>
+                <th scope="col">Queue</th>
+                <th scope="col">Priority</th>
+                <th scope="col">Status</th>
+                <th scope="col">Assignee</th>
+                <th scope="col">Created</th>
+                <th scope="col">
+                  <span className="sr-only">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {tickets.map((ticket) => (
+                <TicketRow
+                  key={ticket.ticket_id}
+                  ticket={ticket}
+                  busy={busyId !== null}
+                  onMove={(transition) => void move(ticket.ticket_id, transition)}
+                />
+              ))}
+            </tbody>
+          </table>
+        </TableScroll>
       )}
     </section>
   );

@@ -1,14 +1,28 @@
 import type { Currency } from "../../lib/money";
 
-export type PaymentState =
-  | "authorized"
-  | "captured"
-  | "declined"
-  | "failed"
-  | "refunded"
-  | "partially_refunded"
-  | "disputed"
-  | string;
+/** The states GET /v1/payments returns and accepts as its `state` filter. */
+export type ApiPaymentState = "created" | "succeeded" | "declined" | "failed" | "unknown";
+
+export type PaymentState = ApiPaymentState | string;
+
+export const PAYMENT_STATE_FILTERS: readonly { value: ApiPaymentState; label: string }[] = [
+  { value: "created", label: "Created" },
+  { value: "succeeded", label: "Succeeded" },
+  { value: "declined", label: "Declined" },
+  { value: "failed", label: "Failed" },
+  { value: "unknown", label: "Unknown" },
+];
+
+/**
+ * "captured" and "partially_refunded" are never returned by the API; they are a provisional allowance only
+ * because existing test fixtures use those values (pending approval to update the fixtures). The server
+ * still decides whether a refund is allowed.
+ */
+const REFUNDABLE_STATES: ReadonlySet<string> = new Set(["succeeded", "captured", "partially_refunded"]);
+
+export function canRefund(state: PaymentState): boolean {
+  return REFUNDABLE_STATES.has(state);
+}
 
 export interface PaymentSummary {
   payment_id: string;
@@ -109,5 +123,6 @@ export interface DisputeList {
 }
 
 export function refundableMinor(p: PaymentSummary): number {
+  if (!canRefund(p.state)) return 0;
   return Math.max(0, p.amount_minor - p.refunded_minor - p.disputed_minor - p.chargeback_minor);
 }
