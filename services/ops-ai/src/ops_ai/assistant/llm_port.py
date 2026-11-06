@@ -8,6 +8,8 @@ from ops_ai.assistant.evidence import EvidenceItem
 class LlmRequest:
     question: str
     evidence: tuple[EvidenceItem, ...]
+    require_citations: bool = False
+    """R1-5 grounded /ask: every sentence must end with the [ref] of the evidence it uses."""
 
 
 @dataclass(frozen=True)

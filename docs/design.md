@@ -955,11 +955,13 @@ Nothing in this section is implemented or measured. Numbers are design targets o
   serializes; if that matters, split it into N sub-balances and draw from any with enough funds.
 - **What we gave up:** Cross-shard queries (history across merchants) move to the analytics side (BigQuery via
   Pub/Sub). A k6 run of `POST /v1/payments` exists ([perf results](perf/README.md), 2026-11-05, one run each, 90 s
-  `constant-arrival-rate`): at an offered 2 req/s, p50 405 ms / p95 1.91 s / p99 2.82 s with 0 % errors; at an offered
-  40 req/s the achieved throughput saturates near 7 completed req/s (iterations dropped, p99 44.5 s). The P99 < 2 s
-  target is not met. Conditions: one laptop, a Docker VM shared by about 14 compose stacks, one single-worker
-  gateway process, local Postgres and Redis, simulator acquirer, all load on 3 test cards (per-card lock
-  contention). So these numbers do not size a production pod; sizing still waits for a run on dedicated hardware
+  `constant-arrival-rate`): at an offered 2 req/s, p50 405 ms / p95 1.91 s / p99 2.82 s with 0 % errors (re-run on 2026-11-06 on a less loaded
+  VM: p50 72 ms / p95 524 ms / p99 1.25 s, target met); at an offered
+  40 req/s the first run saturated near 7 completed req/s (p99 44.5 s); the 2026-11-06 re-run shows one gateway process
+  is CPU-bound (p99 13.77 s) and that four uvicorn workers meet the target (p99 564 ms, local override, not the
+  committed default because metrics are per process). Conditions of the first runs: one laptop, a Docker VM shared by about 14 compose stacks, one single-worker
+  gateway process, local Postgres and Redis, simulator acquirer, all load on 3 test cards (the per-card lock
+  is held only in the claim transaction and was not the limit). So these numbers do not size a production pod; sizing still waits for a run on dedicated hardware
   with many distinct cards.
 - **Alternatives:** Vertical scaling of one Postgres (does not reach the target); a CRDT/eventually consistent balance
   (cannot guarantee "never overdraw" synchronously).

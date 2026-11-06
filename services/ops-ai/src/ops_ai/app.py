@@ -19,9 +19,10 @@ from ops_ai.agents.routes import create_agents_router
 from ops_ai.alerts.routes import create_alerts_router
 from ops_ai.analytics.access import ForbiddenOpsError, OpsAccess, require_ops_principal
 from ops_ai.analytics.routes import create_analytics_router
+from ops_ai.assistant.citations import UnsupportedReason
 from ops_ai.assistant.llm_port import LlmPort
 from ops_ai.assistant.routes import create_assistant_router
-from ops_ai.assistant.service import AnswerMode, ask
+from ops_ai.assistant.service import AnswerMode, GroundedAssistantAnswer, ask, ask_grounded
 from ops_ai.assistant.tool_calling import ToolCallingLlm
 from ops_ai.auth import InvalidTokenError, verify_token
 from ops_ai.bulk.routes import create_bulk_router
@@ -94,11 +95,38 @@ class EvidenceOut(BaseModel):
     summary: str
 
 
+GROUNDED_ASK_BY_DEFAULT = False
+"""R1-5: `?grounded=` default for /v1/assistant/ask. Flipping it makes the grounded answer the default."""
+
+
+class SourceExcerptOut(BaseModel):
+    ref: str
+    excerpt: str
+
+
+class CitedSentenceOut(BaseModel):
+    sentence: str
+    sources: list[SourceExcerptOut]
+
+
+class UnsupportedSentenceOut(BaseModel):
+    sentence: str
+    reason: UnsupportedReason
+    refs: list[str]
+
+
 class AskResponse(BaseModel):
+    """`grounded`, `citations`, `unsupported_sentences` and `relevant_refs` are present only with
+    `?grounded=true` (R1-5); without it the body is exactly mode, text, model, evidence."""
+
     mode: AnswerMode
     text: str | None
     model: str | None
     evidence: list[EvidenceOut]
+    grounded: bool = False
+    citations: list[CitedSentenceOut] = Field(default_factory=list)
+    unsupported_sentences: list[UnsupportedSentenceOut] = Field(default_factory=list)
+    relevant_refs: list[str] = Field(default_factory=list)
 
 
 class BinShareOut(BaseModel):
@@ -365,6 +393,7 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
     """Routes:
     - GET /healthz → 200 (liveness). GET /readyz → 200 ready, or 503 with the failed components.
     - POST /v1/assistant/ask (Authorization: Bearer <merchant token>) {question} → AskResponse.
+      `?grounded=true` (R1-5) adds per-sentence citations; see ops_ai.assistant.service.ask_grounded.
     - POST /v1/assistant/investigate (same auth and body as /ask) → InvestigateResponse; now = deps.clock().
     - POST /v1/assistant/investigate-transfer (Authorization: Bearer <user token>) {question, transfer_id?}
       → InvestigateTransferResponse with Cache-Control: no-store. Another sender's transfer and a missing one
@@ -432,21 +461,51 @@ def create_app(deps: OpsAiAppDeps) -> FastAPI:
             return JSONResponse({"status": "not_ready", "failed": failed}, status_code=503)
         return JSONResponse({"status": "ready"})
 
-    @app.post("/v1/assistant/ask")
-    def assistant_ask(body: AskRequest, scope: Annotated[Scope, Depends(merchant_scope)]) -> AskResponse:
+    @app.post("/v1/assistant/ask", response_model_exclude_unset=True)
+    def assistant_ask(
+        body: AskRequest,
+        scope: Annotated[Scope, Depends(merchant_scope)],
+        grounded: bool = GROUNDED_ASK_BY_DEFAULT,
+    ) -> AskResponse:
+        grounded_result: GroundedAssistantAnswer | None = None
         with deps.session_factory() as session:
-            answer = ask(session, scope, body.question, deps.llm, deps.embedder)
+            if grounded:
+                grounded_result = ask_grounded(session, scope, body.question, deps.llm, deps.embedder)
+                answer = grounded_result.answer
+            else:
+                answer = ask(session, scope, body.question, deps.llm, deps.embedder)
         try:
             with deps.session_factory.begin() as session:
                 escalate_assistant_turn(session, deps.clock, scope, body.question, answer.mode)
         except SQLAlchemyError as error:
             # The answer is already built; a failed escalation is logged by class name only (no question).
             logger.warning("assistant escalation failed: %s", type(error).__name__)
+        evidence = [EvidenceOut(ref=item.ref, summary=item.summary) for item in answer.evidence]
+        if grounded_result is None:
+            return AskResponse(mode=answer.mode, text=answer.text, model=answer.model, evidence=evidence)
+        grounding = grounded_result.grounding
         return AskResponse(
             mode=answer.mode,
             text=answer.text,
             model=answer.model,
-            evidence=[EvidenceOut(ref=item.ref, summary=item.summary) for item in answer.evidence],
+            evidence=evidence,
+            grounded=grounding is not None and grounding.grounded,
+            citations=[]
+            if grounding is None
+            else [
+                CitedSentenceOut(
+                    sentence=cited.sentence,
+                    sources=[SourceExcerptOut(ref=s.ref, excerpt=s.excerpt) for s in cited.sources],
+                )
+                for cited in grounding.citations
+            ],
+            unsupported_sentences=[]
+            if grounding is None
+            else [
+                UnsupportedSentenceOut(sentence=u.sentence, reason=u.reason, refs=list(u.refs))
+                for u in grounding.unsupported
+            ],
+            relevant_refs=list(grounded_result.relevant_refs),
         )
 
     @app.post("/v1/assistant/investigate", response_model_exclude_unset=True)

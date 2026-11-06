@@ -248,22 +248,25 @@ audit log の append-only は trigger と grant で実装済み。ただ superus
 
 ## 10. NFR: 計測した数字と、計測していないもの / NFR: what was measured and what was not
 
-> EN: Claim: the p99 < 2 s target is not met. Evidence: k6 at 2 req/s gives p99 2.82 s; at 40 req/s it saturates near 7 req/s; 0 % errors (`docs/perf/README.md`). Constraint: a shared laptop VM and 3 hot cards; 100k TPS, 99.999 % and multi-region are design only.
+> EN: Claim: the p99 < 2 s target is met at 2 req/s but not at 40 req/s. Evidence: k6 at 2 req/s gives p99 1.25 s on a less loaded VM (2.82 s on the shared VM); at 40 req/s one gateway process is CPU-bound (p99 13.8 s), while four uvicorn workers in a local override give p99 564 ms; 0 % errors (`docs/perf/README.md`). Constraint: a shared laptop VM, 3 hot cards, and the committed compose still runs one process; 100k TPS, 99.999 % and multi-region are design only.
 
 k6 で `POST /v1/payments`（card）を計測した。目標は p99 < 2 s かつ error < 1 %（`docs/perf/README.md`）。
 
 | 投入負荷 | 実測の処理量・完了数 | p50 | p95 | p99 | error | 目標 |
 |---|---|---|---|---|---|---|
-| 2 req/s | 181 件、drop なし | 405 ms | 1.91 s | **2.82 s** | 0 % | **未達** |
-| 40 req/s | 約 7 req/s で飽和。745 件、2,856 iteration を drop | 24.9 s | 41.4 s | 44.5 s | 0 % | **未達** |
+| 2 req/s（共有 VM、11-05） | 181 件、drop なし | 405 ms | 1.91 s | 2.82 s | 0 % | 未達 |
+| 2 req/s（負荷の少ない VM、11-06） | 181 件、drop なし | 72 ms | 524 ms | **1.25 s** | 0 % | **達成** |
+| 40 req/s（1 プロセス、commit 済み、11-06） | 3,044 件、556 iteration を drop | 3.98 s | 12.0 s | 13.8 s | 0 % | **未達** |
+| 40 req/s（uvicorn 4 worker、ローカル override、11-06） | 3,601 件、drop なし | 81 ms | 314 ms | **564 ms** | 0 % | **達成** |
 
-- 環境: 共有の laptop VM で、他の compose stack と同居。負荷は 3 枚の test カードに集中し、カードごとに lock がかかる
+- 環境: 共有の laptop VM で、他の compose stack と同居。40 req/s は gateway 1 プロセスの CPU 律速。4 worker なら満たすが、既定にするには metrics の multiprocess 対応が要る
 - **Design only**（コードも計測もない）: 100k TPS / 1 億 user（P2-7）、99.999 %（P2-2）、multi-region（P2-1）
 
 Note:
-0:45。目標は満たしていない、と最初に言う。error は 0 % で、5xx もない。遅さの主因は、3 枚のカードにかかる
-per-card lock の待ち行列。40 req/s を投入しても実際に捌けたのは約 7 req/s で、待ちは数十秒まで伸びた。
-つまりこれは hot card の競合試験で、本番構成（多数のカード、gateway の水平 replica）を測ったものではない。
+0:45。2 req/s では目標を満たす（負荷の少ない VM で p99 1.25 s）。40 req/s では満たしていない、と最初に言う。error は 0 % で、5xx もない。40 req/s の主因は
+gateway が 1 プロセスで CPU を使い切ること（docker stats で約 100〜130 %）。per-card lock は claim の短いトランザクション内だけなので主因ではない。
+同じコードを uvicorn 4 worker で動かすと 40 req/s で p99 564 ms になり目標を満たした。ただしこれはローカルの override で、commit 済みの compose は 1 プロセスのまま。
+4 worker を既定にするには、worker ごとに分かれる Prometheus metrics の multiprocess 対応が要る。本番構成（多数のカード、gateway の水平 replica）を測ったものではない。
 切り分けには 2 つ要る。(1) 専用マシン、(2) 多数の tokenised card を混ぜた負荷。
 今は allowlist の test PAN が 5 つしかないので、(2) ができない。
 100k TPS・99.999 %・multi-region は数字を出していない。設計だけ。
@@ -295,7 +298,7 @@ PR-1（同一 key 20 並列で provider 呼び出しが 1 回になるテスト�
 
 ## 12. 既知の gap・次の一手・まとめ / Known gaps, next steps and summary
 
-> EN: Claim: SQ1–SQ4 run end to end with checks, and the correctness core is pinned by tests. Evidence: traceability rows and `make demo`. Constraint: one known concurrent test failure, the perf target is missed, production scale is unmeasured; the reconciler comes first.
+> EN: Claim: SQ1–SQ4 run end to end with checks, and the correctness core is pinned by tests. Evidence: traceability rows and `make demo`. Constraint: one known concurrent test failure, the perf target is met at 2 req/s and at 40 req/s only with four workers in a local override, production scale is unmeasured; the reconciler comes first.
 
 **主な Partial**（全体は Appendix B）
 
@@ -311,7 +314,7 @@ PR-1（同一 key 20 並列で provider 呼び出しが 1 回になるテスト�
 4. key を入れ、LLM-judged eval を CI で回す
 
 **まとめ**: SQ1–SQ4 は tool が根拠を出し、check 付きで end to end に動く。正しさの核（idempotency・ledger）は
-テストで固定した。ただし既知の並列テスト失敗が 1 件ある。性能目標と本番規模は未達・未計測で、そのように表示している。
+テストで固定した。ただし既知の並列テスト失敗が 1 件ある。性能目標は 2 req/s でのみ達成、本番規模は未計測で、そのように表示している。
 
 Note:
 0:35。順番の理由。reconciler は正しさの穴なので、性能より先にやる。再計測は、設計判断の前提を確かめるため。

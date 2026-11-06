@@ -291,6 +291,47 @@ mock LLM). Values below are what the route returns on that seed:
 - `test_golden.py` shipped-case list gains `sq1_failure_route` (approved change of an existing test).
 - `make eval` scores the new case through the real API with every gate passed.
 
+## 12. Grounded `/ask` (R1-5, 11-06) — `ops_ai/assistant/citations.py`
+
+Opt-in: `POST /v1/assistant/ask?grounded=true`. Without the parameter (or with `grounded=false`) the body is
+exactly `{mode, text, model, evidence}` as before (`response_model_exclude_unset`, same pattern as
+`/investigate?judge=true`). The default is the constant `GROUNDED_ASK_BY_DEFAULT = False` in `ops_ai/app.py`;
+making grounded the default is that one line (plus updating the tests that pin the old body).
+
+- **Retrieval.** `ask_grounded` collects the same evidence as `ask` (decline aggregates + one hybrid search,
+  keyword and vector legs fused with RRF; the question is embedded once) and returns it all in `evidence`.
+- **Relevance rule** (`relevant_evidence`), decided before any LLM call. An evidence item is relevant when
+  (a) the vector leg returned it at cosine similarity ≥ `DEFAULT_MIN_SIMILARITY` (0.4), or (b) its ref or
+  summary shares at least one question term. Terms (`terms`) are alphanumeric words of ≥ 3 characters,
+  lower-cased, one plural `s` removed, minus a small stopword list (`card_declined` → `card`, `declined`).
+  Only relevant evidence is sent to the LLM; `relevant_refs` lists it.
+- **Cannot answer.** No relevant evidence → `text` = `"I cannot answer this from the available sources."`
+  (`CANNOT_ANSWER_TEXT`), `grounded=false`, `mode="llm"`, `model=null`, empty citations; the LLM is not called.
+  Because mode stays `llm`, no escalation ticket is opened (B12.1 opens one for `t2_fallback` only).
+- **Citing.** The request carries `require_citations=True`; `OpenAiLlm` then appends `CITATION_RULE` to its
+  fixed instructions (every sentence ends with the `[ref]` of each evidence item it uses; never cite a ref that is
+  not in the evidence). MockLlm already ends each line with `[ref]`.
+- **Per-sentence check** (`ground_answer`). The text is split into lines, then sentences (`.`, `!`, `?`); a
+  fragment holding only `[ref]`s is joined to the sentence before it. Per sentence:
+  - every cited ref is relevant evidence → kept, with one `{ref, excerpt}` per ref. The excerpt is a verbatim
+    substring of that evidence summary (≤ 160 characters, starting at the first summary word the sentence also
+    uses, cut back to a word boundary);
+  - any cited ref is not relevant evidence of this turn (not retrieved, or retrieved but not relevant) →
+    dropped, listed in `unsupported_sentences` with `reason="unknown_ref"` and its refs;
+  - no ref: kept only when it quotes whole consecutive sentences of one summary verbatim (≥ 12 characters, bullet,
+    whitespace and a final period normalised; a substring that drops a digit or a `not` does not count),
+    attributed to that item; otherwise dropped with `reason="no_citation"`.
+  `text` is the kept sentences, one per line; none kept → `CANNOT_ANSWER_TEXT` with `grounded=false`.
+- **Outage.** `LlmUnavailableError` → `t2_fallback`, `text=null`, `grounded=false`, empty citations (the
+  escalation ticket is opened as for `/ask`).
+- **Web.** The assistant panel shows a "Grounded citations" checkbox in the Ask mode; the answer then lists each
+  kept sentence with its refs and excerpts and the dropped sentences with the reason.
+- **Tests.** `ai/assistant/__tests__/test_citations.py`, `test_ask_grounded.py`, `test_openai_llm_citations.py`,
+  `ai/__tests__/test_ask_grounded_route.py`, `web/src/features/merchant/__tests__/AssistantPanel.grounded.test.tsx`.
+- **Not covered.** P2P transfers are not indexed in `search_documents`, so a user's transfer questions cannot be
+  grounded here (they go through `/investigate-transfer`). Relevance is lexical / spelling-level (no semantic
+  entailment check of a sentence against its excerpt).
+
 ## Out of scope here
 
 SQ2–SQ4, `change_timeline`, pgvector, the OpenAI adapter, re-anchoring an existing seed.
