@@ -39,6 +39,16 @@ caching [D2.6](#d26-caching-no-read-cache-by-choice), AI model selection [D5.7](
 sync vs async [D2.1](#d21-two-services-with-a-one-way-event-port), [D3.7](#d37-synchronous-rule-based-risk-scoring-the-flag-is-separate-from-the-status),
 [D5.4](#d54-card-testing-is-detected-twice-block-in-the-gateway-explain-in-ops-ai).
 
+### Key decisions at a glance
+
+| Topic | Choice | Main trade-off | Status | Details |
+|---|---|---|---|---|
+| Vector store | pgvector in the same Postgres, fused with full-text search by RRF | Default local embedder is feature hashing (not semantic); some paths still use full-text only | Tested | [D5.6](#d56-hybrid-search-postgres-full-text-plus-pgvector-fused-by-rrf) |
+| Message broker | Transactional outbox → relay → Redis Streams, deduped consumer | No exactly-once; single-node Redis; outbox kept forever in the demo | Tested | [D2.2](#d22-transactional-outbox-relay-redis-streams-deduped-projection) |
+| Caching | No read cache; money/account responses sent `no-store` | Repeated assistant questions re-run tools and the LLM | Tested | [D2.6](#d26-caching-no-read-cache-by-choice) |
+| AI model | LLM only narrates evidence from tools; never decides a payment; `MockLlm` in CI | CI does not measure real-model prose quality | Partial (real adapter tested against a fake server only) | [D5.7](#d57-ai-model-selection) |
+| Sync vs async | Money path and risk scoring synchronous; ops-ai fed asynchronously via events | ops-ai projection can lag (eventual consistency); risk is rule-based, no learned model | Tested | [D2.1](#d21-two-services-with-a-one-way-event-port), [D3.7](#d37-synchronous-rule-based-risk-scoring-the-flag-is-separate-from-the-status), [D5.4](#d54-card-testing-is-detected-twice-block-in-the-gateway-explain-in-ops-ai) |
+
 ---
 
 ## 1. Problem and users
