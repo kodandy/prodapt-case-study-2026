@@ -426,3 +426,61 @@ def applied_rule_version(session, scope: Scope, alert_id: uuid.UUID) -> int | No
   an alert with applied version = the revert row's version number. One merchant's version never changes another
   merchant's live alerting.
 - The SQ3 eval golden is unchanged (seeding writes no rule versions).
+
+## 7. Keyset paging of the rule history and audit (R2-7 follow-up, 11-06)
+
+Closes the R2-7 residual "history is unpaged": `GET /v1/feedback/fraud-rules` and `GET /v1/feedback/fraud-rules/audit`
+returned every version row of the merchant. No migration (the primary key (`merchant_id`, `version`) is the keyset),
+no change to `rule_history`, `rule_audit`, `RuleVersion`, `RuleAuditEntry`, `RuleVersionOut`, `RuleAuditEntryOut`,
+`FraudRulesOut` or `FraudRuleAuditOut`.
+
+### 7.1 Cursor codec — `ops_ai/feedback/paging.py`
+
+```python
+DEFAULT_PAGE_SIZE = 50
+MAX_PAGE_SIZE = 200
+MAX_CURSOR_LENGTH = 256
+CursorKind = Literal["history", "audit"]
+class InvalidCursorError(Exception)
+def encode_cursor(kind: CursorKind, merchant_id: uuid.UUID, version: int) -> str
+    # unpadded base64url of f"{kind}:{merchant_id}:{version}"; opaque to clients
+def decode_cursor(cursor: str, kind: CursorKind, merchant_id: uuid.UUID) -> int
+    # the version to continue below; InvalidCursorError unless the value is exactly what encode_cursor returns for
+    # this kind and this merchant with a version >= 1 (canonical: decoding then re-encoding gives the same string)
+```
+- A cursor is bound to the endpoint (`kind`) and to the token merchant: a history cursor sent to the audit route, or a
+  cursor issued to another merchant, is an InvalidCursorError (→ 422), never a page of anyone's rows. Garbage,
+  padding, non-base64url characters, a non-UUID merchant, a version < 1 or above 2147483647 (the int4 column), a
+  non-ASCII-decimal / signed / zero-padded version,
+  extra separators and non-ASCII bytes are all InvalidCursorError.
+- The cursor is not signed: a merchant who crafts a well-formed cursor for itself only chooses where its own history
+  starts, which the query scope already bounds.
+
+### 7.2 Page queries — `ops_ai/feedback/thresholds.py`
+
+```python
+@dataclass(frozen=True)
+class KeysetPage[T]:
+    items: list[T]
+    next_before: int | None   # the last item's version when more rows exist below it, else None
+def rule_history_page(session, scope, limit: int, before: int | None) -> KeysetPage[RuleVersion]
+def rule_audit_page(session, scope, limit: int, before: int | None) -> KeysetPage[RuleAuditEntry]
+```
+- Both: the scope merchant's rows only, `version < before` when `before` is set, `ORDER BY version DESC`, at most
+  `limit` items (one extra row is read to decide `next_before`). The items equal the matching slice of
+  `rule_history` / `rule_audit`; walking pages until `next_before is None` yields every row exactly once, in order,
+  even when new versions are appended between requests (they are newer than any cursor, so they appear only on a
+  fresh first page).
+
+### 7.3 Routes (merchant token, `Cache-Control: no-store`, 401/403 unchanged)
+
+Both routes take query `limit` (int 1..200, default 50; 0, 201, non-integer → 422) and `cursor` (1..256 chars,
+otherwise 422; an InvalidCursorError → 422 `{"detail": "invalid cursor"}` with `Cache-Control: no-store`).
+- `GET /v1/feedback/fraud-rules` → `{active, history, next_cursor?}`: `active` is always the newest version (not the
+  page's), `history` is the page.
+- `GET /v1/feedback/fraud-rules/audit` → `{entries, next_cursor?}`.
+- `next_cursor` is the cursor of the next page or `null` on the last page. Backward compatibility: when the request
+  carries neither `limit` nor `cursor` and the first page is also the last, the key is omitted, so the response is
+  byte-identical to the unpaged one (`{active, history}` / `{entries}`); a request with `limit` or `cursor` always
+  carries `next_cursor`, and a page with more rows below always carries a non-null `next_cursor`.
+- Unknown query parameters stay ignored (a `merchant_id` parameter never changes the scope).

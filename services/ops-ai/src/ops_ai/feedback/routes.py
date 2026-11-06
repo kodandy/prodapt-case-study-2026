@@ -3,12 +3,21 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from ops_ai.clock import Clock
+from ops_ai.feedback.paging import (
+    DEFAULT_PAGE_SIZE,
+    MAX_CURSOR_LENGTH,
+    MAX_PAGE_SIZE,
+    CursorKind,
+    InvalidCursorError,
+    decode_cursor,
+    encode_cursor,
+)
 from ops_ai.feedback.service import (
     FeedbackRejectedError,
     IncidentScore,
@@ -21,8 +30,8 @@ from ops_ai.feedback.thresholds import (
     RuleVersion,
     active_rule_version,
     revert_rule,
-    rule_audit,
-    rule_history,
+    rule_audit_page,
+    rule_history_page,
 )
 from ops_ai.scope import Scope
 
@@ -125,9 +134,42 @@ class FraudRuleAuditOut(BaseModel):
     entries: list[RuleAuditEntryOut]
 
 
+class FraudRulesPageOut(FraudRulesOut):
+    """`next_cursor` is left unset (omitted) on an unpaged request whose first page is the last (spec 7.3)."""
+
+    next_cursor: str | None = None
+
+
+class FraudRuleAuditPageOut(FraudRuleAuditOut):
+    next_cursor: str | None = None
+
+
+PageLimit = Annotated[int | None, Query(ge=1, le=MAX_PAGE_SIZE)]
+PageCursor = Annotated[str | None, Query(min_length=1, max_length=MAX_CURSOR_LENGTH)]
+
+
 def _rejected(reason: str) -> HTTPException:
     code, detail = _REJECTIONS[reason]
     return HTTPException(code, detail, headers=NO_STORE)
+
+
+def _before(cursor: str | None, kind: CursorKind, scope: Scope) -> int | None:
+    if cursor is None:
+        return None
+    try:
+        return decode_cursor(cursor, kind, scope.merchant_id)
+    except InvalidCursorError:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "invalid cursor", headers=NO_STORE
+        ) from None
+
+
+def _carries_next_cursor(next_before: int | None, limit: int | None, cursor: str | None) -> bool:
+    return next_before is not None or limit is not None or cursor is not None
+
+
+def _next_cursor(next_before: int | None, kind: CursorKind, scope: Scope) -> str | None:
+    return None if next_before is None else encode_cursor(kind, scope.merchant_id, next_before)
 
 
 def create_feedback_router(
@@ -161,26 +203,46 @@ def create_feedback_router(
             incident_score=IncidentScoreOut.of(result.incident_score),
         )
 
-    @router.get("/v1/feedback/fraud-rules")
+    @router.get(
+        "/v1/feedback/fraud-rules", response_model=FraudRulesPageOut, response_model_exclude_unset=True
+    )
     def get_fraud_rules(
-        scope: Annotated[Scope, Depends(merchant_scope)], response: Response
-    ) -> FraudRulesOut:
+        scope: Annotated[Scope, Depends(merchant_scope)],
+        response: Response,
+        limit: PageLimit = None,
+        cursor: PageCursor = None,
+    ) -> FraudRulesPageOut:
+        before = _before(cursor, "history", scope)
         with session_factory() as session:
             active = active_rule_version(session, scope)
-            history = rule_history(session, scope)
+            page = rule_history_page(session, scope, limit or DEFAULT_PAGE_SIZE, before)
         response.headers["Cache-Control"] = "no-store"
-        return FraudRulesOut(
-            active=RuleVersionOut.of(active), history=[RuleVersionOut.of(rule) for rule in history]
+        out = FraudRulesPageOut(
+            active=RuleVersionOut.of(active), history=[RuleVersionOut.of(rule) for rule in page.items]
         )
+        if _carries_next_cursor(page.next_before, limit, cursor):
+            out.next_cursor = _next_cursor(page.next_before, "history", scope)
+        return out
 
-    @router.get("/v1/feedback/fraud-rules/audit")
+    @router.get(
+        "/v1/feedback/fraud-rules/audit",
+        response_model=FraudRuleAuditPageOut,
+        response_model_exclude_unset=True,
+    )
     def get_fraud_rule_audit(
-        scope: Annotated[Scope, Depends(merchant_scope)], response: Response
-    ) -> FraudRuleAuditOut:
+        scope: Annotated[Scope, Depends(merchant_scope)],
+        response: Response,
+        limit: PageLimit = None,
+        cursor: PageCursor = None,
+    ) -> FraudRuleAuditPageOut:
+        before = _before(cursor, "audit", scope)
         with session_factory() as session:
-            entries = rule_audit(session, scope)
+            page = rule_audit_page(session, scope, limit or DEFAULT_PAGE_SIZE, before)
         response.headers["Cache-Control"] = "no-store"
-        return FraudRuleAuditOut(entries=[RuleAuditEntryOut.of(entry) for entry in entries])
+        out = FraudRuleAuditPageOut(entries=[RuleAuditEntryOut.of(entry) for entry in page.items])
+        if _carries_next_cursor(page.next_before, limit, cursor):
+            out.next_cursor = _next_cursor(page.next_before, "audit", scope)
+        return out
 
     @router.post("/v1/feedback/fraud-rules/revert", status_code=status.HTTP_201_CREATED)
     def post_revert(
