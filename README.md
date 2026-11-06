@@ -466,6 +466,12 @@ and is kept current per item:
   `last_seen_at` back (one consumer today, so latent). A failure in the watch rolls back the projection of that event.
 - Card testing: `origin == "live"` is self-declared by the event, so anyone who can write to the stream (no Redis ACL
   yet) can raise alerts.
+- Card testing: each new alert is sent once to an outbound channel (`ops-ai-notifier`, `docs/specs/sq3.md` N-4):
+  a signed HTTPS webhook when `OPS_AI_ALERT_WEBHOOK_URL` and `OPS_AI_ALERT_WEBHOOK_SECRET` (32+ characters) are set,
+  otherwise a log line, which is what the demo uses. Delivery is at least once (receivers dedupe on
+  `Idempotency-Key`); attempts are retried each pass with no backoff, and after 5 failures the row is `failed` with
+  nothing that replays or alerts on it. The payload is the snapshot at raise time, not later alert refreshes. The
+  secret is a plain environment variable, like `OPENAI_API_KEY`.
 - Stream: a malformed entry goes to `gw.payments.v1.dead` and is acked; nothing replays or alerts on that stream yet.
 - Settlement (SQ4): the gateway settlement batch, `gw.settlement.v1` and payouts are Design; settlement entries are
   seeded as the acquirer's report.

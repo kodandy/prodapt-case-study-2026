@@ -13,6 +13,7 @@ from ops_ai.feedback import thresholds
 from ops_ai.fraud_watch.analysis import CardTestingEpisode, analyze_fraud
 from ops_ai.fraud_watch.models import FraudAlert, FraudAlertRuleVersion
 from ops_ai.fraud_watch.rules import LIVE_LOOKBACK_MINUTES, is_micro
+from ops_ai.notify import enqueue_alert_notification
 from ops_ai.scope import Scope
 from ops_ai.tickets import TicketSource, route_ticket
 from ops_ai.tickets.models import Ticket
@@ -128,6 +129,15 @@ def _upsert_alert(
         fraud_alert_id=inserted,
         title=TICKET_TITLE,
         body=_ticket_reason(episode),
+    )
+    enqueue_alert_notification(
+        session,
+        clock,
+        fraud_alert_id=inserted,
+        merchant_id=event.merchant_id,
+        kind=CARD_TESTING_KIND,
+        payment_count=episode.micro_payments,
+        features=features,
     )
     logger.info(
         "fraud alert raised alert_id=%s merchant_id=%s payment_count=%d",
