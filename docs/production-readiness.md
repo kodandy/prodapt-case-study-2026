@@ -24,7 +24,7 @@ in [docs/perf](perf/README.md).
 
 | NFR id | Requirement (short) | Status | Evidence |
 | --- | --- | --- | --- |
-| NFR-PERF | Card `POST /v1/payments`: p99 < 2 s, error rate < 1 % | Measured locally; target **met at 2 req/s, not at 40 req/s** | [Results](perf/README.md): 2 req/s on a less loaded VM (2026-11-06), p50 72 ms, p95 524 ms, p99 1.25 s, 0 % errors (first run on the shared VM: p99 2.82 s); 40 req/s, p99 44.5 s with dropped iterations. Shared Docker VM on an Apple silicon laptop, three hot test cards; no production-load proof. [k6](../ops/perf/payments.js). |
+| NFR-PERF | Card `POST /v1/payments`: p99 < 2 s, error rate < 1 % | Measured locally; target **met at 2 req/s, not at 40 req/s** | [Results](perf/README.md): 2 req/s on a less loaded VM (2026-11-06), p50 72 ms, p95 524 ms, p99 1.25 s, 0 % errors (first run on the shared VM: p99 2.82 s); 40 req/s (2026-11-06): one gateway process p99 13.77 s with dropped iterations (CPU-bound); four uvicorn workers in a local override p99 564 ms, 0 % errors (not the committed default; needs multiprocess metrics). Shared Docker VM on an Apple silicon laptop, three hot test cards; no production-load proof. [k6](../ops/perf/payments.js). |
 | NFR-PERF (assistant) | Separate assistant SLO: p95 < 20 s, with fallback | Design only (latency SLO) | [Architecture §8](architecture-detail.md#8-claims-we-make-about-the-nfrs); fallback behavior is tested in [LLM tests](../services/ops-ai/src/ops_ai/observability/__tests__/test_llm_instrumentation.py), `test_complete_on_unavailable_counts_the_fallback_and_reraises_the_same_error`. |
 | NFR-SCALE | 100k TPS / 100M users | Design only | [Design P2-7](design.md#p2-7-100k-tps-topology): stateless replicas, partitioning, home-region sharding and Pub/Sub; sizing is an estimate. |
 | NFR-AVAIL | 99.999 % payment write-path availability (≈ 26 s/month error budget) | Design only (availability target) | [Design P2-2](design.md#p2-2-99999--availability): SPOFs, failover and error-budget policy. Single-container dependencies remain locally. |
@@ -127,7 +127,8 @@ Other open gaps, with the document that holds the detail:
   a crash between the provider call and finalization leaves that key answering 409. `settle_payout` is the entry
   point a payout reconciler would call (traceability B2.5, P0-4; [design D3.3](design.md#d33-an-unknown-outcome-is-stored-as-202-and-never-retried-with-a-new-key)).
 - **Card payment latency:** the k6 p99 < 2 s target for card `POST /v1/payments` is met at 2 req/s (p99 1.25 s on a
-  less loaded VM) but not at 40 req/s, which saturates near 7 req/s on 3 hot test cards (see NFR-PERF above and
+  less loaded VM) but not at 40 req/s with the committed one-process gateway (CPU-bound, p99 13.77 s). Four uvicorn workers meet it
+  (p99 564 ms) in a local override; making that the default needs Prometheus multiprocess metrics (see NFR-PERF above and
   [docs/perf](perf/README.md)).
 - **gRPC TLS in the demo:** TLS is implemented and tested, but the compose demo runs plaintext gRPC bound to
   127.0.0.1 (`GATEWAY_GRPC_INSECURE=true`); any deployment beyond loopback must set the certificate paths.
