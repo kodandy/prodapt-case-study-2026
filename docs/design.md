@@ -678,6 +678,32 @@ Where each lock is, and what proves it:
   [`test_audit_append_only.py`](../services/gateway/src/gateway/audit/__tests__/test_audit_append_only.py)
   (UPDATE/DELETE/TRUNCATE rejected as `gateway_app`, rollback when the audit insert fails).
 
+### D6.7 Unknown country is treated as cross-border (R2-10)
+
+- **Decision:** In `screen_operation` (`gw/compliance/kyc.py`) a transfer is cross-border when it has a live recipient
+  (a user who is not erased and not the sender) and either country is unknown or the two countries differ. A blocked
+  operation writes an audit row with `sender_country_unknown` / `recipient_country_unknown` and returns the generic
+  403 `{"error":"kyc_reverification_required"}`.
+- **Why:** Fail-closed. A missing self-declared country (never set, or nulled by GDPR erasure) must not let a
+  transfer skip the stricter cross-border KYC gate.
+- **What we gave up:** Users without a country cannot send P2P transfers until they set one or are verified. The
+  country is still self-declared, so a user can claim the recipient's country; the real fix is a country taken from
+  the verified KYC document.
+- **Alternatives:** Treat unknown as domestic (fail-open, rejected); block only the unknown-recipient side.
+- **Evidence:** [`test_kyc_unknown_country.py`](../services/gateway/src/gateway/compliance/__tests__/test_kyc_unknown_country.py).
+
+### D6.8 Rule changes record which API key acted (R2-7)
+
+- **Decision:** Merchant tokens carry an `api_key_id` claim, validated as a canonical UUID and rejected on user and
+  ops tokens. ops-ai records each fraud-rule version change with `actor_kind` and `actor_id` (migration
+  `f3c8a1d6e9b4`, check constraints), read only within the token's tenant.
+- **Why:** A merchant principal plus role says *which merchant* changed a rule, not *which credential*. The key id makes
+  a change traceable to one issued key and revocable.
+- **What we gave up:** The actor is an API key, not a named person; a per-user `sub` on merchant tokens would need a
+  merchant user login, which is not built. Legacy rows have no actor.
+- **Alternatives:** Require a human user id for every rule change (forbids API-key-only automation).
+- **Evidence:** [`test_rule_actor_identity.py`](../services/ops-ai/src/ops_ai/feedback/__tests__/test_rule_actor_identity.py).
+
 ---
 
 ## 7. Web client
