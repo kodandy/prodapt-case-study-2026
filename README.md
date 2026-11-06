@@ -471,7 +471,12 @@ and is kept current per item:
   otherwise a log line, which is what the demo uses. Delivery is at least once (receivers dedupe on
   `Idempotency-Key`); attempts are retried each pass with no backoff, and after 5 failures the row is `failed` with
   nothing that replays or alerts on it. The payload is the snapshot at raise time, not later alert refreshes. The
-  secret is a plain environment variable, like `OPENAI_API_KEY`.
+  secret is a plain environment variable, like `OPENAI_API_KEY`, with no key id for rotation. Retries do not tell 4xx
+  from 429/5xx, and a `failed` row neither logs nor counts in metrics. The URL is operator configuration only, so
+  private or internal destinations are not refused (`https` makes TLS fail for an internal host); a
+  merchant-configurable URL would need a resolved-address deny list first. Hardened after the security audit: the
+  URL never reaches a log (httpx's request log is raised to WARNING), the response body is never read, proxy env vars
+  are ignored, and each row is claimed, sent and updated in its own transaction.
 - Stream: a malformed entry goes to `gw.payments.v1.dead` and is acked; nothing replays or alerts on that stream yet.
 - Settlement (SQ4): the gateway settlement batch, `gw.settlement.v1` and payouts are Design; settlement entries are
   seeded as the acquirer's report.

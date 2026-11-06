@@ -94,15 +94,21 @@ def deliver_alert_notifications(
     """Sends pending notifications oldest first; returns the number delivered. At least once: a crash
     after the send and before the commit resends, and the receiver dedupes on the notification id."""
     delivered = 0
-    with session_factory.begin() as session:
-        rows = session.scalars(
-            select(AlertNotification)
-            .where(AlertNotification.status == "pending")
-            .order_by(AlertNotification.created_at, AlertNotification.notification_id)
-            .limit(limit)
-            .with_for_update(skip_locked=True)
-        ).all()
-        for row in rows:
+    tried: list[uuid.UUID] = []
+    for _ in range(limit):
+        # One row per transaction: a slow receiver holds one row lock, never the batch.
+        with session_factory.begin() as session:
+            row = session.scalars(
+                select(AlertNotification)
+                .where(AlertNotification.status == "pending")
+                .where(AlertNotification.notification_id.not_in(tried))
+                .order_by(AlertNotification.created_at, AlertNotification.notification_id)
+                .limit(1)
+                .with_for_update(skip_locked=True)
+            ).first()
+            if row is None:
+                break
+            tried.append(row.notification_id)
             body = json.dumps(row.payload, sort_keys=True, separators=(",", ":")).encode()
             try:
                 sink.send(AlertNotificationMessage(row.notification_id, body), clock())

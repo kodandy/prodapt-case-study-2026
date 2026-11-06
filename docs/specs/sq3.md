@@ -430,6 +430,21 @@ def deliver_alert_notifications(session_factory, sink: AlertSink, clock, limit: 
     `follow_redirects=False`.
 - Worker: `python -m ops_ai.notify [--once]` (compose service `ops-ai-notifier`, also started by the `demo` service).
   Nothing logs the URL, the secret, the signature or the body.
+- Hardening (security audit of SQ3, findings M1/M2/L1/L4):
+  - Building a webhook sink with `load_alert_sink` raises the `httpx` and `httpcore` loggers to `WARNING`, so even
+    with the root logger at `INFO` a delivered POST leaves no log line holding the URL (httpx logs every request
+    URL at `INFO`).
+  - `WebhookAlertSink.send` uses `client.stream` and never reads the response body: only the status counts, so a
+    huge or endless body cannot exhaust memory or hold the delivery.
+  - Any exception other than `httpx.HTTPError` raised by the client also becomes `AlertSinkError(<class name>)`, so
+    one bad send cannot roll back the batch.
+  - The client from `load_alert_sink` has `trust_env=False`: proxy and certificate env vars are ignored.
+  - `deliver_alert_notifications` claims, sends and updates one row per transaction (`FOR UPDATE SKIP LOCKED`,
+    oldest first, at most `limit` rows, each row tried at most once per call). While the sink is sending one row,
+    every other pending row stays unlocked, so a slow receiver holds one row lock at a time, never the batch.
+  - Private or internal IP destinations are not refused: the URL comes only from operator configuration, https
+    makes TLS verification fail for any internal host, and an internal receiver is a legitimate setup. A
+    merchant-configurable URL would need a resolved-address deny list first.
 
 ### N-5. Tests (new files only)
 

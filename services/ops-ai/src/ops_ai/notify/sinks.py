@@ -49,11 +49,13 @@ class WebhookAlertSink:
             "X-Payplat-Signature": f"v1={digest}",
         }
         try:
-            response = self._client.post(self._url, content=message.body, headers=headers)
-        except httpx.HTTPError as error:
+            # The body is never read: only the status counts, so a huge or endless body cannot hold the send.
+            with self._client.stream("POST", self._url, content=message.body, headers=headers) as response:
+                status = response.status_code
+        except Exception as error:
             raise AlertSinkError(type(error).__name__) from None
-        if not 200 <= response.status_code < 300:
-            raise AlertSinkError(f"http_{response.status_code}")
+        if not 200 <= status < 300:
+            raise AlertSinkError(f"http_{status}")
 
 
 def _valid_webhook_url(url: str) -> bool:
@@ -79,5 +81,8 @@ def load_alert_sink(environ: Mapping[str, str]) -> AlertSink:
     secret = environ.get(WEBHOOK_SECRET_ENV, "")
     if len(secret) < MIN_SECRET_LENGTH:
         raise ValueError(_SECRET_ERROR)
-    client = httpx.Client(timeout=WEBHOOK_TIMEOUT_SECONDS, follow_redirects=False)
+    # httpx logs every request URL at INFO; a webhook URL can itself be a credential.
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+    client = httpx.Client(timeout=WEBHOOK_TIMEOUT_SECONDS, follow_redirects=False, trust_env=False)
     return WebhookAlertSink(url, secret, client)
