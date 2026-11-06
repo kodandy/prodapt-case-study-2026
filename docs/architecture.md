@@ -41,10 +41,10 @@ flowchart LR
     subgraph pg["postgres · pgvector/pgvector:pg16"]
       sgw[("schema gateway<br/>users, merchants, api_keys, ops_users, user_totp, kyc<br/>payments, attempts, refunds, disputes, payouts<br/>idempotency_keys, card_tokens (no PAN)<br/>ledger accounts, journal_entries, postings, fx_rates<br/>outbox, audit_log, notifications")]
       ssim[("schema simulator<br/>charges")]
-      sops[("schema ops_ai<br/>payment_facts, transfer_facts, settlement_entries<br/>search_documents (tsvector + pgvector)<br/>incidents, tickets, feedback, merchant_memory<br/>fraud_alerts, fraud_rule_versions, alert_notifications<br/>ops_alerts, anomaly_alerts, agent_messages")]
+      sops[("schema ops_ai<br/>payment_facts, transfer_facts, settlement_entries<br/>search_documents (tsvector + pgvector)<br/>incidents, tickets, feedback, merchant_memory<br/>fraud_alerts, fraud_rule_versions (+ actor key id), alert_notifications<br/>dispute_workflows, dispute_workflow_steps<br/>ops_alerts, anomaly_alerts, agent_messages")]
     end
 
-    redis[("redis 7.4<br/>idem:* in-flight locks<br/>streams gw.payments.v1, gw.notifications.v1, .dead<br/>ops_ai:agent_messages (+ per-tenant)")]
+    redis[("redis 7.4<br/>idem:* in-flight locks<br/>streams gw.payments.v1, gw.disputes.v1,<br/>gw.compliance.v1, gw.notifications.v1, .dead<br/>ops_ai:agent_messages (+ per-tenant)")]
 
     secrets["demo-secrets<br/>one-shot"]
     migrate["migrate<br/>one-shot: alembic gateway + ops-ai"]
@@ -59,6 +59,7 @@ flowchart LR
 
   browser -->|"HTTP :8082"| web
   web -->|"/api/gw/*"| gwapi
+  web -->|"ops sign-in: password + TOTP<br/>ops token in memory only"| gwapi
   web -->|"/api/ops/*"| opsapi
   merchantsrv -->|"POST /v1/payments<br/>API key + Idempotency-Key"| gwapi
   merchantsrv -->|"gRPC"| gwgrpc
@@ -73,7 +74,7 @@ flowchart LR
 
   seed -->|"synthetic dataset applied<br/>with the consumer's apply_payment_event"| sops
   consumer -->|"XREADGROUP · XACK · dead-letter"| redis
-  consumer -->|"upsert projections, index,<br/>fraud alerts + notification outbox<br/>(one tx with dedupe)"| sops
+  consumer -->|"upsert projections (payments, disputes), index,<br/>fraud alerts + notification outbox<br/>(one tx with dedupe)"| sops
   opsapi -->|"SQL read scoped by token tenant"| sops
   opsapi -->|"agent stream mirror"| redis
   opsapi -.->|"redacted evidence · query embeddings"| openai
