@@ -7,7 +7,8 @@ from ops_ai.evaluation.golden import GoldenCase, load_golden_cases, score_case
 
 GOLDEN_DIR = Path(__file__).resolve().parents[4] / "eval" / "golden"
 FOREIGN = frozenset({"mch_foreign"})
-# Relevancy averages the field check with the tool-call check, which always passes here (none expected, none made).
+# Relevancy averages the field check with the tool-call check,
+# which always passes here (none expected, none made).
 FIELD_MISSED_SCORE = 0.5
 
 
@@ -27,7 +28,10 @@ def _case(fields: dict[str, object]) -> GoldenCase:
 def _body() -> dict[str, object]:
     return {
         "abstained": False,
-        "comparison": {"elevated": True, "window": {"by_bin": [{"card_bin": "400000"}, {"card_bin": "411111"}]}},
+        "comparison": {
+            "elevated": True,
+            "window": {"by_bin": [{"card_bin": "400000"}, {"card_bin": "411111"}]},
+        },
         "reasons": [{"taxonomy_code": "issuer_unavailable"}, {"taxonomy_code": "expired_card"}],
         "fixes": [],
         "evidence": [],
@@ -106,7 +110,11 @@ def test_sq1_failure_route_golden_targets_the_failure_route_with_list_paths() ->
     case = next(case for case in load_golden_cases(GOLDEN_DIR) if case.case_id == "sq1_failure_route")
 
     # Assert
-    assert (case.route, case.principal, case.sample_query) == ("/v1/assistant/failures", "sq1_merchant", "SQ1")
+    assert (case.route, case.principal, case.sample_query) == (
+        "/v1/assistant/failures",
+        "sq1_merchant",
+        "SQ1",
+    )
     assert case.expect.fields["reasons.0.taxonomy_code"] == "issuer_unavailable"
     assert case.expect.fields["fixes.0.taxonomy_code"] == "issuer_unavailable"
     assert case.expect.tool_calls == (
