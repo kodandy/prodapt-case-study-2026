@@ -3,9 +3,11 @@ import { ServicesProvider, type AppServices } from "./app/services";
 import { DashboardArea } from "./features/dashboard/DashboardArea";
 import { MerchantArea } from "./features/merchant/MerchantArea";
 import { OpsConsole } from "./features/ops/OpsConsole";
+import { OpsServicesProvider, type OpsServices } from "./features/ops/opsServices";
 import { UserArea } from "./features/user/UserArea";
 import { createApiClient } from "./lib/api";
 import { createAuthStore } from "./lib/authStore";
+import { createOpsApiClient, createOpsSessionStore } from "./lib/opsSession";
 
 type Area = "user" | "merchant" | "dashboard" | "ops";
 
@@ -34,23 +36,29 @@ export function App(): ReactNode {
     const store = createAuthStore();
     return { store, client: createApiClient({ fetch: (input, init) => fetch(input, init), store }) };
   }, []);
+  const opsServices = useMemo<OpsServices>(() => {
+    const store = createOpsSessionStore();
+    return { store, client: createOpsApiClient({ fetch: (input, init) => fetch(input, init), store }) };
+  }, []);
   const [area, setArea] = useState<Area>("user");
 
   return (
     <ServicesProvider services={services}>
-      <header className="app-header">
-        <h1>PayPlat</h1>
-        <nav aria-label="Area">
-          {AREAS.map((a) => (
-            <button key={a.id} type="button" className="tab" aria-pressed={area === a.id} onClick={() => setArea(a.id)}>
-              {a.label}
-            </button>
-          ))}
-        </nav>
-      </header>
-      <main>
-        <AreaView area={area} />
-      </main>
+      <OpsServicesProvider services={opsServices}>
+        <header className="app-header">
+          <h1>PayPlat</h1>
+          <nav aria-label="Area">
+            {AREAS.map((a) => (
+              <button key={a.id} type="button" className="tab" aria-pressed={area === a.id} onClick={() => setArea(a.id)}>
+                {a.label}
+              </button>
+            ))}
+          </nav>
+        </header>
+        <main>
+          <AreaView area={area} />
+        </main>
+      </OpsServicesProvider>
     </ServicesProvider>
   );
 }

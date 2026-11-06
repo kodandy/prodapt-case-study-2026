@@ -41,6 +41,43 @@ function RiskRow(props: { item: RiskItem }): ReactNode {
   );
 }
 
+/** The risk body without loading; the ops console reuses it for a merchant chosen by ops staff. */
+export function ChargebackRiskView(props: { data: ChargebackRiskResponse }): ReactNode {
+  const { data } = props;
+  return (
+    <>
+      <p>{`Merchant chargeback rate ${formatPercent(data.merchant_chargeback_rate)}`}</p>
+      <p className="hint">{modelLine(data.model)}</p>
+      <p className="hint">{`Scores come from a model trained on synthetic labels (${data.model.trained_on}); treat them as a ranking, not a verdict.`}</p>
+      {data.items.length === 0 ? (
+        <p className="muted">No recent captured payments to score.</p>
+      ) : (
+        <table>
+          <caption className="sr-only">Payments ranked by chargeback probability</caption>
+          <thead>
+            <tr>
+              <th scope="col">Payment</th>
+              <th scope="col">Time</th>
+              <th scope="col" className="num">
+                Amount
+              </th>
+              <th scope="col" className="num">
+                Probability
+              </th>
+              <th scope="col">Top factor</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.items.map((item) => (
+              <RiskRow key={item.payment_id} item={item} />
+            ))}
+          </tbody>
+        </table>
+      )}
+    </>
+  );
+}
+
 export function ChargebackRiskPanel(): ReactNode {
   const { client } = useServices();
   const [data, setData] = useState<ChargebackRiskResponse | null>(null);
@@ -69,38 +106,7 @@ export function ChargebackRiskPanel(): ReactNode {
     <section aria-labelledby="risk-title">
       <h2 id="risk-title">Chargeback risk</h2>
       {error === null ? null : <p role="alert">{error}</p>}
-      {data === null ? null : (
-        <>
-          <p>{`Merchant chargeback rate ${formatPercent(data.merchant_chargeback_rate)}`}</p>
-          <p className="hint">{modelLine(data.model)}</p>
-          <p className="hint">{`Scores come from a model trained on synthetic labels (${data.model.trained_on}); treat them as a ranking, not a verdict.`}</p>
-          {data.items.length === 0 ? (
-            <p className="muted">No recent captured payments to score.</p>
-          ) : (
-            <table>
-              <caption className="sr-only">Payments ranked by chargeback probability</caption>
-              <thead>
-                <tr>
-                  <th scope="col">Payment</th>
-                  <th scope="col">Time</th>
-                  <th scope="col" className="num">
-                    Amount
-                  </th>
-                  <th scope="col" className="num">
-                    Probability
-                  </th>
-                  <th scope="col">Top factor</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.items.map((item) => (
-                  <RiskRow key={item.payment_id} item={item} />
-                ))}
-              </tbody>
-            </table>
-          )}
-        </>
-      )}
+      {data === null ? null : <ChargebackRiskView data={data} />}
     </section>
   );
 }

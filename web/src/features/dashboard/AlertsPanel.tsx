@@ -20,7 +20,7 @@ function newestFirst(a: AnomalyAlert, b: AnomalyAlert): number {
 }
 
 /** A later copy of an alert_id replaces the earlier one (the server upserts alerts while a bucket fills). */
-function merge(previous: AnomalyAlert[] | null, incoming: AnomalyAlert[]): AnomalyAlert[] {
+export function mergeAlerts<T extends AnomalyAlert>(previous: T[] | null, incoming: T[]): T[] {
   const byId = new Map((previous ?? []).map((alert) => [alert.alert_id, alert]));
   for (const alert of incoming) byId.set(alert.alert_id, alert);
   return [...byId.values()].sort(newestFirst).slice(0, MAX_ALERTS_SHOWN);
@@ -30,11 +30,12 @@ function valueText(alert: AnomalyAlert, value: number): string {
   return alert.metric === "volume" ? String(Math.round(value)) : formatPercent(value);
 }
 
-function AlertItem(props: { alert: AnomalyAlert }): ReactNode {
+/** `merchantId` and `action` are set only by the ops console's cross-merchant list. */
+export function AlertItem(props: { alert: AnomalyAlert; merchantId?: string; action?: ReactNode }): ReactNode {
   const { alert } = props;
   const label = METRIC_LABELS.get(alert.metric) ?? alert.metric;
   return (
-    <li data-testid="alert-item" data-alert-id={alert.alert_id} className="alert-item">
+    <li data-testid="alert-item" data-alert-id={alert.alert_id} data-merchant-id={props.merchantId} className="alert-item">
       <strong>{label}</strong>
       {alert.detail === null ? null : (
         <>
@@ -44,6 +45,7 @@ function AlertItem(props: { alert: AnomalyAlert }): ReactNode {
       )}
       <span>{` ${valueText(alert, alert.observed)} vs expected ${valueText(alert, alert.expected)} · z=${alert.zscore.toFixed(1)}`}</span>
       <span className="hint">{` · ${alert.attempts} attempts in the window from ${formatUtcMinute(alert.bucket_start)}`}</span>
+      {props.action}
     </li>
   );
 }
@@ -72,7 +74,7 @@ export function AlertsPanel(props: { pollMs?: number }): ReactNode {
       if (result.ok) {
         since = result.data.server_time;
         const items = result.data.items;
-        setAlerts((previous) => merge(previous, items));
+        setAlerts((previous) => mergeAlerts(previous, items));
       }
       timer = setTimeout(() => void poll(), pollMs);
     }

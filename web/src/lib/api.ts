@@ -55,30 +55,8 @@ export function createApiClient(deps: ApiClientDeps): ApiClient {
     return null;
   }
 
-  async function send<T>(req: ApiRequest, token: string | null): Promise<ApiResult<T>> {
-    const url = buildUrl(req);
-    const headers: Record<string, string> = {};
-    if (token !== null) headers["Authorization"] = `Bearer ${token}`;
-    if (req.idempotencyKey !== undefined) headers["Idempotency-Key"] = req.idempotencyKey;
-    const init: RequestInit = { method: req.method ?? "GET", headers, cache: "no-store" };
-    if (req.body !== undefined) {
-      headers["Content-Type"] = "application/json";
-      init.body = JSON.stringify(req.body);
-    }
-    const attempts = 1 + Math.max(0, req.retries ?? 0);
-    let last: ApiResult<T> = NETWORK_ERROR;
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      let response: Response;
-      try {
-        response = await deps.fetch(url, init);
-      } catch {
-        last = NETWORK_ERROR;
-        continue;
-      }
-      last = await toResult<T>(response);
-      if (!RETRYABLE.has(response.status)) return last;
-    }
-    return last;
+  function send<T>(req: ApiRequest, token: string | null): Promise<ApiResult<T>> {
+    return sendRequest<T>(deps.fetch, req, token);
   }
 
   async function refreshOpsToken(): Promise<string | null> {
@@ -111,12 +89,43 @@ export function createApiClient(deps: ApiClientDeps): ApiClient {
   };
 }
 
+/** One request with an explicit bearer token (or none), retried per `req.retries`; shared by the ops client. */
+export async function sendRequest<T>(
+  fetchFn: typeof fetch,
+  req: Omit<ApiRequest, "auth">,
+  token: string | null,
+): Promise<ApiResult<T>> {
+  const url = buildUrl(req);
+  const headers: Record<string, string> = {};
+  if (token !== null) headers["Authorization"] = `Bearer ${token}`;
+  if (req.idempotencyKey !== undefined) headers["Idempotency-Key"] = req.idempotencyKey;
+  const init: RequestInit = { method: req.method ?? "GET", headers, cache: "no-store" };
+  if (req.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(req.body);
+  }
+  const attempts = 1 + Math.max(0, req.retries ?? 0);
+  let last: ApiResult<T> = NETWORK_ERROR;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    let response: Response;
+    try {
+      response = await fetchFn(url, init);
+    } catch {
+      last = NETWORK_ERROR;
+      continue;
+    }
+    last = await toResult<T>(response);
+    if (!RETRYABLE.has(response.status)) return last;
+  }
+  return last;
+}
+
 const RETRYABLE: ReadonlySet<number> = new Set([502, 503, 504]);
 const NETWORK_ERROR = { ok: false, status: 0, code: "network_error", body: null } as const;
-const NOT_SIGNED_IN = { ok: false, status: 401, code: "not_signed_in", body: null } as const;
+export const NOT_SIGNED_IN = { ok: false, status: 401, code: "not_signed_in", body: null } as const;
 const PREFIX: Record<ApiBase, string> = { gw: "/api/gw", ops: "/api/ops" };
 
-function buildUrl(req: ApiRequest): string {
+function buildUrl(req: Omit<ApiRequest, "auth">): string {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(req.query ?? {})) {
     if (value !== undefined) params.append(key, String(value));
