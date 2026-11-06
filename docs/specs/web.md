@@ -97,8 +97,12 @@ Two ways in, both under the "Ops console" tab:
   (`GET /api/ops/v1/ops/analytics/alerts`, polled every 15 s with the `since` cursor) and, for a merchant id typed in
   or picked from an alert, the settlement forecast and chargeback risk (`/v1/ops/analytics/forecast` and
   `/chargeback-risk` with `merchant_id`). Every ops-ai call carries the ops-ai token, never the session token and never
-  the merchant key. A 401 on the ops-ai token triggers one refresh through the session; a 401 that survives, or a
-  401 on the session, clears the ops store and returns to the sign-in form. A 403 keeps the session and shows
+  the merchant key. A 401 on the ops-ai token triggers one refresh through the session; a 401 that survives, a 401
+  on the refresh, or a 401 on the session clears the ops store and returns to the sign-in form. A refresh that fails
+  otherwise (503, network error, 403) keeps the session and shows the original error. Each request remembers the
+  session it started under, so a late 401 from before a sign-out and re-sign-in never clears or refreshes the newer
+  session. The client refuses (throws) to send the session token anywhere but the gateway or the ops-ai token
+  anywhere but ops-ai, and a body that cannot be read counts as a network error. A 403 keeps the session and shows
   "Your role cannot open this view." No server endpoint was added and nginx needed no change: `/api/gw/` and
   `/api/ops/` already proxy these paths, and the routes nginx 404s on purpose stay blocked.
 - **Merchant-scoped demo.** Without an ops account, the merchant API key opens the earlier panels (NL failure query,

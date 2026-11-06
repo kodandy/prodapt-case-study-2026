@@ -38,8 +38,16 @@ export function OpsMerchantAnalytics(props: { requested: { merchantId: string; s
 
   const load = useCallback(
     async (merchantId: string): Promise<void> => {
-        const seq = ++latest.current;
-        setPending(true);
+      const seq = ++latest.current;
+      if (!UUID.test(merchantId)) {
+        setPending(false);
+        setInputError("Enter the merchant's ID (a UUID).");
+        return;
+      }
+      setInputError(null);
+      setPending(true);
+      let next: Loaded;
+      try {
         const [forecast, risk] = await Promise.all([
           client.request<ForecastResponse>({
             base: "ops",
@@ -54,15 +62,19 @@ export function OpsMerchantAnalytics(props: { requested: { merchantId: string; s
             query: { merchant_id: merchantId, limit: RISK_LIMIT },
           }),
         ]);
-        if (!mounted.current || seq !== latest.current) return;
-        setPending(false);
         const failed = !forecast.ok ? forecast : !risk.ok ? risk : null;
-        setLoaded({
+        next = {
           merchantId,
           forecast: forecast.ok ? forecast.data : null,
           risk: risk.ok ? risk.data : null,
           error: failed === null || failed.ok ? null : messageFor(failed.code),
-        });
+        };
+      } catch {
+        next = { merchantId, forecast: null, risk: null, error: messageFor("network_error") };
+      }
+      if (!mounted.current || seq !== latest.current) return;
+      setPending(false);
+      setLoaded(next);
     },
     [client],
   );
@@ -71,19 +83,12 @@ export function OpsMerchantAnalytics(props: { requested: { merchantId: string; s
   useEffect(() => {
     if (requested === null) return;
     setInput(requested.merchantId);
-    setInputError(null);
     void load(requested.merchantId);
   }, [requested, load]);
 
   function submit(event: FormEvent): void {
     event.preventDefault();
-    const merchantId = input.trim();
-    if (!UUID.test(merchantId)) {
-      setInputError("Enter the merchant's ID (a UUID).");
-      return;
-    }
-    setInputError(null);
-    void load(merchantId);
+    void load(input.trim());
   }
 
   return (
