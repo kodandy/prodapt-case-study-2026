@@ -33,6 +33,12 @@ Path prefixes: `gw/` = `services/gateway/src/gateway/`, `ai/` = `services/ops-ai
 9. [What was cut, and how it would be built](#9-what-was-cut-and-how-it-would-be-built)
 10. [Production design on GCP (P2, design only)](#10-production-design-on-gcp-p2-design-only)
 
+Topics named in the brief: vector store [D5.6](#d56-hybrid-search-postgres-full-text-plus-pgvector-fused-by-rrf),
+message broker [D2.2](#d22-transactional-outbox-relay-redis-streams-deduped-projection),
+caching [D2.6](#d26-caching-no-read-cache-by-choice), AI model selection [D5.7](#d57-ai-model-selection),
+sync vs async [D2.1](#d21-two-services-with-a-one-way-event-port), [D3.7](#d37-synchronous-rule-based-risk-scoring-the-flag-is-separate-from-the-status),
+[D5.4](#d54-card-testing-is-detected-twice-block-in-the-gateway-explain-in-ops-ai).
+
 ---
 
 ## 1. Problem and users
@@ -151,6 +157,30 @@ Compose services: `postgres`, `redis`, `gateway-api`, `relay`, the gateway notif
   (`test_a_gateway_token_issued_for_one_merchant_never_unlocks_another_merchants_evidence`).
 
 ---
+
+### D2.6 Caching: no read cache, by choice
+
+- **Decision:** No service caches application reads. Every balance, payment status, risk decision and assistant
+  answer is read from Postgres at request time. Responses that carry money or account data are sent with
+  `Cache-Control: no-store` by the gateway and by nginx (`web/nginx.conf`). Two Redis uses look like caches but are not:
+  the `idem:*` key is an in-flight lock that only suppresses contention (D3.1), and an idempotent replay returns the
+  stored response from Postgres, which is the record of what happened, not a copy that can go stale.
+- **Why:** The reads that matter most are freshness-critical. A cached balance, payment status or velocity count can
+  approve a payment that should be refused, or show an ops user a state that is no longer true. At the measured local
+  load the queries are indexed point reads and keyset pages, so a cache would add an invalidation problem without
+  removing a bottleneck. ops-ai already serves analytics from its own projections, which are a deliberate, event-fed
+  read model with a known lag (D2.2), not a cache of the gateway.
+- **What we gave up:** Repeated identical questions to the assistant re-run tools and, with a key, re-call the LLM
+  (cost and latency per call; bounded by D5.5's budget and concurrency cap). Static SPA assets are also served
+  `no-store` today, which costs bandwidth but no correctness.
+- **Where a cache would go first:** (1) content-hashed SPA assets with long `immutable` caching; (2) a short-TTL cache
+  of lag-tolerant analytics aggregates in ops-ai (failure-rate and settlement summaries), keyed by tenant so scope is
+  never shared; (3) an LLM answer cache keyed by tenant, question and the evidence hash, so a changed fact misses the
+  cache. Balances, payment state and risk inputs stay uncached.
+- **Alternatives:** Redis read-through for balances and payment status (rejected: stale money data); HTTP caching at
+  nginx for API responses (rejected: per-user data, and it would need `Vary` on every credential).
+- **Evidence (Code):** `NO_STORE_HEADERS` in `gw/app.py` and `gw/payments/consumer_routes.py`; `web/nginx.conf`;
+  D3.1 for the Redis lock.
 
 ## 3. Payment correctness
 
@@ -495,6 +525,39 @@ Where each lock is, and what proves it:
   [`ai/investigation/__tests__/test_investigate_hybrid_golden.py`](../services/ops-ai/src/ops_ai/investigation/__tests__/test_investigate_hybrid_golden.py),
   [`ai/__tests__/test_investigate_route_hybrid.py`](../services/ops-ai/src/ops_ai/__tests__/test_investigate_route_hybrid.py),
   [`ai/investigation/__tests__/test_investigation_tools.py`](../services/ops-ai/src/ops_ai/investigation/__tests__/test_investigation_tools.py).
+
+### D5.7 AI model selection
+
+- **Decision:** The LLM is only a narrator (D5.1): it turns evidence that tools already computed into prose. It never
+  decides, changes or blocks a payment; the gateway's risk scoring and every status change are rule-based and run
+  without it (D3.7, D5.4). Within that role:
+  - **Chat:** `gpt-4.1-mini-2025-04-14` on the OpenAI Responses API, pinned to a dated snapshot.
+  - **Fallback:** `gpt-4.1-nano-2025-04-14`, tried once, only after a retryable failure of the primary (HTTP 404,
+    408, 409, 429, 5xx, timeout, connection error) and only inside the same 20 s budget. A non-retryable failure
+    (4xx other than those, invalid or incomplete body, response over 64 KiB) goes straight to the evidence-only
+    answer (D5.5). Output is capped at 600 tokens, at most 8 calls run at once, and `store` is false.
+  - **Embeddings:** `text-embedding-3-small` for the OpenAI vector column, filled by the backfill CLI
+    (`python -m ops_ai.search`) and used for query embeddings when a key is set. The default is
+    `LocalHashEmbedder` (feature hashing, no network).
+  - **No key:** `MockLlm` and `LocalHashEmbedder`. The whole stack, the demo and the eval suite then run offline.
+  Both model names can be overridden with `OPENAI_CHAT_MODEL` / `OPENAI_FALLBACK_MODEL`.
+- **Why:** Narrating a few hundred tokens of cited evidence needs instruction following and citation discipline, not
+  deep reasoning, so a small model gives the needed quality at low latency and cost. A dated snapshot keeps behaviour
+  from changing under the eval suite. The fallback is a smaller model from the same family and API, so the prompt and
+  parser are unchanged and an overloaded primary still gets an answer. `text-embedding-3-small` is the low-cost current
+  OpenAI embedding model, and each embedder has its own column (D5.6), so changing it never mixes vector
+  spaces.
+- **What we gave up:** The eval suite and CI run on `MockLlm`, so they prove that the pipeline is reproducible and
+  that the evidence, refs and fallbacks are right; they do not measure the real model's prose quality. The real
+  adapter is tested only against a local fake HTTP server. There is no per-merchant token budget or circuit breaker
+  (D5.5), no self-hosted model, and no fallback to a different provider. Data sent to OpenAI is redacted and fenced
+  (D6.4) but still leaves the platform; a deployment that cannot allow that runs with no key.
+- **Alternatives:** A larger reasoning model (slower and costlier for narration); a self-hosted open model (no GPU in
+  the local stack, and a second runtime to operate); letting the model call tools freely and decide (rejected: an
+  LLM must not sit on the payment decision path).
+- **Evidence (Tested):** [`ai/assistant/__tests__/test_openai_llm_hardening.py`](../services/ops-ai/src/ops_ai/assistant/__tests__/test_openai_llm_hardening.py),
+  [`ai/__tests__/test_main_openai.py`](../services/ops-ai/src/ops_ai/__tests__/test_main_openai.py), and the D5.5
+  fallback tests. Model constants: `ai/assistant/openai_llm.py`, `ai/search/openai_embedder.py`.
 
 ---
 

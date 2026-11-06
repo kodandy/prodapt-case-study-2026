@@ -15,57 +15,70 @@ flowchart LR
   classDef planned stroke-dasharray: 5 5,color:#666,fill:#f6f6f6
   classDef oneshot fill:#fff8e1,stroke:#c9a227
   classDef store fill:#e8f1fb,stroke:#3b78c3
+  classDef ext fill:#eef7ee,stroke:#3c8c3c
 
-  browser(["Browser<br/>user / merchant SPA"])
+  browser(["Browser<br/>user / merchant / ops SPA"])
   merchantsrv(["Merchant server<br/>server-to-server"])
+  receiver(["Alert receiver<br/>operator-configured HTTPS webhook"]):::ext
+  openai(["OpenAI API<br/>Responses: gpt-4.1-mini, nano fallback<br/>Embeddings: text-embedding-3-small<br/>(document vectors by backfill CLI)<br/>only when OPENAI_API_KEY is set,<br/>otherwise MockLlm + LocalHashEmbedder"]):::ext
 
   subgraph host["compose project payplat · host ports on 127.0.0.1"]
-    web["web<br/>nginx + Vite SPA bundle<br/>:8082 → 80"]
+    web["web<br/>nginx + Vite SPA bundle<br/>:8082 → 80 (web-tls :8443, profile tls)"]
 
-    subgraph gw["gateway processes"]
-      gwapi["gateway-api<br/>FastAPI / uvicorn<br/>:8080 → 8000<br/>in-process SimulatorProvider"]
-      relay["relay<br/>gateway.outbox.worker"]
-      notifier["notifier<br/>gateway.notifications.worker"]
+    subgraph gw["gateway service"]
+      gwapi["gateway-api<br/>FastAPI REST :8080<br/>auth · RBAC · payments · ledger<br/>in-process SimulatorProvider"]
+      gwgrpc["gateway-grpc<br/>merchant gRPC API :50051"]
+      relay["relay<br/>outbox → Redis Streams"]
+      notifier["notifier<br/>payment confirmations"]
     end
 
-    subgraph ops["ops-ai processes"]
-      opsapi["ops-ai-api<br/>FastAPI / uvicorn<br/>:8081 → 8000"]
-      consumer["ops-ai-consumer<br/>ops_ai.ingest.worker"]
+    subgraph ops["ops-ai service (AI / ML)"]
+      opsapi["ops-ai-api<br/>FastAPI :8081<br/>assistants SQ1–SQ4 · hybrid search<br/>agents · fraud rules · alerts"]
+      consumer["ops-ai-consumer<br/>ingest: projections, search index,<br/>fraud_watch, tickets"]
+      opsnotifier["ops-ai-notifier<br/>alert outbox → signed webhook"]
     end
 
-    subgraph pg["postgres · pgvector/pgvector:pg16 · :55432 → 5432"]
-      sgw[("schema gateway<br/>users, merchants, api_keys, user_totp<br/>payments, payment_attempts, refunds, disputes<br/>idempotency_keys, card_tokens<br/>ledger_accounts, account_balances, transfers<br/>journal_entries, postings<br/>outbox, audit_log<br/>notifications, notification_processed_events")]
+    subgraph pg["postgres · pgvector/pgvector:pg16"]
+      sgw[("schema gateway<br/>users, merchants, api_keys, ops_users, user_totp, kyc<br/>payments, attempts, refunds, disputes, payouts<br/>idempotency_keys, card_tokens (no PAN)<br/>ledger accounts, journal_entries, postings, fx_rates<br/>outbox, audit_log, notifications")]
       ssim[("schema simulator<br/>charges")]
-      sops[("schema ops_ai<br/>payment_facts, processed_events<br/>search_documents (tsvector)<br/>incidents, transfer_facts, settlement_entries<br/>fraud_alerts, tickets")]
+      sops[("schema ops_ai<br/>payment_facts, transfer_facts, settlement_entries<br/>search_documents (tsvector + pgvector)<br/>incidents, tickets, feedback, merchant_memory<br/>fraud_alerts, fraud_rule_versions, alert_notifications<br/>ops_alerts, anomaly_alerts, agent_messages")]
     end
 
-    redis[("redis (7.4-alpine) :56379 → 6379<br/>idem:* in-flight locks<br/>streams gw.payments.v1, gw.notifications.v1<br/>gw.payments.v1.dead")]
+    redis[("redis 7.4<br/>idem:* in-flight locks<br/>streams gw.payments.v1, gw.notifications.v1, .dead<br/>ops_ai:agent_messages (+ per-tenant)")]
 
     secrets["demo-secrets<br/>one-shot"]
     migrate["migrate<br/>one-shot: alembic gateway + ops-ai"]
-    seed["seed<br/>one-shot: ops_ai.seed, .transfers, .settlement"]
-    vol[("volume demo-secrets<br/>gateway/ · ops-ai/ (read-only mounts)")]
+    seed["seed<br/>one-shot: synthetic dataset<br/>payments, transfers, settlement, agents"]
+    vol[("volume demo-secrets<br/>read-only mounts")]
+
+    subgraph mon["profile monitoring"]
+      prom["Prometheus :9090"]
+      graf["Grafana :3000"]
+    end
   end
 
-  openai(["OpenAI Responses API<br/>only when OPENAI_API_KEY is set,<br/>otherwise MockLlm in-process"])
-
   browser -->|"HTTP :8082"| web
-  web -->|"/api/gw/* (POST /v1/payments denied)"| gwapi
+  web -->|"/api/gw/*"| gwapi
   web -->|"/api/ops/*"| opsapi
   merchantsrv -->|"POST /v1/payments<br/>API key + Idempotency-Key"| gwapi
+  merchantsrv -->|"gRPC"| gwgrpc
 
   gwapi -->|"SQL"| sgw
   gwapi -->|"SQL (provider ledger)"| ssim
+  gwgrpc -->|"SQL"| sgw
   gwapi -->|"SET NX PX idempotency lock"| redis
-  relay -->|"read unpublished outbox rows<br/>FOR UPDATE SKIP LOCKED"| sgw
-  relay -->|"XADD by topic"| redis
-  notifier -->|"read gw.payments.v1 outbox rows<br/>write notifications + gw.notifications.v1 outbox rows"| sgw
+  relay -->|"outbox rows<br/>FOR UPDATE SKIP LOCKED"| sgw
+  relay -->|"XADD"| redis
+  notifier -->|"outbox → notifications"| sgw
 
-  consumer -->|"XREADGROUP ops-ai.payment-facts<br/>XACK / dead-letter"| redis
-  consumer -->|"upsert projections, fraud_watch,<br/>tickets (one tx with dedupe)"| sops
-  opsapi -->|"SQL read (scoped by merchant / user)"| sops
-  opsapi -->|"readiness ping"| redis
-  opsapi -.->|"evidence only (redacted)"| openai
+  seed -->|"synthetic dataset applied<br/>with the consumer's apply_payment_event"| sops
+  consumer -->|"XREADGROUP · XACK · dead-letter"| redis
+  consumer -->|"upsert projections, index,<br/>fraud alerts + notification outbox<br/>(one tx with dedupe)"| sops
+  opsapi -->|"SQL read scoped by token tenant"| sops
+  opsapi -->|"agent stream mirror"| redis
+  opsapi -.->|"redacted evidence · query embeddings"| openai
+  opsnotifier -->|"claim one row per tx<br/>SKIP LOCKED"| sops
+  opsnotifier -->|"POST HMAC-SHA256 signed,<br/>Idempotency-Key"| receiver
 
   secrets --> vol
   vol -.->|"JWT private key, API-key pepper,<br/>card fingerprint key, TOTP key"| gwapi
@@ -73,13 +86,16 @@ flowchart LR
   migrate --> sgw
   migrate --> ssim
   migrate --> sops
-  seed -->|"synthetic dataset applied<br/>with the consumer's apply_payment_event"| sops
+
+  prom -->|"scrape /metrics"| gwapi
+  prom -->|"scrape"| opsapi
+  prom -->|"scrape :9100"| relay
+  prom -->|"scrape :9100"| consumer
+  graf --> prom
 
   subgraph planned["Planned (not built yet)"]
     qapi["Query / Command API<br/>ops-ai-api → gateway-api"]:::planned
-    grpc["gRPC merchant API<br/>on gateway-api"]:::planned
-    vec["pgvector embeddings + RRF<br/>in ops_ai (FTS only today)"]:::planned
-    obs["Prometheus · OTel Collector · Grafana"]:::planned
+    otel["OTel Collector · trace backend"]:::planned
   end
 
   class secrets,migrate,seed oneshot
@@ -94,16 +110,20 @@ flowchart LR
 | `redis` | store | `redis:7.4-alpine` | — |
 | `demo-secrets` | one-shot | `scripts/demo_secrets.py` | writes the `demo-secrets` volume |
 | `migrate` | one-shot | Alembic, `services/gateway` then `services/ops-ai` | Postgres |
-| `seed` | one-shot | `ops_ai.seed`, `ops_ai.transfers`, `ops_ai.settlement` | Postgres (`ops_ai`) |
+| `seed` | one-shot | `ops_ai.seed`, `ops_ai.transfers`, `ops_ai.settlement`, `ops_ai.agents` | Postgres (`ops_ai`) |
 | `gateway-api` | long-running | `gateway.main:build_app_from_env` | Postgres (`gateway`, `simulator`), Redis |
+| `gateway-grpc` | long-running | `gateway.merchant_api.grpc_server` (:50051) | Postgres (`gateway`) |
 | `relay` | long-running | `gateway.outbox.worker` | Postgres (`gateway.outbox`), Redis streams |
 | `notifier` | long-running | `gateway.notifications.worker` | Postgres (`gateway`) |
-| `ops-ai-api` | long-running | `ops_ai.main:build_app_from_env` | Postgres (`ops_ai`), Redis (readiness), optional OpenAI |
+| `ops-ai-api` | long-running | `ops_ai.main:build_app_from_env` | Postgres (`ops_ai`), Redis (readiness, agent streams), optional OpenAI |
 | `ops-ai-consumer` | long-running | `ops_ai.ingest.worker` | Redis streams, Postgres (`ops_ai`) |
+| `ops-ai-notifier` | long-running | `ops_ai.notify` | Postgres (`ops_ai.alert_notifications`), external webhook receiver when `OPS_AI_ALERT_WEBHOOK_URL` is set |
 | `web` | long-running | `web/` build, nginx | `gateway-api`, `ops-ai-api` |
+| `web-tls` | profile `tls` | nginx :8443 with a `dev-cert` one-shot | same as `web` |
+| `prometheus`, `grafana` | profile `monitoring` | `ops/prometheus/prometheus.yml` | scrapes `gateway-api`, `relay`, `ops-ai-api`, `ops-ai-consumer` |
 
 Not drawn: the profile-only helpers `dev` (toolchain), `demo` (runs `scripts/demo.py` against both APIs), `web-dev`
-(Node) and `web-smoke` (Playwright). They are not part of the running platform.
+(Node), `web-smoke` (Playwright) and `k6` (profile `perf`). They are not part of the running platform.
 
 **Boundaries the code enforces**
 
