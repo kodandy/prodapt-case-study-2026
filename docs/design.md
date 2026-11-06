@@ -437,7 +437,7 @@ Where each lock is, and what proves it:
   queue at high priority by a deterministic rule.
 - **Why:** The block must be synchronous; the explanation needs a window of history and can lag.
 - **What we gave up:** Threshold tuning from human verdicts exists only as the R2-7 feedback loop (false positives
-  tighten a versioned per-merchant rule that the live watch applies; the SQ3 assistant still uses the baseline); the
+  tighten a versioned per-merchant rule that the live watch and the SQ3 assistant apply); the
   measured false-positive rate is on a synthetic labelled set, not production traffic.
 - **Alternatives:** One detector in the gateway only (no explanation); LLM-based detection (non-deterministic, and on
   the wrong side of the LLM-outage boundary).
@@ -470,7 +470,8 @@ Where each lock is, and what proves it:
 - **Decision:** Keyword search uses a persisted `tsvector` column and `websearch_to_tsquery('english', …)`; the vector
   leg is pgvector similarity with one column and HNSW index per embedder id; `hybrid_search` fuses both by Reciprocal
   Rank Fusion (k = 60). Both legs are restricted to the caller's merchant. `/v1/assistant/ask` retrieves through
-  `hybrid_search`; `POST /v1/incidents/search` reranks hybrid incident hits (R2-4). Incidents are indexed into
+  `hybrid_search`; `POST /v1/incidents/search` reranks hybrid incident hits (R2-4), reading indexed incidents through
+  their stored vectors (only the query is embedded). Incidents are indexed into
   `search_documents` (`kind = 'incident'`, `ai/search/indexing.py`, run by `python -m ops_ai.seed` and the eval
   suite); platform-wide incidents are owned by the nil-UUID sentinel and are visible only through the opt-in
   `include_platform` filter, which admits incident rows only. The SQ1 tool `search_incidents` uses `hybrid_search`
