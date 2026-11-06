@@ -232,7 +232,7 @@ Input: merchant `mch_0002` (merchant token), `POST /v1/assistant/investigate-fra
      "card_bins": ["411111", "424242", "522222", "555555", "601100"], "flagged": true,
      "reasons": ["micro_burst", "card_identity_unknown", "high_decline_ratio"]}
   ],
-  "alerts": [{"queue": "fraud", "ticket_id": "…"}],
+  "alerts": [{"queue": "fraud", "ticket_id": "…"}, {"queue": "fraud", "ticket_id": "…"}],
   "suggested_fixes": ["Add a velocity limit on card payments of 1.00 or less, per card and per client IP.",
                       "Require 3-D Secure for card payments of 1.00 or less until the burst stops.",
                       "Do not refund or contact the cards in the burst from this channel; the fraud team works the ticket."],
@@ -241,9 +241,11 @@ Input: merchant `mch_0002` (merchant token), `POST /v1/assistant/investigate-fra
 ```
 
 What it shows: both the live burst (12 micro payments, 4 cards, half declined) and the seeded burst (40 micro payments,
-all declined) are flagged as card testing with the features that tripped the rule. Only the live burst raised an alert
-with a ticket in the `fraud` queue: seeded events raise no alert, and seeded payments carry no card identity. No
-alert notification is shown here; SQ3 stays Partial in `docs/requirements-traceability.md` for that reason.
+all declined) are flagged as card testing with the features that tripped the rule, and each raised an alert with a
+ticket in the `fraud` queue: the seed CLI delivers the last 24 hours before its anchor as the live stream
+(`--live-tail-hours`, default 24; 0 = backfill only), so the planted burst goes through the same watcher as the demo's
+live charges. Seeded payments carry no card identity. No alert notification beyond the `ops_alerts` row and the ticket
+is shown here; SQ3 stays Partial in `docs/requirements-traceability.md` for that reason.
 
 ### SQ4: plain-English settlement summary — why the payout differs
 
@@ -441,7 +443,8 @@ and is kept current per item:
 - API keys have no `revoked_at`; every `make demo` adds one more key to the demo merchant.
 - The seed is not re-anchored: run more than 6 hours after the first seed, SQ1 answers `no_anomaly`. Start over with
   `make demo-down && docker compose --profile demo down -v` (or truncate `ops_ai`). The seeded SQ3 burst leaves the
-  24-hour window about 9 hours after the first seed.
+  24-hour window about 9 hours after the first seed. Its alert and `fraud` ticket are raised once, by the first seed
+  (the seed CLI's live tail); a later seed with a new anchor dedupes on `event_id` and raises nothing new.
 - Card testing (SQ3): the gateway blocks on its synchronous card-velocity rule (B7.1, B7.3); the ops-ai watch only
   raises an alert and a ticket after the payment.
 - Card testing: an earlier payment arriving after the alert (out-of-order delivery) can start a second alert for one

@@ -311,7 +311,7 @@ def to_payment_event(tx, shift, origin: Literal["live", "backfill"] = "backfill"
 ```
 
 - `live_since` None (default) → unchanged: every event is `backfill`, no alert, ticket or ops alert (decision 5 and
-  the existing golden stay true for `make demo` and the CLI).
+  the existing golden stay true for direct callers; the seed CLI passes a live tail by default since S-3).
 - `live_since` set → kept events with shifted `occurred_at >= live_since` are delivered with `origin = "live"`, after
   every backfill event and in `(occurred_at, payment_id)` order, through the same `apply_payment_event`, so
   `watch_payment` (and the active rule version) runs on them exactly as for the consumer. Events before it stay
@@ -342,3 +342,18 @@ def to_payment_event(tx, shift, origin: Literal["live", "backfill"] = "backfill"
 Examples (12 micro USD payments 10 s apart, 4 distinct cards, 6 declined): baseline → `card_testing`, version 0;
 steps 1 (12, 0.83, 4) → `card_testing`, version 1; steps 2 (14, 0.86, 5) → `no_card_testing`, the episode returned
 unflagged with `reasons == ()`, no alert, no fixes, no evidence, version 2.
+
+### S-3. Live tail in the seed CLI that `make demo` runs (11-06)
+
+`python -m ops_ai.seed` (the compose `seed` service, which `make demo` waits for) gains `--live-tail-hours H`
+(integer, default 24: the assistant's window and the eval suite's `LIVE_TAIL`). The Makefile and compose are unchanged.
+
+- `H > 0` → `seed_dataset(..., live_since = anchor - H hours)`: the planted card-testing burst goes through
+  `watch_payment` as in S-1, so a fresh `make demo` holds one alert for `mch_0002` (`card_testing`, 40 payments,
+  `first_payment_id` = the first planted SQ3 id), one `fraud` ticket (`high`, `open`) linked to it and one ops alert,
+  before the demo's own live burst adds its alert.
+- `H = 0` → `live_since` None: backfill only, no alert, ticket or ops alert (the previous behaviour).
+- `H < 0` → argparse error, exit code 2, nothing seeded.
+- The printed line is unchanged; `payment_facts` are the same with or without the tail (S-1).
+- A second run with the same arguments adds no alert, ticket or ops alert and reports 0 payments applied.
+- Tests: `ops_ai/seed/__tests__/test_seed_cli_live_tail.py`.

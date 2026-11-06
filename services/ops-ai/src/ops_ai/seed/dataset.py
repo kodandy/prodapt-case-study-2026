@@ -22,6 +22,8 @@ from scripts.generate_dataset import CanonicalTransaction, Incident, PlantedScen
 MERCHANT_NAMESPACE = uuid.UUID("acc393ed-647c-4a3b-8adc-f53e5d7b1fe3")
 """Shared with the gateway side through scripts/demo.py; changing it orphans every seeded merchant."""
 BATCH_SIZE = 500
+DEFAULT_LIVE_TAIL_HOURS = 24
+"""The assistant's analysis window; the eval suite's LIVE_TAIL matches it."""
 
 
 @dataclass(frozen=True)
@@ -123,13 +125,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--anchor", type=_aware_datetime, default=None, help="ISO 8601 with offset; default now"
     )
+    parser.add_argument(
+        "--live-tail-hours",
+        type=_non_negative_int,
+        default=DEFAULT_LIVE_TAIL_HOURS,
+        help="seed the last H hours before the anchor as the live stream; 0 = backfill only",
+    )
     args = parser.parse_args(argv)
     anchor: datetime = args.anchor or system_clock()
+    live_tail_hours: int = args.live_tail_hours
+    live_since = anchor - timedelta(hours=live_tail_hours) if live_tail_hours > 0 else None
     engine = make_engine(load_ops_ai_settings().database_url)
     try:
         session_factory = make_session_factory(engine)
         result = seed_dataset(
-            session_factory, system_clock, generate(seed=args.seed, records=args.records), anchor
+            session_factory,
+            system_clock,
+            generate(seed=args.seed, records=args.records),
+            anchor,
+            live_since=live_since,
         )
         with session_factory.begin() as session:
             index_incidents(session)
@@ -146,6 +160,13 @@ def _aware_datetime(value: str) -> datetime:
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         raise argparse.ArgumentTypeError("anchor needs a UTC offset")
+    return parsed
+
+
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("live tail hours must be 0 or more")
     return parsed
 
 
