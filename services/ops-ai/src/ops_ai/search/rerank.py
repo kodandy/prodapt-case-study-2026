@@ -1,11 +1,16 @@
 """Historical incident reranking (R2-4): hybrid search first, then recency and resolution effectiveness.
 
+Indexed incidents are searched through their search_documents rows (stored vectors, the embedder sees
+the query only); incidents not indexed yet keep the per-request legs over ops_ai.incidents. Every hit is
+re-checked against ops_ai.incidents visibility, so a stale or mis-owned document never widens what a
+merchant sees.
+
 Effectiveness blends whether the incident was resolved, whether it came back within 7 days and the merchant's
 own helpful / not-helpful feedback (Laplace-smoothed), so one vote cannot dominate.
 """
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -16,13 +21,16 @@ from ops_ai.feedback.service import incident_scores
 from ops_ai.investigation.models import IncidentRecord
 from ops_ai.scope import Scope
 from ops_ai.search.embedder import Embedder, EmbedderUnavailableError, cosine_similarity, is_zero
-from ops_ai.search.service import DEFAULT_MIN_SIMILARITY, SearchHit, reciprocal_rank_fusion
+from ops_ai.search.indexing import INCIDENT_KIND, PLATFORM_MERCHANT_ID, incident_ref_id
+from ops_ai.search.models import SearchDocument
+from ops_ai.search.service import DEFAULT_MIN_SIMILARITY, SearchHit, hybrid_search, reciprocal_rank_fusion
 
 RECENCY_HALF_LIFE_DAYS = 30.0
 WEIGHT_RELEVANCE, WEIGHT_RECENCY, WEIGHT_EFFECTIVENESS = 0.5, 0.2, 0.3
 REOPEN_PENALTY = 0.5
 KEYWORD_CANDIDATES = 30
 VECTOR_CANDIDATES = 200
+FUSED_CANDIDATES = 60
 _INCIDENT_NAMESPACE = uuid.UUID("6f1c2d3e-4b5a-4c7d-8e9f-a0b1c2d3e4f5")
 _SECONDS_PER_DAY = 86400.0
 
@@ -120,12 +128,18 @@ def _hit(incident: IncidentRecord, rank: float) -> SearchHit:
     )
 
 
-def _keyword_leg(session: Session, scope: Scope, query: str) -> list[tuple[IncidentRecord, float]]:
+def _keyword_leg(
+    session: Session, scope: Scope, query: str, incident_ids: Collection[str]
+) -> list[tuple[IncidentRecord, float]]:
     tsquery = func.websearch_to_tsquery("english", query)
     rank = func.ts_rank(IncidentRecord.tsv, tsquery).label("rank")
     rows = session.execute(
         select(IncidentRecord, rank)
-        .where(_visible(scope), IncidentRecord.tsv.op("@@")(tsquery))
+        .where(
+            _visible(scope),
+            IncidentRecord.incident_id.in_(list(incident_ids)),
+            IncidentRecord.tsv.op("@@")(tsquery),
+        )
         .order_by(rank.desc(), IncidentRecord.started_at.desc(), IncidentRecord.incident_id)
         .limit(KEYWORD_CANDIDATES)
     ).all()
@@ -133,12 +147,12 @@ def _keyword_leg(session: Session, scope: Scope, query: str) -> list[tuple[Incid
 
 
 def _vector_leg(
-    session: Session, scope: Scope, query: str, embedder: Embedder
+    session: Session, scope: Scope, query: str, embedder: Embedder, incident_ids: Collection[str]
 ) -> list[tuple[IncidentRecord, float]]:
     incidents = list(
         session.execute(
             select(IncidentRecord)
-            .where(_visible(scope))
+            .where(_visible(scope), IncidentRecord.incident_id.in_(list(incident_ids)))
             .order_by(IncidentRecord.started_at.desc(), IncidentRecord.incident_id)
             .limit(VECTOR_CANDIDATES)
         ).scalars()
@@ -162,29 +176,70 @@ def _vector_leg(
     return kept
 
 
+def _indexed_relevance(
+    session: Session, scope: Scope, query: str, embedder: Embedder, visible_by_ref: Mapping[uuid.UUID, str]
+) -> dict[str, float]:
+    """RRF score of each visible incident found by hybrid_search over the stored incident documents."""
+    hits = hybrid_search(
+        session, scope, query, embedder, limit=FUSED_CANDIDATES, kinds=(INCIDENT_KIND,), include_platform=True
+    )
+    return {visible_by_ref[hit.ref_id]: hit.rank for hit in hits if hit.ref_id in visible_by_ref}
+
+
+def _un_indexed_relevance(
+    session: Session, scope: Scope, query: str, embedder: Embedder, incident_ids: Collection[str]
+) -> dict[str, float]:
+    """RRF score of each un-indexed incident, from the pre-indexing legs restricted to `incident_ids`."""
+    if not incident_ids:
+        return {}
+    by_ref: dict[uuid.UUID, str] = {}
+    rankings: list[list[SearchHit]] = []
+    for leg in (
+        _keyword_leg(session, scope, query, incident_ids),
+        _vector_leg(session, scope, query, embedder, incident_ids),
+    ):
+        hits = []
+        for incident, rank in leg:
+            hit = _hit(incident, rank)
+            by_ref[hit.ref_id] = incident.incident_id
+            hits.append(hit)
+        rankings.append(hits)
+    fused = reciprocal_rank_fusion(rankings, limit=max(len(by_ref), 1))
+    return {by_ref[hit.ref_id]: hit.rank for hit in fused}
+
+
 def search_incidents_reranked(
     session: Session, scope: Scope, query: str, now: datetime, embedder: Embedder, limit: int = 5
 ) -> list[RankedIncident]:
     """Hybrid (FTS + embedder, RRF) over the incidents the merchant can see, then rerank_incidents,
-    top `limit`."""
-    keyword = _keyword_leg(session, scope, query)
-    vector = _vector_leg(session, scope, query, embedder)
-    by_ref: dict[uuid.UUID, IncidentRecord] = {}
-    rankings: list[list[SearchHit]] = []
-    for leg in (keyword, vector):
-        hits = []
-        for incident, rank in leg:
-            hit = _hit(incident, rank)
-            by_ref[hit.ref_id] = incident
-            hits.append(hit)
-        rankings.append(hits)
-    fused = reciprocal_rank_fusion(rankings, limit=max(len(by_ref), 1))
-    if not fused:
+    top `limit`. Indexed incidents use their stored documents and vectors; un-indexed ones the
+    pre-indexing legs (docs/specs/r2-agents.md 2.1)."""
+    visible_by_ref = {
+        incident_ref_id(incident_id): incident_id
+        for incident_id in session.scalars(select(IncidentRecord.incident_id).where(_visible(scope)))
+    }
+    if not visible_by_ref:
         return []
-    scores = incident_scores(session, scope, [by_ref[hit.ref_id].incident_id for hit in fused])
+    indexed_refs = set(
+        session.scalars(
+            select(SearchDocument.ref_id).where(
+                SearchDocument.kind == INCIDENT_KIND,
+                SearchDocument.merchant_id.in_([scope.merchant_id, PLATFORM_MERCHANT_ID]),
+                SearchDocument.ref_id.in_(list(visible_by_ref)),
+            )
+        )
+    )
+    un_indexed = [incident_id for ref, incident_id in visible_by_ref.items() if ref not in indexed_refs]
+    relevance = _indexed_relevance(session, scope, query, embedder, visible_by_ref)
+    relevance.update(_un_indexed_relevance(session, scope, query, embedder, un_indexed))
+    if not relevance:
+        return []
+    incidents = session.scalars(
+        select(IncidentRecord).where(_visible(scope), IncidentRecord.incident_id.in_(list(relevance)))
+    ).all()
+    scores = incident_scores(session, scope, [incident.incident_id for incident in incidents])
     candidates: list[IncidentCandidate] = []
-    for hit in fused:
-        incident = by_ref[hit.ref_id]
+    for incident in incidents:
         score = scores.get(incident.incident_id)
         candidates.append(
             IncidentCandidate(
@@ -195,7 +250,7 @@ def search_incidents_reranked(
                 started_at=incident.started_at,
                 resolved_at=incident.resolved_at,
                 recurrence_within_7d=incident.recurrence_within_7d,
-                relevance=hit.rank,
+                relevance=relevance[incident.incident_id],
                 helpful=0 if score is None else score.helpful,
                 not_helpful=0 if score is None else score.not_helpful,
             )

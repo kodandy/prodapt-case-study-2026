@@ -111,6 +111,33 @@ incident's `title root_cause fix_applied`, newest 200 by `started_at`, cosine �
 helpful / not_helpful, then `rerank_incidents`, top `limit`. Another merchant's incidents never appear; an
 unavailable embedder degrades to the keyword leg.
 
+### 2.1 Candidates from the indexed incident documents (R2-4 follow-up, 11-06)
+
+Supersedes the two legs above for every incident that has a `search_documents` row (sq1.md §10.1). The rerank
+(`rerank_incidents`, the scope merchant's scores, best score first, ties by `incident_id`) is unchanged.
+
+- **Indexed incidents**: one `hybrid_search(session, scope, query, embedder, limit=FUSED_CANDIDATES (60),
+  kinds=("incident",), include_platform=True)`. Its vector leg uses the stored vector of the embedder's column; the
+  embedder is called with the query only, never with an incident text. Each hit is mapped back through
+  `incident_ref_id` and kept only if that incident is visible to the scope in `ops_ai.incidents` (own or
+  platform-wide) — a stale or mis-owned document never widens visibility. Relevance = the hit's RRF score.
+- **Un-indexed fallback**: visible incidents with no `kind = "incident"` document (`ref_id = incident_ref_id(id)`)
+  owned by the scope merchant or `PLATFORM_MERCHANT_ID` (i.e. none `hybrid_search` could return for this scope) keep the pre-indexing path of section 2, restricted to them: FTS over `ops_ai.incidents` (≤ 30) and per-request
+  embedding of their `title root_cause fix_applied` (newest ≤ 200), fused with `reciprocal_rank_fusion` (k = 60).
+  Their RRF score is on the same scale as the indexed hits' (two legs, k = 60); both lists are merged by incident id
+  (an incident is in only one of them) before the rerank. When every visible incident is indexed, no incident text
+  is embedded.
+- Another merchant's incident never appears, whether indexed (owner filter of `hybrid_search` + visibility re-check)
+  or not; platform-wide incidents only through the incident kind.
+- An unavailable embedder degrades both lists to their keyword legs.
+
+Tests (RED first, `search/__tests__/test_search_incidents_reranked_indexed.py`): indexed incidents → every embedder
+call is `[query]`; scores / recurrence ordering hold on indexed incidents; mixed indexed + un-indexed → both returned,
+only the un-indexed text is embedded; cross-tenant: another merchant's indexed incident (same text) never appears, nor
+does a document owned by the scope merchant whose ref points to another merchant's incident; platform-wide indexed
+incident appears; an own incident whose only document is owned by another merchant is still found (fallback); an
+unavailable embedder still returns indexed keyword hits.
+
 ## 3. Bulk transaction analysis — `ops_ai/bulk/` (R2-5)
 
 `tokens.py`: `count_tokens(text: str) -> int` = `len(re.findall(r"\w+|[^\w\s]", text))` (deterministic, no
