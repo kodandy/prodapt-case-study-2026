@@ -3,6 +3,7 @@ import { errorMessageOf, useServices } from "../../app/services";
 import { ForecastChart } from "./ForecastChart";
 import { formatAmount, formatPercent } from "./format";
 import type { Backtest, CurrencyForecast, ForecastResponse } from "./types";
+import { TableScroll } from "../../components/TableScroll";
 
 const HORIZON_DAYS = 7;
 
@@ -20,33 +21,35 @@ function CurrencyBlock(props: { item: CurrencyForecast; horizonDays: number }): 
       <h3>{item.currency}</h3>
       <ForecastChart item={item} horizonDays={horizonDays} />
       <p className="hint">{backtestText(item.backtest)}</p>
-      <table>
-        <caption className="sr-only">{`${item.currency} forecast`}</caption>
-        <thead>
-          <tr>
-            <th scope="col">Day</th>
-            <th scope="col" className="num">
-              Expected
-            </th>
-            <th scope="col" className="num">
-              Low
-            </th>
-            <th scope="col" className="num">
-              High
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {item.forecast.map((p) => (
-            <tr key={p.day}>
-              <td>{p.day}</td>
-              <td className="num">{formatAmount(p.expected_minor, item.currency)}</td>
-              <td className="num">{formatAmount(p.low_minor, item.currency)}</td>
-              <td className="num">{formatAmount(p.high_minor, item.currency)}</td>
+      <TableScroll label={`${item.currency} forecast table`}>
+        <table>
+          <caption className="sr-only">{`${item.currency} forecast`}</caption>
+          <thead>
+            <tr>
+              <th scope="col">Day</th>
+              <th scope="col" className="num">
+                Expected
+              </th>
+              <th scope="col" className="num">
+                Low
+              </th>
+              <th scope="col" className="num">
+                High
+              </th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {item.forecast.map((p) => (
+              <tr key={p.day}>
+                <td>{p.day}</td>
+                <td className="num">{formatAmount(p.expected_minor, item.currency)}</td>
+                <td className="num">{formatAmount(p.low_minor, item.currency)}</td>
+                <td className="num">{formatAmount(p.high_minor, item.currency)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </TableScroll>
     </div>
   );
 }

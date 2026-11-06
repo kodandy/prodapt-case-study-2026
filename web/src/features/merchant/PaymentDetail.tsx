@@ -3,7 +3,13 @@ import { errorMessageOf, useServices } from "../../app/services";
 import { ConfirmButton } from "../../components/ConfirmButton";
 import { isOutcomeUnknown } from "../../lib/outcome";
 import { formatMinor, parseToMinor } from "../../lib/money";
-import { refundableMinor, type PaymentRisk, type PaymentSummary, type RefundResult } from "./types";
+import { canRefund, refundableMinor, type PaymentRisk, type PaymentSummary, type RefundResult } from "./types";
+
+/** The payment's totals as of the latest refund answer (the response carries running totals, not this refund alone). */
+interface RefundTotals {
+  refundedMinor: number;
+  refundableMinor: number;
+}
 
 interface RefundDraft {
   amountMinor: number;
@@ -18,7 +24,10 @@ export function PaymentDetail(props: {
 }): ReactNode {
   const { client, pendingWrites } = useServices();
   const { payment } = props;
-  const refundable = refundableMinor(payment);
+  const [totals, setTotals] = useState<RefundTotals | null>(null);
+  // An idempotent replay can carry older totals than the list row, so the larger refunded total wins.
+  const refunded = Math.max(payment.refunded_minor, totals?.refundedMinor ?? 0);
+  const refundable = Math.min(refundableMinor(payment), totals?.refundableMinor ?? Number.POSITIVE_INFINITY);
   const [risk, setRisk] = useState<PaymentRisk | null>(null);
   const [amountText, setAmountText] = useState("");
   const [draft, setDraft] = useState<RefundDraft | null>(null);
@@ -81,6 +90,18 @@ export function PaymentDetail(props: {
     pendingWrites.settle(scope, { amount_minor: current.amountMinor }, current.idempotencyKey);
     setDraft(null);
     if (result.ok) {
+      const next: RefundTotals = {
+        refundedMinor: result.data.payment_refunded_minor,
+        refundableMinor: result.data.payment_refundable_minor,
+      };
+      setTotals((prev) =>
+        prev === null
+          ? next
+          : {
+              refundedMinor: Math.max(prev.refundedMinor, next.refundedMinor),
+              refundableMinor: Math.min(prev.refundableMinor, next.refundableMinor),
+            },
+      );
       setAmountText("");
       setMessage(`Refunded ${formatMinor(result.data.amount_minor, result.data.currency)}.`);
       props.onRefunded();
@@ -100,7 +121,7 @@ export function PaymentDetail(props: {
         <dt>Amount</dt>
         <dd>{formatMinor(payment.amount_minor, payment.currency)}</dd>
         <dt>Refunded</dt>
-        <dd>{formatMinor(payment.refunded_minor, payment.currency)}</dd>
+        <dd data-testid="refunded">{formatMinor(refunded, payment.currency)}</dd>
         <dt>Refundable</dt>
         <dd data-testid="refundable">{formatMinor(refundable, payment.currency)}</dd>
         <dt>Card</dt>
@@ -108,7 +129,9 @@ export function PaymentDetail(props: {
         <dt>Risk</dt>
         <dd>{risk === null ? "…" : risk.blocked ? "Blocked by risk rules" : risk.risk_flagged ? "Flagged" : "Clear"}</dd>
       </dl>
-      {refundable > 0 ? (
+      {!canRefund(payment.state) ? (
+        <p>This payment cannot be refunded.</p>
+      ) : refundable > 0 ? (
         draft === null ? (
           <div className="form">
             <label>

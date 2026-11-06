@@ -2,6 +2,7 @@ import { useState, type FormEvent, type ReactNode } from "react";
 import { errorMessageOf, useServices } from "../../app/services";
 import { formatMinor } from "../../lib/money";
 import type { SettlementExplanation } from "./types";
+import { TableScroll } from "../../components/TableScroll";
 
 const PERIOD = /^[0-9]{4}-(0[1-9]|1[0-2])$/;
 
@@ -74,28 +75,30 @@ export function SettlementPanel(): ReactNode {
               <code>{result.fx_rate_id}</code>
             </dd>
           </dl>
-          <table>
-            <thead>
-              <tr>
-                <th scope="col">Line</th>
-                <th scope="col" className="num">
-                  Count
-                </th>
-                <th scope="col" className="num">
-                  Amount
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {result.lines.map((line) => (
-                <tr key={line.kind}>
-                  <td>{line.kind}</td>
-                  <td className="num">{line.count}</td>
-                  <td className="num">{formatMinor(line.amount_minor, result.currency)}</td>
+          <TableScroll label="Settlement lines table">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Line</th>
+                  <th scope="col" className="num">
+                    Count
+                  </th>
+                  <th scope="col" className="num">
+                    Amount
+                  </th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {result.lines.map((line) => (
+                  <tr key={line.kind}>
+                    <td>{line.kind}</td>
+                    <td className="num">{line.count}</td>
+                    <td className="num">{formatMinor(line.amount_minor, result.currency)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TableScroll>
           <p>{result.summary}</p>
           {result.text === null ? null : <p className="muted answer-text">{result.text}</p>}
         </div>

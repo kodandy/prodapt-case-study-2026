@@ -36,16 +36,26 @@ function SignedInUser(props: { onMfaEnabled: () => void }): ReactNode {
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [paymentsVersion, setPaymentsVersion] = useState(0);
 
-  const refresh = useCallback(async (): Promise<void> => {
-    const [w, h] = await Promise.all([
-      client.request<WalletList>({ base: "gw", path: "/v1/me/wallets", auth: "user" }),
-      client.request<TransferHistory>({ base: "gw", path: "/v1/me/transfers", auth: "user", query: { limit: 20 } }),
-    ]);
+  const loadWallets = useCallback(async (): Promise<void> => {
+    const w = await client.request<WalletList>({ base: "gw", path: "/v1/me/wallets", auth: "user" });
     setWallets(w.ok ? w.data.items : null);
     setWalletError(errorMessageOf(w));
+  }, [client]);
+
+  const refresh = useCallback(async (): Promise<void> => {
+    const [, h] = await Promise.all([
+      loadWallets(),
+      client.request<TransferHistory>({ base: "gw", path: "/v1/me/transfers", auth: "user", query: { limit: 20 } }),
+    ]);
     setHistory(h.ok ? h.data.items : null);
     setHistoryError(errorMessageOf(h));
-  }, [client]);
+  }, [client, loadWallets]);
+
+  function retryWallets(): void {
+    setWalletError(null);
+    setWallets(null);
+    void loadWallets();
+  }
 
   useEffect(() => {
     void refresh();
@@ -58,7 +68,7 @@ function SignedInUser(props: { onMfaEnabled: () => void }): ReactNode {
           Log out
         </button>
       </div>
-      <WalletsPanel wallets={wallets} error={walletError} />
+      <WalletsPanel wallets={wallets} error={walletError} onRetry={retryWallets} />
       <TransferPanel onTransferred={() => void refresh()} />
       <HistoryPanel items={history} error={historyError} />
       <Disclosure label="pay a merchant">
