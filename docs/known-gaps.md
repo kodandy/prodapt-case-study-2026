@@ -140,3 +140,7 @@ and is kept current per item:
   aggregation is Design.
 - Settlement: the DB session stays open during the LLM call, and the contract and FX snapshot ignore the period.
 - Settlement: a negative net is shown as a balance the merchant owes; collecting it is Design.
+- Web tests: under heavy machine load (for example two `make ci` runs at once), `make web-ci` sometimes fails with
+  "Test timed out in 5000ms" on a different vitest test each run (seen in `MerchantArea.pendingWrites.test.tsx` and
+  `FailureQueryPanel.test.tsx`). On fd449e3, 1 of 3 reruns passed 527 of 527; the other two failed 1–2 tests each.
+  The tests are unchanged; rerun `make web-ci` on an idle machine.
