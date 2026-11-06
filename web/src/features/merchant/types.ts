@@ -78,6 +78,22 @@ export interface AssistantAnswer {
   evidence: Evidence[];
   suggested_fixes?: string[];
   tool_calls?: ToolCall[];
+  /** R1-5: present only on `/v1/assistant/ask?grounded=true`. */
+  grounded?: boolean;
+  citations?: CitedSentence[];
+  unsupported_sentences?: UnsupportedSentence[];
+  relevant_refs?: string[];
+}
+
+export interface CitedSentence {
+  sentence: string;
+  sources: { ref: string; excerpt: string }[];
+}
+
+export interface UnsupportedSentence {
+  sentence: string;
+  reason: "no_citation" | "unknown_ref";
+  refs: string[];
 }
 
 export interface SettlementLine {

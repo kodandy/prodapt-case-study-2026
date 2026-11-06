@@ -11,6 +11,7 @@ const MODES = [
 ] as const;
 
 type ModePath = (typeof MODES)[number]["path"];
+const ASK_PATH: ModePath = "/v1/assistant/ask";
 
 export function AssistantPanel(props: {
   knownPaymentIds: ReadonlySet<string>;
@@ -19,6 +20,7 @@ export function AssistantPanel(props: {
   const { client } = useServices();
   const [mode, setMode] = useState<ModePath>("/v1/assistant/investigate");
   const [question, setQuestion] = useState("");
+  const [grounded, setGrounded] = useState(false);
   const [answer, setAnswer] = useState<AssistantAnswer | null>(null);
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -33,6 +35,7 @@ export function AssistantPanel(props: {
       path: mode,
       method: "POST",
       auth: "merchantOps",
+      query: { grounded: mode === ASK_PATH && grounded ? "true" : undefined },
       body: { question: question.trim() },
     });
     setPending(false);
@@ -54,6 +57,12 @@ export function AssistantPanel(props: {
             ))}
           </select>
         </label>
+        {mode === ASK_PATH ? (
+          <label>
+            <input type="checkbox" checked={grounded} onChange={(e) => setGrounded(e.target.checked)} /> Grounded
+            citations
+          </label>
+        ) : null}
         <label>
           Question
           <textarea rows={3} maxLength={2000} value={question} onChange={(e) => setQuestion(e.target.value)} />
