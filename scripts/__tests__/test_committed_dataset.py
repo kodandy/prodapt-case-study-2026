@@ -1,4 +1,5 @@
-"""The dataset committed under data/synthetic/ is exactly what the generator writes for seed 42, 12000 records."""
+"""The dataset committed under data/synthetic/ is exactly what the generator writes
+for seed 42 and 12000 records."""
 
 from __future__ import annotations
 
