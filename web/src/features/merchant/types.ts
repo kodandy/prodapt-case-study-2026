@@ -13,12 +13,8 @@ export const PAYMENT_STATE_FILTERS: readonly { value: ApiPaymentState; label: st
   { value: "unknown", label: "Unknown" },
 ];
 
-/**
- * "captured" and "partially_refunded" are never returned by the API; they are a provisional allowance only
- * because existing test fixtures use those values (pending approval to update the fixtures). The server
- * still decides whether a refund is allowed.
- */
-const REFUNDABLE_STATES: ReadonlySet<string> = new Set(["succeeded", "captured", "partially_refunded"]);
+/** Only settled card payments can be refunded; the server still makes the final decision. */
+const REFUNDABLE_STATES: ReadonlySet<string> = new Set(["succeeded"]);
 
 export function canRefund(state: PaymentState): boolean {
   return REFUNDABLE_STATES.has(state);

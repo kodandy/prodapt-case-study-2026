@@ -21,7 +21,7 @@ const ID_B = "00000000-0000-4000-8000-00000000000b";
 function paymentOf(id: string, amountMinor: number): PaymentSummary {
   return {
     payment_id: id,
-    state: "captured",
+    state: "succeeded",
     amount_minor: amountMinor,
     currency: "USD",
     method: "card",
@@ -126,7 +126,7 @@ describe("MerchantArea refund pending writes", () => {
       await waitFor(() => expect(refundRequestsOf(harness, ID_A)).toHaveLength(1));
 
       // Act
-      fireEvent.change(screen.getByLabelText("State"), { target: { value: "captured" } });
+      fireEvent.change(screen.getByLabelText("State"), { target: { value: "succeeded" } });
       await waitFor(() => expect(screen.queryAllByTestId("payment-row")).toHaveLength(1));
       fireEvent.change(screen.getByLabelText("State"), { target: { value: "" } });
       await waitFor(() => expect(screen.queryAllByTestId("payment-row")).toHaveLength(1));
