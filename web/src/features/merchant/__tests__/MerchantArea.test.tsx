@@ -12,7 +12,7 @@ const PAYMENT_ID_A = "pay_merchant_a_0001";
 
 const PAYMENT_A: PaymentSummary = {
   payment_id: PAYMENT_ID_A,
-  state: "captured",
+  state: "succeeded",
   amount_minor: 5000,
   currency: "USD",
   method: "card",

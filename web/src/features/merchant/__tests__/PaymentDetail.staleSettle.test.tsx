@@ -18,7 +18,7 @@ const RISK_PATH = "/api/gw/v1/payments/pay_1/risk";
 
 const PAYMENT: PaymentSummary = {
   payment_id: "pay_1",
-  state: "partially_refunded",
+  state: "succeeded",
   amount_minor: 5000,
   currency: "USD",
   method: "card",

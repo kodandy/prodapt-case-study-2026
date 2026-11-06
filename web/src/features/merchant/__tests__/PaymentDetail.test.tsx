@@ -18,7 +18,7 @@ const REFUNDABLE_MINOR = 4000;
 
 const PAYMENT: PaymentSummary = {
   payment_id: "pay_1",
-  state: "partially_refunded",
+  state: "succeeded",
   amount_minor: 5000,
   currency: "USD",
   method: "card",
