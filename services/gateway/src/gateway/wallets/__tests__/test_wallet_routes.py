@@ -37,6 +37,7 @@ SESSIONS = "/v1/sessions"
 ALICE = "alice@example.com"
 BOB = "bob@example.com"
 PASSWORD = "route-test-password-7Q"
+SAME_COUNTRY = "US"  # sender and recipient share a country, so P2P transfers stay domestic
 MAX_TOP_UP_MINOR = 10_000_000
 MAX_AMOUNT_MINOR = 10**12
 DESTINATION = "DE89370400440532013000"
@@ -119,6 +120,11 @@ def _sign_up(session_factory: sessionmaker[Session], clock: FixedClock, email: s
     with session_factory() as session:
         result = sign_up(session, clock, email, PASSWORD)
         session.commit()
+    with session_factory.begin() as session:
+        session.execute(
+            text("UPDATE gateway.users SET country = :country WHERE id = :id"),
+            {"country": SAME_COUNTRY, "id": result.user_id},
+        )
     return result.user_id
 
 

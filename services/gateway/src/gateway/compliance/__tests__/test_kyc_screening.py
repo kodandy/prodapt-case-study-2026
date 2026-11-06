@@ -519,7 +519,7 @@ def test_a_verified_cross_border_large_transfer_is_blocked_because_the_rule_move
     assert len(_audit(session_factory, "kyc.operation_blocked")) == 1
 
 
-def test_a_transfer_with_an_unknown_country_is_not_cross_border(
+def test_a_transfer_with_an_unknown_country_is_screened_as_cross_border_and_blocked(
     session_factory: sessionmaker[Session], clock: FixedClock
 ) -> None:
     # Arrange
@@ -529,7 +529,7 @@ def test_a_transfer_with_an_unknown_country_is_not_cross_border(
     result = screen_operation(session_factory, clock, alice, _transfer_request(1_000))
 
     # Assert
-    assert _outcome(result) == ((), False, False, False, "unverified")
+    assert _outcome(result) == ((), True, True, True, "unverified")
 
 
 def test_a_high_risk_country_pair_rule_fires_and_blocks_an_unverified_us_to_ir_transfer(
