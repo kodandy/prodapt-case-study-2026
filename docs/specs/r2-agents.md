@@ -202,7 +202,8 @@ def message_to_json(message) -> str; def message_from_json(raw: str) -> AgentMes
 MAX_MESSAGES = 16
 class MessageTransport(Protocol): def publish(self, message: AgentMessage) -> None: ...
 class RedisStreamTransport:   # optional transport: XADD <stream> MAXLEN ~ maxlen  {"message": message_to_json(m)}
-    def __init__(self, redis: Redis, stream: str = "ops_ai:agent_messages", maxlen: int = 10000)
+    def __init__(self, redis: Redis, stream: str = "ops_ai:agent_messages", maxlen: int = 10000,
+                 tenant_maxlen: int = 1000)   # for_principal / per-tenant streams: §4.3
 class MessageBudgetExceededError(Exception)
 class InProcessBus:
     def __init__(self, correlation_id, clock, max_messages=MAX_MESSAGES, transport: MessageTransport | None = None)
@@ -286,6 +287,46 @@ compliance, settlement), messages, suggested_fixes, evidence, truncated, mode, t
 `classify_transfer`; fix = the KYC tier upgrade when the next tier's limit covers the amount (as
 `investigate_transfer`). Planted SQ2 → `cross_border_limit_for_kyc_tier`, owner `sender`, balance covered.
 Messages are persisted with the user id.
+
+### 4.3 Per-tenant agent streams (R2-6 follow-up, 11-06) — `bus.py`
+
+The shared mirror `ops_ai:agent_messages` is ops-wide (every tenant's messages, like an `OpsScope`); a tenant reader
+must never be pointed at it. Each message is therefore also mirrored to its tenant's own capped stream.
+
+```python
+TENANT_STREAM_PREFIX = "ops_ai:agent_messages"
+TENANT_STREAM_MAXLEN = 1_000
+TenantPrincipal = Scope | UserScope            # an OpsScope is not a tenant and has no tenant stream
+def tenant_stream_key(principal: TenantPrincipal) -> str
+    # Scope → f"ops_ai:agent_messages:merchant:{merchant_id}", UserScope → f"ops_ai:agent_messages:user:{user_id}"
+class TenantTransportFactory(Protocol):
+    def for_principal(self, principal: TenantPrincipal) -> MessageTransport: ...
+class RedisStreamTransport:                    # publish(message) unchanged: the shared stream only
+    def __init__(self, redis, stream=DEFAULT_STREAM, maxlen=DEFAULT_STREAM_MAXLEN,
+                 tenant_maxlen=TENANT_STREAM_MAXLEN)
+    def for_principal(self, principal: TenantPrincipal) -> TenantStreamTransport
+class TenantStreamTransport:
+    stream_key: str                            # tenant_stream_key(principal), fixed at construction
+    def publish(self, message) -> None
+        # XADD <shared stream> MAXLEN ~ maxlen, then XADD <stream_key> MAXLEN = tenant_maxlen (exact trim, so the
+        # tenant stream never holds more than tenant_maxlen entries); same {"message": message_to_json(m)} field.
+        # Each XADD is best effort on its own: a RedisError on one never skips the other, never raises
+def read_tenant_messages(redis, principal: TenantPrincipal, count: int = 100) -> list[AgentMessage]
+    # the newest `count` entries of tenant_stream_key(principal), oldest first; [] on RedisError or a missing
+    # stream; an entry that does not parse back is skipped
+```
+- The key is derived from the principal only — no caller-supplied key, prefix or id — so a reader holding one
+  merchant's `Scope` (or one user's `UserScope`) can only read that tenant's stream. A merchant `Scope` and a
+  `UserScope` with the same UUID map to different keys.
+- Routes bind the transport per request: `create_agents_router(..., transport: TenantTransportFactory | None)` calls
+  `transport.for_principal(scope)` with the token scope (merchant on `/v1/agents/investigate`, user on
+  `/v1/agents/transfer-rca`) and passes the bound transport to `run_agents` / `run_transfer_rca`. `create_app` passes
+  `RedisStreamTransport(deps.redis)` (or None without Redis), as before.
+- Best effort is unchanged: Redis down → the investigation, its response and the persisted trail are identical.
+- ACL boundary (deployment, not code): the per-tenant key is the Redis ACL unit. A tenant-facing consumer gets a
+  user with `resetkeys ~ops_ai:agent_messages:merchant:<merchant_id>` (or `...:user:<user_id>`) and `+xread +xrange
+  +xrevrange` only; the shared `ops_ai:agent_messages` key and the `ops_ai:agent_messages:*` pattern are reserved for
+  the ops-ai writer and ops consumers. Redis ACL users are not provisioned by the compose stack.
 
 ## 5. Routes (registered in `create_app`)
 All JSON, `Cache-Control: no-store` on agent / feedback / bulk / search responses, 401/403 as the other routes.

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 from sqlalchemy.orm import Session, sessionmaker
 
-from ops_ai.agents.bus import MessageTransport, load_messages
+from ops_ai.agents.bus import MessageTransport, TenantTransportFactory, load_messages
 from ops_ai.agents.messages import AgentContribution, AgentMessage, JsonScalar
 from ops_ai.agents.rca import narrate_transfer_rca, run_transfer_rca
 from ops_ai.agents.supervisor import narrate_investigation, run_agents
@@ -131,7 +131,7 @@ def create_agents_router(
     clock: Clock,
     merchant_scope: Callable[..., Scope],
     user_scope: Callable[..., UserScope],
-    transport: MessageTransport | None = None,
+    transport: TenantTransportFactory | None = None,
     *,
     dispute_records: DisputeRecordSource | None = None,
 ) -> APIRouter:
@@ -139,12 +139,15 @@ def create_agents_router(
     /v1/agents/transfer-rca (user token)."""
     router = APIRouter()
 
+    def _bound(scope: Scope | UserScope) -> MessageTransport | None:
+        return None if transport is None else transport.for_principal(scope)
+
     @router.post("/v1/agents/investigate")
     def post_agents_investigate(
         body: AgentInvestigateRequest, scope: Annotated[Scope, Depends(merchant_scope)], response: Response
     ) -> AgentInvestigateResponse:
         with session_factory() as session:
-            found = run_agents(session, scope, body.question, clock(), transport, dispute_records)
+            found = run_agents(session, scope, body.question, clock(), _bound(scope), dispute_records)
             session.commit()
         result = narrate_investigation(found, body.question, llm)
         response.headers["Cache-Control"] = NO_STORE
@@ -177,7 +180,7 @@ def create_agents_router(
         body: TransferRcaRequest, scope: Annotated[UserScope, Depends(user_scope)], response: Response
     ) -> TransferRcaResponse:
         with session_factory() as session:
-            found = run_transfer_rca(session, scope, body.transfer_id, clock(), transport)
+            found = run_transfer_rca(session, scope, body.transfer_id, clock(), _bound(scope))
             session.commit()
         if found is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "transfer not found")

@@ -18,41 +18,126 @@ from ops_ai.agents.messages import (
     agent_name,
     evidence_ref_tuple,
     json_payload,
+    message_from_json,
     message_intent,
     message_to_json,
 )
 from ops_ai.agents.models import AgentMessageRecord
 from ops_ai.clock import Clock
-from ops_ai.scope import Scope
+from ops_ai.scope import Scope, UserScope
 
 MAX_MESSAGES = 16
 DEFAULT_STREAM = "ops_ai:agent_messages"
 DEFAULT_STREAM_MAXLEN = 10_000
 
 
+TENANT_STREAM_PREFIX = "ops_ai:agent_messages"
+TENANT_STREAM_MAXLEN = 1_000
+DEFAULT_TENANT_READ_COUNT = 100
+
+TenantPrincipal = Scope | UserScope
+
+
 class MessageTransport(Protocol):
     def publish(self, message: AgentMessage) -> None: ...
 
 
+class TenantTransportFactory(Protocol):
+    def for_principal(self, principal: TenantPrincipal) -> MessageTransport: ...
+
+
+def tenant_stream_key(principal: TenantPrincipal) -> str:
+    """Derived from the principal only: the per-tenant key is the Redis ACL unit."""
+    if isinstance(principal, Scope):
+        return f"{TENANT_STREAM_PREFIX}:merchant:{principal.merchant_id}"
+    return f"{TENANT_STREAM_PREFIX}:user:{principal.user_id}"
+
+
+def _xadd_best_effort(
+    redis: Redis, stream: str, message: AgentMessage, maxlen: int, approximate: bool
+) -> None:
+    """The persisted trail is the audit record, so a Redis outage never fails the investigation (and the
+    payload is never logged)."""
+    try:
+        redis.xadd(stream, {"message": message_to_json(message)}, maxlen=maxlen, approximate=approximate)
+    except RedisError:
+        return
+
+
 class RedisStreamTransport:
-    """Mirrors every message to a capped Redis stream so other processes can follow an investigation."""
+    """Mirrors every message to a capped, ops-wide Redis stream; `for_principal` adds the tenant's own
+    stream."""
 
     def __init__(
-        self, redis: Redis, stream: str = DEFAULT_STREAM, maxlen: int = DEFAULT_STREAM_MAXLEN
+        self,
+        redis: Redis,
+        stream: str = DEFAULT_STREAM,
+        maxlen: int = DEFAULT_STREAM_MAXLEN,
+        tenant_maxlen: int = TENANT_STREAM_MAXLEN,
     ) -> None:
         self._redis = redis
         self._stream = stream
         self._maxlen = maxlen
+        self._tenant_maxlen = tenant_maxlen
 
     def publish(self, message: AgentMessage) -> None:
-        """Best effort: the persisted trail is the audit record, so a Redis outage never fails the
-        investigation (and the payload is never logged)."""
-        try:
-            self._redis.xadd(
-                self._stream, {"message": message_to_json(message)}, maxlen=self._maxlen, approximate=True
-            )
-        except RedisError:
-            return
+        _xadd_best_effort(self._redis, self._stream, message, self._maxlen, approximate=True)
+
+    def for_principal(self, principal: TenantPrincipal) -> "TenantStreamTransport":
+        return TenantStreamTransport(self, self._redis, tenant_stream_key(principal), self._tenant_maxlen)
+
+
+class TenantStreamTransport:
+    """The shared mirror plus one tenant's stream, trimmed exactly so it never exceeds its bound."""
+
+    def __init__(self, shared: RedisStreamTransport, redis: Redis, stream_key: str, maxlen: int) -> None:
+        self._shared = shared
+        self._redis = redis
+        self._maxlen = maxlen
+        self.stream_key = stream_key
+
+    def publish(self, message: AgentMessage) -> None:
+        self._shared.publish(message)
+        _xadd_best_effort(self._redis, self.stream_key, message, self._maxlen, approximate=False)
+
+
+def read_tenant_messages(
+    redis: Redis, principal: TenantPrincipal, count: int = DEFAULT_TENANT_READ_COUNT
+) -> list[AgentMessage]:
+    """The newest `count` messages of the principal's own stream, oldest first; no caller-chosen key."""
+    if count <= 0:
+        return []
+    try:
+        raw = redis.xrevrange(tenant_stream_key(principal), count=count)
+    except RedisError:
+        return []
+    if not raw:
+        return []
+    messages: list[AgentMessage] = []
+    for _entry_id, fields in reversed(raw):
+        parsed = _parse_entry(fields)
+        if parsed is not None:
+            messages.append(parsed)
+    return messages
+
+
+def _text(value: object) -> str | None:
+    """Clients with and without `decode_responses` both read back."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value if isinstance(value, str) else None
+
+
+def _parse_entry(fields: object) -> AgentMessage | None:
+    if not isinstance(fields, dict):
+        return None
+    raw = next((_text(value) for key, value in fields.items() if _text(key) == "message"), None)
+    if raw is None:
+        return None
+    try:
+        return message_from_json(raw)
+    except (ValueError, KeyError, TypeError):
+        return None
 
 
 class MessageBudgetExceededError(Exception):
