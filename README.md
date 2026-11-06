@@ -13,7 +13,7 @@ queries (SQ1–SQ4) over HTTP against a freshly seeded stack; the captured input
 
 | Deliverable | File |
 |---|---|
-| Architecture diagram (DL1) | [docs/architecture.png](docs/architecture.png) / [docs/architecture.pdf](docs/architecture.pdf) |
+| Architecture diagram (DL1) | Data-flow overview: [docs/architecture-overview.pdf](docs/architecture-overview.pdf) / [.jpg](docs/architecture-overview.jpg); deployment detail: [docs/architecture.pdf](docs/architecture.pdf) / [.png](docs/architecture.png) |
 | Design decisions and trade-offs (DL2) | [docs/design.md](docs/design.md) |
 | Code + README with E2E examples (DL3) | this README, [Sample queries](#sample-queries-sq1sq4) |
 | 10-minute presentation (DL4, draft) | [docs/presentation.md](docs/presentation.md) |
