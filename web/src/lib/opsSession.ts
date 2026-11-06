@@ -1,4 +1,4 @@
-import { NOT_SIGNED_IN, sendRequest, type ApiRequest, type ApiResult } from "./api";
+import { NOT_SIGNED_IN, sendRequest, type ApiBase, type ApiRequest, type ApiResult } from "./api";
 
 export interface OpsSessionState {
   /** Gateway ops session (aud gateway-ops, 15 min) from POST /v1/ops/sessions; password + TOTP. */
@@ -48,9 +48,11 @@ export function createOpsSessionStore(): OpsSessionStore {
 /** none: no Authorization. opsSession: the gateway ops session. opsAi: the ops-ai ops token. */
 export type OpsAuth = "none" | "opsSession" | "opsAi";
 
-export interface OpsApiRequest extends Omit<ApiRequest, "auth"> {
-  auth: OpsAuth;
-}
+/** Each credential goes only to the service that issued or accepts it: the session to gw, the ops-ai token to ops. */
+export type OpsApiRequest = Omit<ApiRequest, "auth" | "base"> &
+  ({ auth: "none"; base: ApiBase } | { auth: "opsSession"; base: "gw" } | { auth: "opsAi"; base: "ops" });
+
+const CREDENTIAL_BASE: Record<Exclude<OpsAuth, "none">, ApiBase> = { opsSession: "gw", opsAi: "ops" };
 
 export interface OpsCredentials {
   email: string;
@@ -82,14 +84,19 @@ interface TokenResponse {
 
 const TOTP_CODE = /^\d{6}$/;
 
+/** token: a new ops-ai token. rejected: the session itself answered 401. failed: anything else (503, network, 403). */
+type RefreshOutcome = { kind: "token"; token: string } | { kind: "rejected" } | { kind: "failed" };
+
 /**
- * A 401 on an opsAi request refreshes the ops-ai token once with the ops session (concurrent 401s share one
- * refresh) and repeats the request; a 401 that survives, or any 401 on the session, signs the ops user out.
- * A 403 (role outside the route policy) keeps the session.
+ * A 401 on an opsAi request refreshes the ops-ai token once with the ops session (concurrent 401s of the same
+ * session share one refresh) and repeats the request; a 401 that survives, a 401 on the refresh, or a 401 on a
+ * session request signs the ops user out. A refresh that fails for another reason keeps the session and returns
+ * the original 401. A 403 (role outside the route policy) keeps the session. Every request remembers the session it
+ * started under and never clears or refreshes a different (newer) session when its answer arrives late.
  */
 export function createOpsApiClient(deps: OpsApiClientDeps): OpsApiClient {
   const { store } = deps;
-  let refreshing: Promise<string | null> | null = null;
+  const refreshing = new Map<string, Promise<RefreshOutcome>>();
 
   function credentialFor(auth: OpsAuth): string | null {
     const state = store.get();
@@ -98,27 +105,54 @@ export function createOpsApiClient(deps: OpsApiClientDeps): OpsApiClient {
     return null;
   }
 
+  function stillSignedInAs(sessionToken: string | null): boolean {
+    return sessionToken !== null && store.get().sessionToken === sessionToken;
+  }
+
   async function issueOpsAiToken(sessionToken: string): Promise<ApiResult<TokenResponse>> {
     return sendRequest<TokenResponse>(deps.fetch, { base: "gw", path: "/v1/ops/ops-ai-tokens", method: "POST" }, sessionToken);
   }
 
-  async function refreshOpsAiToken(): Promise<string | null> {
-    const sessionToken = store.get().sessionToken;
-    if (sessionToken === null) return null;
+  async function refreshOpsAiToken(sessionToken: string): Promise<RefreshOutcome> {
     const result = await issueOpsAiToken(sessionToken);
-    if (!result.ok || typeof result.data.access_token !== "string") return null;
-    if (store.get().sessionToken !== sessionToken) return null;
-    store.setOpsAiToken(result.data.access_token);
-    return result.data.access_token;
+    if (!result.ok) return result.status === 401 ? { kind: "rejected" } : { kind: "failed" };
+    if (typeof result.data.access_token !== "string") return { kind: "failed" };
+    if (stillSignedInAs(sessionToken)) store.setOpsAiToken(result.data.access_token);
+    return { kind: "token", token: result.data.access_token };
   }
 
-  function sharedRefresh(): Promise<string | null> {
-    if (refreshing === null) {
-      refreshing = refreshOpsAiToken().finally(() => {
-        refreshing = null;
+  function sharedRefresh(sessionToken: string): Promise<RefreshOutcome> {
+    let pending = refreshing.get(sessionToken);
+    if (pending === undefined) {
+      pending = refreshOpsAiToken(sessionToken).finally(() => {
+        refreshing.delete(sessionToken);
       });
+      refreshing.set(sessionToken, pending);
     }
-    return refreshing;
+    return pending;
+  }
+
+  function signOutIfStill(sessionToken: string | null): void {
+    if (stillSignedInAs(sessionToken)) store.clear();
+  }
+
+  async function send<T>(req: OpsApiRequest, token: string | null, sessionAtStart: string | null): Promise<ApiResult<T>> {
+    const result = await sendRequest<T>(deps.fetch, req, token);
+    if (result.ok || result.status !== 401 || req.auth === "none") return result;
+    if (sessionAtStart === null || !stillSignedInAs(sessionAtStart)) return result;
+    if (req.auth === "opsSession") {
+      store.clear();
+      return result;
+    }
+    const refresh = await sharedRefresh(sessionAtStart);
+    if (refresh.kind === "failed" || !stillSignedInAs(sessionAtStart)) return result;
+    if (refresh.kind === "rejected") {
+      store.clear();
+      return result;
+    }
+    const repeated = await sendRequest<T>(deps.fetch, req, refresh.token);
+    if (!repeated.ok && repeated.status === 401) signOutIfStill(sessionAtStart);
+    return repeated;
   }
 
   return {
@@ -150,18 +184,13 @@ export function createOpsApiClient(deps: OpsApiClientDeps): OpsApiClient {
       return { ok: true };
     },
 
-    async request<T>(req: OpsApiRequest): Promise<ApiResult<T>> {
-      const token = credentialFor(req.auth);
-      if (req.auth !== "none" && token === null) return NOT_SIGNED_IN;
-      let result = await sendRequest<T>(deps.fetch, req, token);
-      if (result.ok || result.status !== 401 || req.auth === "none") return result;
-      if (req.auth === "opsAi") {
-        const fresh = await sharedRefresh();
-        if (fresh !== null) result = await sendRequest<T>(deps.fetch, req, fresh);
-        if (result.ok || result.status !== 401) return result;
+    request<T>(req: OpsApiRequest): Promise<ApiResult<T>> {
+      if (req.auth !== "none" && req.base !== CREDENTIAL_BASE[req.auth]) {
+        throw new Error(`ops credential ${req.auth} is only sent to ${CREDENTIAL_BASE[req.auth]}`);
       }
-      store.clear();
-      return result;
+      const token = credentialFor(req.auth);
+      if (req.auth !== "none" && token === null) return Promise.resolve(NOT_SIGNED_IN);
+      return send<T>(req, token, store.get().sessionToken);
     },
   };
 }

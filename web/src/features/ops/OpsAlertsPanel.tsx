@@ -21,18 +21,23 @@ export function OpsAlertsPanel(props: { pollMs?: number; onSelectMerchant: (merc
     let since: string | undefined;
 
     async function poll(): Promise<void> {
-      const result = await client.request<OpsAlertsResponse>({
-        base: "ops",
-        path: "/v1/ops/analytics/alerts",
-        auth: "opsAi",
-        query: { limit: ALERTS_LIMIT, since },
-      });
-      if (!active) return;
-      setError(result.ok ? null : messageFor(result.code));
-      if (result.ok) {
-        since = result.data.server_time;
-        const items = result.data.items;
-        setAlerts((previous) => mergeAlerts(previous, items));
+      try {
+        const result = await client.request<OpsAlertsResponse>({
+          base: "ops",
+          path: "/v1/ops/analytics/alerts",
+          auth: "opsAi",
+          query: { limit: ALERTS_LIMIT, since },
+        });
+        if (!active) return;
+        setError(result.ok ? null : messageFor(result.code));
+        if (result.ok) {
+          since = result.data.server_time;
+          const items = result.data.items;
+          setAlerts((previous) => mergeAlerts(previous, items));
+        }
+      } catch {
+        if (!active) return;
+        setError(messageFor("network_error"));
       }
       timer = setTimeout(() => void poll(), pollMs);
     }

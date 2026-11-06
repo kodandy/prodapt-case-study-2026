@@ -20,13 +20,20 @@ export function OpsSignIn(): ReactNode {
     if (inFlight.current) return;
     inFlight.current = true;
     setPending(true);
-    const outcome = await client.signIn({ email, password, totpCode: code });
-    inFlight.current = false;
-    if (!outcome.ok) {
+    let failure: string | null = null;
+    try {
+      const outcome = await client.signIn({ email, password, totpCode: code });
+      if (!outcome.ok) failure = outcome.code;
+    } catch {
+      failure = "network_error";
+    } finally {
+      inFlight.current = false;
+    }
+    if (failure !== null) {
       setPending(false);
       setPassword("");
       setCode("");
-      setMessage(messageFor(outcome.code));
+      setMessage(messageFor(failure));
     }
   }
 

@@ -110,11 +110,11 @@ export async function sendRequest<T>(
     let response: Response;
     try {
       response = await fetchFn(url, init);
+      last = await toResult<T>(response);
     } catch {
       last = NETWORK_ERROR;
       continue;
     }
-    last = await toResult<T>(response);
     if (!RETRYABLE.has(response.status)) return last;
   }
   return last;
