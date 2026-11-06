@@ -130,7 +130,9 @@ def test_merchant_token_for_a_support_key_verifies_in_ops_ai_as_a_support_scope(
 
     # Assert
     assert response.status_code == 201
-    assert principal == Scope(merchant_id=credentials.merchant_id, role="merchant_support")
+    assert principal.merchant_id == credentials.merchant_id
+    assert principal.role == "merchant_support"
+    assert isinstance(principal.api_key_id, uuid.UUID)
     assert type(principal) is Scope
 
 
@@ -147,4 +149,7 @@ def test_merchant_token_for_an_admin_key_verifies_in_ops_ai_as_an_admin_scope(
 
     # Assert
     assert response.status_code == 201
-    assert principal == Scope(merchant_id=credentials.merchant_id, role="merchant_admin")
+    assert type(principal) is Scope
+    assert principal.merchant_id == credentials.merchant_id
+    assert principal.role == "merchant_admin"
+    assert isinstance(principal.api_key_id, uuid.UUID)
