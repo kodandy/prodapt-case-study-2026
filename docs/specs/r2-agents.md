@@ -202,7 +202,8 @@ def message_to_json(message) -> str; def message_from_json(raw: str) -> AgentMes
 MAX_MESSAGES = 16
 class MessageTransport(Protocol): def publish(self, message: AgentMessage) -> None: ...
 class RedisStreamTransport:   # optional transport: XADD <stream> MAXLEN ~ maxlen  {"message": message_to_json(m)}
-    def __init__(self, redis: Redis, stream: str = "ops_ai:agent_messages", maxlen: int = 10000)
+    def __init__(self, redis: Redis, stream: str = "ops_ai:agent_messages", maxlen: int = 10000,
+                 tenant_maxlen: int = 1000)   # for_principal / per-tenant streams: §4.3
 class MessageBudgetExceededError(Exception)
 class InProcessBus:
     def __init__(self, correlation_id, clock, max_messages=MAX_MESSAGES, transport: MessageTransport | None = None)
