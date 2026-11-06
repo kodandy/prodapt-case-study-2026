@@ -205,6 +205,8 @@ def test_downgrade_removes_only_the_new_table_and_upgrade_restores_it(engine: En
 
     # Act
     try:
+        command.downgrade(config, REVISION)
+        at_revision = _tables(engine)
         command.downgrade(config, PREVIOUS_REVISION)
         downgraded = _tables(engine)
     finally:
@@ -212,8 +214,8 @@ def test_downgrade_removes_only_the_new_table_and_upgrade_restores_it(engine: En
     restored = _tables(engine)
 
     # Assert
-    assert set(original) - set(downgraded) == {"alert_notifications"}
-    assert set(downgraded) - set(original) == set()
+    assert set(at_revision) - set(downgraded) == {"alert_notifications"}
+    assert set(downgraded) - set(at_revision) == set()
     assert restored == original
 
 

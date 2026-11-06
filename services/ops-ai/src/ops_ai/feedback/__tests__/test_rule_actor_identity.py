@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from conftest import ALEMBIC_CONFIGS, TEST_NOW
 
 REVISION = "f3c8a1d6e9b4"
-PREVIOUS_REVISION = "e5a9c3f17b28"
+PREVIOUS_REVISION = "f3c8a2d6b915"
 MERCHANT = uuid.UUID("aaaaaaaa-0000-4000-8000-000000000001")
 OTHER_MERCHANT = uuid.UUID("bbbbbbbb-0000-4000-8000-000000000002")
 API_KEY = uuid.UUID("dddddddd-0000-4000-8000-000000000004")
