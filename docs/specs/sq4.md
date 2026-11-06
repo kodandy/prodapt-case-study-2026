@@ -179,7 +179,7 @@ Another merchant's token sees its own statement only. A changed `payment_facts.a
   `line:fx`, `crosscheck:` evidence refs, and a user token gets 403 on this route. It prints the lines, the gap and
   the summary. Earlier checks stay.
 
-## Known gaps (README)
+## Known gaps ([docs/known-gaps.md](../known-gaps.md))
 
 - The gateway settlement batch, `gw.settlement.v1` and payouts are Design; settlement entries are seeded.
 - One contract and one FX snapshot for every merchant; per-merchant terms and live rates are Design.
@@ -243,7 +243,7 @@ and reserve exceed what is left). The numbers stay signed in the API (`net_minor
 - `crosscheck:{period}` evidence (verified) states the scope: `"{n} payments of {period} matched the payment
   projection (same amount, currency and card method, succeeded); refund and chargeback flags come from the settlement
   report only"`.
-- README known gaps: refund / chargeback flags are not cross-checked (the projection has no refund or dispute state
+- Known gaps ([docs/known-gaps.md](../known-gaps.md)): refund / chargeback flags are not cross-checked (the projection has no refund or dispute state
   until B3); fee lines are recomputed from the contract constants, which are the same constants that built them.
 
 ### H3. Entry integrity (RT-003 / RT-004 / L3)
@@ -261,7 +261,7 @@ and reserve exceed what is left). The numbers stay signed in the API (`net_minor
 - `explain_settlement` with `period=None` picks the newest period among well-formed ones only (filter by the same
   pattern), so a malformed row cannot become "latest" even without the constraint.
 
-### Left as known gaps (README)
+### Left as known gaps ([docs/known-gaps.md](../known-gaps.md))
 
 - More than `MAX_SETTLEMENT_ENTRIES` entries in one period → always `too_many_entries` (M2); streaming aggregation is
   Design.
