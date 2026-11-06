@@ -18,7 +18,7 @@ Deployment-level detail (every container, store, stream and port): [docs/archite
 | Architecture diagram (DL1) | Data-flow overview: [docs/architecture-overview.pdf](docs/architecture-overview.pdf) / [.jpg](docs/architecture-overview.jpg); deployment detail: [docs/architecture.pdf](docs/architecture.pdf) / [.png](docs/architecture.png) |
 | Design decisions and trade-offs (DL2) | [docs/design.md](docs/design.md) |
 | Code + README with E2E examples (DL3) | this README; all four sample queries with input and output: [docs/sample-queries.md](docs/sample-queries.md) |
-| 10-minute presentation (DL4, draft) | [docs/presentation.md](docs/presentation.md) |
+| 10-minute presentation (DL4) | Slides: [docs/slides.pdf](docs/slides.pdf) ([source](docs/slides.md)); talk script with speaker notes: [docs/presentation.md](docs/presentation.md) |
 
 More: [requirements traceability](docs/requirements-traceability.md) (brief → code → tests),
 [production readiness](docs/production-readiness.md) (NFRs, measured vs design only),

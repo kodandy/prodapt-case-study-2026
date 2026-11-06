@@ -1,7 +1,9 @@
-# AI-Powered Payment Gateway Platform — 10 分プレゼン / 10-minute presentation (DL4, draft)
+# AI-Powered Payment Gateway Platform — 10 分プレゼン / 10-minute presentation (DL4)
 
 > EN: 12 slides + 2 appendix slides. Each slide has an English title and a 1–2 line English summary of its claim,
 > evidence and constraint; the slide body and speaker notes are in Japanese.
+>
+> Slides: [slides.pdf](slides.pdf) (rendered with marp-cli from [slides.md](slides.md); English slides, Japanese speaker notes from this file).
 
 本編 12 枚 + Appendix 2 枚。スライドは `---` 区切りで、各スライドの `Note:` 以下が speaker notes。
 
@@ -21,7 +23,9 @@
 | セキュリティ・NFR・本番設計 | 2:00 |
 | gap・次の一手 | 0:35 |
 
-デモはライブ実行しない。README の出力（2026-11-05、fresh stack で取得）を見せる。
+デモは本番前に `make demo` を一度通しておき、本番では `scripts/sample_queries.py` を 1 回ライブ実行して SQ1–SQ4 を見せる
+（手順とタイミング: [slides.pdf](slides.pdf) Appendix C）。スタックが落ちたら [sample-queries.md](sample-queries.md) の取得済み出力
+（2026-11-05、fresh stack で取得）に切り替える。
 
 根拠: `README.md`、`docs/design.md`、`docs/requirements-traceability.md`、`docs/production-readiness.md`、
 `docs/architecture.png`、`docs/perf/README.md`。
