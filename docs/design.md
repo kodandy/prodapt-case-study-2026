@@ -537,8 +537,9 @@ Where each lock is, and what proves it:
     (4xx other than those, invalid or incomplete body, response over 64 KiB) goes straight to the evidence-only
     answer (D5.5). Output is capped at 600 tokens, at most 8 calls run at once, and `store` is false.
   - **Embeddings:** `text-embedding-3-small` for the OpenAI vector column, filled by the backfill CLI
-    (`python -m ops_ai.search`) and used for query embeddings when a key is set. The default is
-    `LocalHashEmbedder` (feature hashing, no network).
+    (`python -m ops_ai.search`) and used for query embeddings only when `OPS_AI_EMBEDDER=openai` and a key are both
+    set. The default (`config.py`, `embedder = "local"`) is `LocalHashEmbedder` (feature hashing, spelling-level, no
+    network); compose does not pass `OPS_AI_EMBEDDER`, so the demo always uses it.
   - **No key:** `MockLlm` and `LocalHashEmbedder`. The whole stack, the demo and the eval suite then run offline.
   Both model names can be overridden with `OPENAI_CHAT_MODEL` / `OPENAI_FALLBACK_MODEL`.
 - **Why:** Narrating a few hundred tokens of cited evidence needs instruction following and citation discipline, not
@@ -917,8 +918,13 @@ Nothing in this section is implemented or measured. Numbers are design targets o
 - **Hot-row mitigation:** a large merchant's payable account is append-only (no lock). A hot *user* wallet still
   serializes; if that matters, split it into N sub-balances and draw from any with enough funds.
 - **What we gave up:** Cross-shard queries (history across merchants) move to the analytics side (BigQuery via
-  Pub/Sub). No load test has been run (P1-5 not done), so the per-pod throughput used to size this is unknown; sizing
-  waits for a measured k6 run at a stated load.
+  Pub/Sub). A k6 run of `POST /v1/payments` exists ([perf results](perf/README.md), 2026-11-05, one run each, 90 s
+  `constant-arrival-rate`): at an offered 2 req/s, p50 405 ms / p95 1.91 s / p99 2.82 s with 0 % errors; at an offered
+  40 req/s the achieved throughput saturates near 7 completed req/s (iterations dropped, p99 44.5 s). The P99 < 2 s
+  target is not met. Conditions: one laptop, a Docker VM shared by about 14 compose stacks, one single-worker
+  gateway process, local Postgres and Redis, simulator acquirer, all load on 3 test cards (per-card lock
+  contention). So these numbers do not size a production pod; sizing still waits for a run on dedicated hardware
+  with many distinct cards.
 - **Alternatives:** Vertical scaling of one Postgres (does not reach the target); a CRDT/eventually consistent balance
   (cannot guarantee "never overdraw" synchronously).
 
@@ -929,7 +935,9 @@ Nothing in this section is implemented or measured. Numbers are design targets o
 - **Decision:** Service-to-service traffic (gateway ↔ vault, ops-ai → gateway query API, workers → databases) uses
   mTLS with workload identities (GKE Workload Identity + a service mesh such as Cloud Service Mesh), with authorization
   policies naming which service account may call which service.
-- **Why:** Today only the edge has TLS (nginx in the demo); inside compose, traffic is plaintext on a private network.
+- **Why:** Today only browser → nginx is encrypted, and only with `make tls-up` (the `web-tls` profile); nginx → web,
+  web → gateway / ops-ai APIs, the services → Postgres and Redis, and the default merchant gRPC port are plaintext on the
+  compose network. The only field-level encryption is the TOTP secret (AES-256-GCM, D6.2).
   The demo's JWT verification proves *who the user is* but not *which service is calling*.
 - **What we gave up:** Mesh operational overhead and some latency.
 - **Alternatives:** Per-service TLS with hand-managed certificates (rotation burden); network policies only (no

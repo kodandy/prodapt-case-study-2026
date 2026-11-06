@@ -22,7 +22,7 @@ live walkthrough. **Design** = described in `docs/design.md` only; reported as a
 | B3 history, refunds, disputes | — | `GET /v1/payments`, full/partial refund; dispute state machine (`opened → under_review → won | lost`) | Thin |
 | B4 NL failure-reason detection | — | Rules-first taxonomy + suggested fix, through SQ1 | Demo |
 | B5 RAG support assistant | Assistant with evidence, T2 fallback | Retrieval of incidents + transactions, grounded answer | Demo |
-| B6 hybrid search | Postgres FTS | + pgvector with a pinned embedder, RRF fusion | Thin |
+| B6 hybrid search | Postgres FTS | + pgvector, RRF fusion; default embedder is the local feature hash (spelling-level, not semantic), OpenAI embeddings optional via `OPS_AI_EMBEDDER=openai` + backfill | Thin |
 | B7 fraud scoring + flagging | — | Rule score at charge; card-testing detector (SQ3) | Demo |
 | B8 REST/gRPC, validation, idempotency | REST charge, validation, idempotency | REST history/refund; gRPC **Design** | Demo (REST) |
 | B9 tool calling | — | Read-only tools per SQ (`aggregate_failures`, `get_payment_status`, `analyze_fraud`, `explain_settlement`, `search_incidents`) | Demo |

@@ -72,7 +72,8 @@ def consumer_payment_router(
 ) -> APIRouter:
     """Routes (Bearer session; every response carries Cache-Control: no-store):
     - POST /v1/me/payments (Idempotency-Key, visible ASCII, 1-200 chars) {merchant_id, amount_minor, currency,
-      card} → the charge outcome; unknown merchant → 404 merchant_not_found; bad or missing key → 400.
+      card, settlement_currency?} → the charge outcome; unknown merchant → 404 merchant_not_found; bad or
+      missing key → 400.
     - GET /v1/me/payments?limit&cursor&state&created_from&created_to → {items, next_cursor}: payments the user
       paid, newest first.
     - POST /v1/me/payments/{payment_id}/refund-requests {amount_minor?, note?} → 201 {payment_id,
@@ -102,7 +103,11 @@ def consumer_payment_router(
                 headers=NO_STORE_HEADERS,
             )
         request = ChargeRequest(
-            amount_minor=body.amount_minor, currency=body.currency, method=body.method, card=body.card
+            amount_minor=body.amount_minor,
+            currency=body.currency,
+            method=body.method,
+            card=body.card,
+            settlement_currency=body.settlement_currency,
         )
         outcome = pay_merchant(charge, user_id, body.merchant_id, idempotency_key, request)
         return JSONResponse(outcome.body, status_code=outcome.status_code, headers=NO_STORE_HEADERS)

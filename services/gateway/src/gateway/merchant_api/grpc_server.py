@@ -107,6 +107,25 @@ def _abort(context: grpc.ServicerContext, code: grpc.StatusCode, details: str) -
     raise AssertionError("abort returned")
 
 
+_UNPROCESSABLE_VIOLATIONS = {
+    "idempotency_key_reused": FieldViolation("idempotency_key", "idempotency_key_reused"),
+    "fx_amount_too_small": FieldViolation("amount_minor", "fx_amount_too_small"),
+}
+_UNPROCESSABLE_PRECONDITIONS = frozenset({"fx_rate_unavailable"})
+
+
+def _abort_unprocessable(context: grpc.ServicerContext, error: object) -> NoReturn:
+    """A 422 from `charge_card`: each known code gets its own status; an unknown one is a fixed INTERNAL."""
+    if isinstance(error, str):
+        violation = _UNPROCESSABLE_VIOLATIONS.get(error)
+        if violation is not None:
+            _abort_invalid(context, [violation])
+        if error in _UNPROCESSABLE_PRECONDITIONS:
+            _abort(context, grpc.StatusCode.FAILED_PRECONDITION, error)
+    _logger.error("grpc CreatePayment: unmapped 422 error code")
+    _abort(context, grpc.StatusCode.INTERNAL, "internal error")
+
+
 def _metadata_value(context: grpc.ServicerContext, name: str) -> str | None:
     for key, value in context.invocation_metadata():
         if key == name and isinstance(value, str):
@@ -199,6 +218,8 @@ class MerchantPaymentsServicer(payments_pb2_grpc.MerchantPaymentsServicer):
                 "exp_year": request.card.exp_year,
                 "cvc": request.card.cvc,
             }
+        if request.HasField("settlement_currency"):
+            payload["settlement_currency"] = request.settlement_currency
         try:
             charge_request = validate_charge_request(payload)
             key = require_idempotency_key(_metadata_value(context, "idempotency-key"), IDEMPOTENCY_LABEL)
@@ -206,7 +227,7 @@ class MerchantPaymentsServicer(payments_pb2_grpc.MerchantPaymentsServicer):
             _abort_invalid(context, exc.violations)
         outcome = charge_card(self._deps.charge, merchant_id, key, charge_request)
         if outcome.status_code == 422:
-            _abort_invalid(context, [FieldViolation("idempotency_key", "idempotency_key_reused")])
+            _abort_unprocessable(context, outcome.body.get("error"))
         if outcome.status_code == 409:
             _abort(context, grpc.StatusCode.ABORTED, "idempotency_in_progress")
         if outcome.status_code not in (201, 202):

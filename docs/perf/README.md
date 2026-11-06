@@ -32,6 +32,6 @@ Target (NFR-PERF): p99 < 2 s, error rate < 1 %. A 402 decline counts as a correc
   seconds. At 2 req/s the median is 405 ms, but the tail (p95 1.9 s, p99 2.8 s) is above target on the
   shared VM.
 - What this does and does not show: it is a hot-card contention test on an overloaded laptop. It does not
-  measure the production design (many cards, horizontal gateway replicas, see P2-7 in
-  `docs/requirements-traceability.md`). A clean measurement needs a dedicated machine and a load mix with
+  measure the production design (many cards, horizontal gateway replicas, see
+  [Design P2-7](../design.md#p2-7-100k-tps-topology)). A clean measurement needs a dedicated machine and a load mix with
   many distinct (tokenised) cards. That is not possible today because only 5 test PANs are allowlisted.
