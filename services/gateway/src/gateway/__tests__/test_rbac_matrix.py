@@ -1,21 +1,25 @@
 """Generated route x role authorization matrix, from docs/specs/compliance-rbac.md section 1.
 
-Every route the app registers must have a ROUTE_ACTIONS entry, and every non-public entry is exercised with
-a credential of each of the five roles: an allowed role must get past the credential check, every other role
-must be answered 401 (wrong kind of credential) or 403 (right kind, role not allowed).
+Every route the app registers must have a ROUTE_ACTIONS entry, every ROUTE_ACTIONS entry must be registered,
+and every non-public entry is exercised with a credential of each of the five roles: an allowed role must get
+past the credential check; a denied role holding the same kind of credential as the allowed roles (consumer
+session, merchant API key, ops session) must be answered exactly 403, and one holding another kind exactly
+401.
 """
 
 import re
 import uuid
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
-from gateway.accounts.rbac import POLICY, PUBLIC, ROLES, ROUTE_ACTIONS, Role
+from gateway.accounts.rbac import MERCHANT_ROLES, OPS_ROLES, POLICY, PUBLIC, ROLES, ROUTE_ACTIONS, Role
 from gateway.accounts.service import issue_api_key, sign_up
 from gateway.accounts.sessions import issue_session_token
 from gateway.admin import OpsPrincipal, bootstrap_merchant, bootstrap_ops_user, issue_ops_session_token
@@ -32,10 +36,26 @@ PASSWORD = "matrix-password-correct-7Q"
 SKIPPED_METHODS = frozenset({"HEAD", "OPTIONS"})
 PATH_PARAMETER = re.compile(r"\{[^}]+\}")
 
+CredentialKind = Literal["consumer_session", "merchant_api_key", "ops_session"]
+
 MATRIX: list[tuple[str, Role]] = [
     (key, role) for key, action in sorted(ROUTE_ACTIONS.items()) if action != PUBLIC for role in ROLES
 ]
 MATRIX_IDS = [f"{key}|{role}" for key, role in MATRIX]
+NON_PUBLIC_KEYS = sorted(key for key, action in ROUTE_ACTIONS.items() if action != PUBLIC)
+
+
+def credential_kind(role: Role) -> CredentialKind:
+    """The bearer credential a role authenticates with (docs/specs/compliance-rbac.md section 1)."""
+    if role in MERCHANT_ROLES:
+        return "merchant_api_key"
+    if role in OPS_ROLES:
+        return "ops_session"
+    return "consumer_session"
+
+
+def route_kinds(key: str) -> set[CredentialKind]:
+    return {credential_kind(role) for role in POLICY[ROUTE_ACTIONS[key]]}
 
 
 @dataclass(frozen=True)
@@ -69,6 +89,9 @@ def matrix_app(session_factory: sessionmaker[Session], clock: FixedClock, privat
         api_key_pepper=TEST_API_KEY_PEPPER,
         jwt_private_key_pem=private_pem,
         totp_encryption_key=TOTP_KEY,
+        network_token="matrix-network-token",
+        ops_admin_token="matrix-ops-admin-token",
+        demo_top_up_enabled=True,
     )
     app = create_app(deps)
     client = TestClient(app, raise_server_exceptions=False)
@@ -77,11 +100,24 @@ def matrix_app(session_factory: sessionmaker[Session], clock: FixedClock, privat
     )
 
 
+def _api_routes(routes: Sequence[object], prefix: str = "") -> Iterator[tuple[str, APIRoute]]:
+    """Every APIRoute with its full path. FastAPI 0.162 keeps an included router as one lazy entry in
+    `app.routes` that holds the original APIRouter, so included routers are walked recursively."""
+    for route in routes:
+        if isinstance(route, APIRoute):
+            yield prefix + route.path, route
+            continue
+        router = getattr(route, "original_router", None)
+        if isinstance(router, APIRouter):
+            context_prefix = getattr(getattr(route, "include_context", None), "prefix", "")
+            nested_prefix = context_prefix if isinstance(context_prefix, str) else ""
+            yield from _api_routes(router.routes, prefix + nested_prefix)
+
+
 def _registered_keys(app: FastAPI) -> set[str]:
     return {
-        f"{method} {route.path}"
-        for route in app.routes
-        if isinstance(route, APIRoute)
+        f"{method} {path}"
+        for path, route in _api_routes(app.routes)
         for method in route.methods or ()
         if method not in SKIPPED_METHODS
     }
@@ -121,11 +157,34 @@ def test_every_registered_route_has_a_route_action_entry(matrix_app: MatrixApp) 
     assert unmapped == []
 
 
+def test_every_route_action_entry_is_registered(matrix_app: MatrixApp) -> None:
+    # Arrange
+    registered = _registered_keys(matrix_app.app)
+
+    # Act
+    stale = sorted(key for key in ROUTE_ACTIONS if key not in registered)
+
+    # Assert
+    assert stale == []
+
+
+@pytest.mark.parametrize("key", NON_PUBLIC_KEYS)
+def test_every_allowed_role_of_a_route_uses_one_credential_kind(key: str) -> None:
+    # Arrange
+    allowed = POLICY[ROUTE_ACTIONS[key]]
+
+    # Act
+    kinds = route_kinds(key)
+
+    # Assert
+    assert len(allowed) >= 1
+    assert len(kinds) == 1
+
+
 @pytest.mark.parametrize(("key", "role"), MATRIX, ids=MATRIX_IDS)
 def test_route_answers_each_role_according_to_the_policy(matrix_app: MatrixApp, key: str, role: Role) -> None:
     # Arrange
-    if key not in _registered_keys(matrix_app.app):
-        pytest.skip(f"{key} is not registered by this app")
+    assert key in _registered_keys(matrix_app.app), f"{key} is not registered by this app"
     method, template = key.split(" ", 1)
     path = PATH_PARAMETER.sub(lambda _match: str(uuid.uuid4()), template)
     token = _credential(matrix_app, role)
@@ -137,5 +196,7 @@ def test_route_answers_each_role_according_to_the_policy(matrix_app: MatrixApp, 
     # Assert
     if role in POLICY[ROUTE_ACTIONS[key]]:
         assert response.status_code not in (401, 403)
+    elif credential_kind(role) in route_kinds(key):
+        assert response.status_code == 403
     else:
-        assert response.status_code in (401, 403)
+        assert response.status_code == 401

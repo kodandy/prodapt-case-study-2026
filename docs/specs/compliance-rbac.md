@@ -58,7 +58,9 @@ Enforcement: every credential dependency (merchant API key, consumer session, op
 matched route's action via `ROUTE_ACTIONS` and answers 403 `{"detail": "forbidden"}` when the principal's
 role is not allowed. A route with no entry is denied to every role except `merchant_admin` on API-key routes
 (compatibility for routes added on other branches); the generated matrix test fails for any route without an
-entry, so the gap is caught at merge.
+entry, so the gap is caught at merge. The matrix test also fails for any entry the app does not register (routes on
+included routers count), and pins the codes exactly: a denied role whose credential kind (consumer session,
+merchant API key, ops session) is the kind of the route's allowed roles gets 403, any other kind 401.
 
 Merchant roles: `api_keys.role` (`merchant_admin` default, `merchant_support`). `issue_api_key(..., role=)`
 and `create_merchant(..., role=)` take the role; `authenticate_api_key_role(session, api_key, pepper) ->

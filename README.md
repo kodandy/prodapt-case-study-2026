@@ -386,6 +386,9 @@ and is kept current per item:
   stop verifying; drop the volumes (`make demo-down && docker compose --profile demo down -v`, which also drops the
   demo database) to start over.
 - The ops-ai engine does not set `hide_parameters` yet.
+- RBAC (P0-9): routes merged after the policy table was fixed (wallets, top-ups, payouts, consumer payments,
+  disputes, notifications) reuse an existing action with the same role set instead of their own action names, so the
+  policy cannot yet grant them separately. The generated route × role matrix checks every route with exact 401/403.
 - Redis has no ACL and every process uses the same Postgres superuser. Anyone who can reach Redis can append forged
   payment events. The consumer refuses to move a payment to another merchant, but it can still record payments that
   never happened. Fix: per-service Redis ACL users and DB roles with schema grants.
