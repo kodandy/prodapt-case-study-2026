@@ -558,12 +558,16 @@ def test_downgrade_and_upgrade_only_remove_and_restore_the_two_new_tables(
     _insert_alert(session_factory)
     _execute(session_factory, INSERT_ACTOR, _actor_params())
     _execute(session_factory, INSERT_APPLIED_VERSION, _applied_params())
-    original_tables = _tables(engine)
-    original_columns = {name: _columns(engine, name) for name in original_tables if name not in NEW_TABLES}
-    original_data = _parent_data(engine)
 
     # Act
     try:
+        # Later revisions sit on top of REVISION: step down to it first so only its own tables are compared.
+        command.downgrade(config, REVISION)
+        original_tables = _tables(engine)
+        original_columns = {
+            name: _columns(engine, name) for name in original_tables if name not in NEW_TABLES
+        }
+        original_data = _parent_data(engine)
         command.downgrade(config, PREVIOUS_REVISION)
         downgraded_tables = _tables(engine)
         downgraded_columns = {name: _columns(engine, name) for name in downgraded_tables}
@@ -572,11 +576,14 @@ def test_downgrade_and_upgrade_only_remove_and_restore_the_two_new_tables(
             downgraded_revision = conn.execute(
                 text("SELECT version_num FROM ops_ai.alembic_version")
             ).scalar_one()
+        command.upgrade(config, REVISION)
+        restored_tables = _tables(engine)
+        restored_columns = {
+            name: _columns(engine, name) for name in restored_tables if name not in NEW_TABLES
+        }
+        restored_data = _parent_data(engine)
     finally:
         command.upgrade(config, "head")
-    restored_tables = _tables(engine)
-    restored_columns = {name: _columns(engine, name) for name in restored_tables if name not in NEW_TABLES}
-    restored_data = _parent_data(engine)
 
     # Assert
     assert set(original_tables) - set(downgraded_tables) == set(NEW_TABLES)
