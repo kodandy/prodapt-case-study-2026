@@ -1,0 +1,57 @@
+[
+ {
+  "incident_id": "inc_0001",
+  "title": "Card failures concentrated on BIN 400000 (issuer timeouts)",
+  "merchant_id": "mch_0001",
+  "started_at": "2026-09-14T13:00:00Z",
+  "resolved_at": "2026-09-14T16:40:00Z",
+  "root_cause": "Issuer behind BIN 400000 returned timeouts through acquirer acq_a.",
+  "fix_applied": "Rerouted BIN 400000 to acquirer acq_b until the issuer recovered.",
+  "recurrence_within_7d": false,
+  "resolution_notes": "Failure rate returned to baseline within 20 minutes of the reroute; reroute reverted next day."
+ },
+ {
+  "incident_id": "inc_0002",
+  "title": "UPI collect requests expiring",
+  "merchant_id": null,
+  "started_at": "2026-09-22T08:00:00Z",
+  "resolved_at": "2026-09-22T09:15:00Z",
+  "root_cause": "Remitter bank PSP latency above the collect timeout.",
+  "fix_applied": "Extended the collect timeout from 5 to 8 minutes.",
+  "recurrence_within_7d": true,
+  "resolution_notes": "Recurred on 2026-09-27; PSP has since added capacity."
+ },
+ {
+  "incident_id": "inc_0003",
+  "title": "Card-testing burst on a low-ticket merchant",
+  "merchant_id": "mch_0002",
+  "started_at": "2026-10-03T02:05:00Z",
+  "resolved_at": "2026-10-03T03:00:00Z",
+  "root_cause": "Bot submitting sub-1.00 USD authorizations with enumerated cards.",
+  "fix_applied": "Enabled velocity rule (>= 10 micro-amount attempts per 10 minutes per merchant) and CAPTCHA.",
+  "recurrence_within_7d": false,
+  "resolution_notes": "No further bursts for 14 days; rule kept enabled."
+ },
+ {
+  "incident_id": "inc_0004",
+  "title": "Settlement payout lower than expected",
+  "merchant_id": "mch_0003",
+  "started_at": "2026-10-10T09:00:00Z",
+  "resolved_at": "2026-10-10T11:00:00Z",
+  "root_cause": "Chargeback fees and rolling reserve were not shown in the merchant's own calculation.",
+  "fix_applied": "Sent itemized settlement breakdown and added reserve line to the statement.",
+  "recurrence_within_7d": false,
+  "resolution_notes": "Merchant confirmed the breakdown matched their records."
+ },
+ {
+  "incident_id": "inc_0005",
+  "title": "Acquirer acq_b elevated soft declines",
+  "merchant_id": null,
+  "started_at": "2026-10-18T14:00:00Z",
+  "resolved_at": null,
+  "root_cause": "Under investigation with the acquirer.",
+  "fix_applied": "Traffic weight on acq_b reduced from 50% to 30%.",
+  "recurrence_within_7d": false,
+  "resolution_notes": "Monitoring; acquirer ticket open."
+ }
+]

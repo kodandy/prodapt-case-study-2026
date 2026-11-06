@@ -5,7 +5,7 @@ expected, merchants and operations staff can find the cause with evidence. See `
 statement, `docs/architecture-detail.md` for the design and its trade-offs, and `docs/requirements-traceability.md` for the
 mapping from the brief to code and tests.
 
-Status (2026-11-05): the services run end to end as long-running compose services. `make demo` answers all four sample
+Status (2026-11-06): the services run end to end as long-running compose services. `make demo` answers all four sample
 queries (SQ1–SQ4) over HTTP against a freshly seeded stack; the captured inputs and outputs are in
 [Sample queries](#sample-queries-sq1sq4). A React web client (`web/`) runs with `make web-up`.
 
@@ -341,6 +341,11 @@ docker compose run --rm dev uv run --frozen python scripts/generate_dataset.py -
 ```
 
 Writes `transactions.csv`, `transactions.json` and `incidents.json` (git-ignored). The same seed produces byte-identical files.
+
+The output for seed 42 and 12000 records is committed as [`data/synthetic/transactions.csv`](data/synthetic/transactions.csv)
+(12000 rows + header) and [`data/synthetic/incidents.json`](data/synthetic/incidents.json), so the dataset can be read without
+running anything. `scripts/__tests__/test_committed_dataset.py` fails if these files drift from the generator. The `seed`
+service builds the same records in process from the generator rather than reading the CSV.
 
 - The 16 fields from the brief come first, in the brief's order.
 - Extension columns: `record_kind` (merchant payment or P2P transfer), `scenario`, `card_bin`, `acquirer`, `rule_id`,
