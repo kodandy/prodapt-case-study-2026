@@ -16,6 +16,7 @@ from ops_ai.db import OpsAiBase
 from ops_ai.scope import MERCHANT_ROLES
 
 TARGET_KINDS = ("alert", "answer", "incident")
+ACTOR_KINDS = ("api_key", "merchant_principal")
 VERDICTS = ("true_positive", "false_positive", "helpful", "not_helpful")
 
 
@@ -71,12 +72,18 @@ class FraudRuleVersionActor(OpsAiBase):
             ondelete="CASCADE",
         ),
         CheckConstraint(_one_of("actor_role", MERCHANT_ROLES), name="actor_role"),
+        CheckConstraint(_one_of("actor_kind", ACTOR_KINDS), name="actor_kind"),
+        CheckConstraint("(actor_kind = 'api_key') = (actor_id IS NOT NULL)", name="actor_id_matches_kind"),
     )
 
     merchant_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
     version: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     actor: Mapped[str] = mapped_column(String(64))
     actor_role: Mapped[str] = mapped_column(String(32))
+    actor_kind: Mapped[str] = mapped_column(String(32), server_default="merchant_principal")
+    """`api_key` (the gateway key named by the token) or `merchant_principal` (no key known: a token without
+    `api_key_id`, or a row written before 11-06). Merchants have no user accounts: a key is the finest id."""
+    actor_id: Mapped[uuid.UUID | None]
     created_at: Mapped[datetime]
 
 

@@ -25,7 +25,9 @@ def verify_token(token: str, public_key_pem: str, now: datetime) -> Principal:
     the injected `now`, not the wall clock, so PyJWT's own time checks are off. `iat` is required, may lie
     at most MAX_CLOCK_SKEW_SECONDS ahead of `now`, and `exp - iat` is capped at MAX_TOKEN_LIFETIME_SECONDS.
     A token carries exactly one of `merchant_id` / `user_id` / `ops_user_id` (canonical UUID string) and a
-    one-element role list of that kind. User and ops tokens must also carry the matching `sub`.
+    one-element role list of that kind. User and ops tokens must also carry the matching `sub`. A merchant
+    token may carry `api_key_id` (canonical UUID string), the gateway key that obtained it; any other token
+    carrying it is refused.
     Error messages never carry the token.
     """
     try:
@@ -57,9 +59,14 @@ def verify_token(token: str, public_key_pem: str, now: datetime) -> Principal:
     kinds = [name for name in ("merchant_id", "user_id", "ops_user_id") if name in claims]
     if len(kinds) != 1:
         raise InvalidTokenError("token needs exactly one of merchant_id, user_id and ops_user_id")
+    if kinds != ["merchant_id"] and "api_key_id" in claims:
+        raise InvalidTokenError("api_key_id is only valid on a merchant token")
     if kinds == ["merchant_id"]:
         merchant_role = _single_role(claims, MERCHANT_ROLES)
-        return Scope(merchant_id=_uuid_claim(claims, "merchant_id"), role=merchant_role)
+        api_key_id = _uuid_claim(claims, "api_key_id") if "api_key_id" in claims else None
+        return Scope(
+            merchant_id=_uuid_claim(claims, "merchant_id"), role=merchant_role, api_key_id=api_key_id
+        )
     if kinds == ["ops_user_id"]:
         ops_role = _single_role(claims, OPS_ROLES)
         ops_user_id = _uuid_claim(claims, "ops_user_id")

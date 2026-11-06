@@ -17,8 +17,10 @@ def issue_merchant_token(
     now: datetime,
     ttl_seconds: int = MERCHANT_TOKEN_TTL_SECONDS,
     role: str = "merchant_admin",
+    api_key_id: uuid.UUID | None = None,
 ) -> str:
-    """Short-lived RS256 access token that ops-ai verifies with the public key; scope = `merchant_id` only."""
+    """Short-lived RS256 access token that ops-ai verifies with the public key; scope = `merchant_id` only.
+    `api_key_id` names the API key that requested it, the acting identity ops-ai records on rule changes."""
     issued_at = int(now.timestamp())
     claims = {
         "iss": TOKEN_ISSUER,
@@ -30,6 +32,8 @@ def issue_merchant_token(
         "exp": issued_at + ttl_seconds,
         "jti": str(uuid.uuid4()),
     }
+    if api_key_id is not None:
+        claims["api_key_id"] = str(api_key_id)
     return jwt.encode(claims, private_key_pem, algorithm=TOKEN_ALGORITHM)
 
 
