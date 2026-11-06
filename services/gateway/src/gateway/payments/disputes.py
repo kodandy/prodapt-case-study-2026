@@ -1,15 +1,26 @@
+import re
 import unicodedata
 import uuid
+from datetime import datetime
 from typing import Literal
 
+from contracts.events import (
+    DISPUTES_TOPIC,
+    NETWORK_REASON_CODE_PATTERN,
+    DisputeActorRole,
+    DisputeEventState,
+    DisputeEventType,
+    DisputeEventV1,
+)
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from gateway.audit.models import AuditLog
 from gateway.clock import Clock
 from gateway.notifications.records import add_notification
+from gateway.outbox.models import OutboxEvent
 from gateway.payments.ledger.service import PostingLine, ensure_account, post_journal
-from gateway.payments.models import Dispute
+from gateway.payments.models import Dispute, Payment
 from gateway.payments.refunds import lock_payment, refundable_minor
 from gateway.payments.schemas import DisputeView
 
@@ -18,6 +29,9 @@ MAX_REASON_LENGTH = 64
 CHARGEBACK_FEE_MINOR = {"USD": 1500, "EUR": 1500, "JPY": 2000, "INR": 120000}
 
 DisputeOutcome = Literal["won", "lost"]
+
+_EVENT_VERSIONS: dict[DisputeEventState, int] = {"opened": 1, "under_review": 2, "won": 3, "lost": 3}
+_NETWORK_REASON_CODE = re.compile(NETWORK_REASON_CODE_PATTERN)
 
 
 class PaymentNotFoundError(Exception):
@@ -46,6 +60,10 @@ class DisputeNotFoundError(Exception):
 
 class InvalidDisputeTransitionError(Exception):
     pass
+
+
+class UnknownDisputeActorError(Exception):
+    """An actor role the dispute workflow has no event label for: raised before anything is written."""
 
 
 def open_dispute(
@@ -91,6 +109,7 @@ def open_dispute_in_session(
     actor_role: str = "card_network",
 ) -> DisputeView:
     """`open_dispute` inside the caller's transaction (the caller commits or rolls back)."""
+    event_actor = _opener_label(actor_role, payer_user_id)
     if not valid_dispute_reason(reason):
         raise InvalidDisputeReasonError
     payment = lock_payment(session, payment_id, payer_user_id=payer_user_id)
@@ -129,6 +148,15 @@ def open_dispute_in_session(
     payment.updated_at = now
     session.flush()
     _audit(session, clock, actor_id, actor_role, "dispute.opened", dispute, {"amount_minor": amount})
+    _add_dispute_event(
+        session,
+        now,
+        "dispute.opened",
+        dispute,
+        payment,
+        (None, "opened"),
+        event_actor,
+    )
     add_notification(
         session,
         now,
@@ -156,10 +184,23 @@ def submit_evidence(
             raise DisputeNotFoundError
         if dispute.state != "opened":
             raise InvalidDisputeTransitionError
+        now = clock()
         dispute.state = "under_review"
         dispute.evidence_text = text
-        dispute.updated_at = clock()
+        dispute.updated_at = now
         session.flush()
+        payment = session.get(Payment, dispute.payment_id)
+        if payment is None:
+            raise DisputeNotFoundError
+        _add_dispute_event(
+            session,
+            now,
+            "dispute.evidence_submitted",
+            dispute,
+            payment,
+            ("opened", "under_review"),
+            "merchant",
+        )
         _audit(
             session,
             clock,
@@ -185,6 +226,7 @@ def resolve_dispute(
     (`dispute_update`)."""
     if outcome not in ("won", "lost"):
         raise ValueError(f"unknown dispute outcome: {outcome!r}")
+    event_actor = _resolver_label(actor_role)
     with session_factory.begin() as session:
         dispute = _lock_dispute(session, dispute_id)
         if dispute is None:
@@ -215,6 +257,15 @@ def resolve_dispute(
             "dispute.resolved",
             dispute,
             {"outcome": outcome, "chargeback_fee_minor": dispute.chargeback_fee_minor},
+        )
+        _add_dispute_event(
+            session,
+            now,
+            "dispute.resolved",
+            dispute,
+            payment,
+            ("under_review", outcome),
+            event_actor,
         )
         payload = _notice_payload(dispute)
         add_notification(
@@ -283,6 +334,83 @@ def _audit(
             occurred_at=clock(),
         )
     )
+
+
+def _add_dispute_event(
+    session: Session,
+    now: datetime,
+    event_type: DisputeEventType,
+    dispute: Dispute,
+    payment: Payment,
+    transition: tuple[DisputeEventState | None, DisputeEventState],
+    actor_role: DisputeActorRole,
+) -> None:
+    """One gw.disputes.v1 outbox row in the caller's transaction (docs/specs/disputes-notifications.md).
+
+    The reason is sent as a network reason code only when a card network opened the dispute and it is shaped
+    like one; a consumer's reason (even "13.1") and any free text are sent as None. The evidence text never
+    leaves the gateway: both can carry personal data.
+    """
+    from_state, to_state = transition
+    lost = to_state == "lost"
+    event = DisputeEventV1(
+        event_id=uuid.uuid4(),
+        event_type=event_type,
+        occurred_at=now,
+        entity_version=_EVENT_VERSIONS[to_state],
+        dispute_id=dispute.id,
+        payment_id=dispute.payment_id,
+        merchant_id=dispute.merchant_id,
+        from_state=from_state,
+        to_state=to_state,
+        actor_role=actor_role,
+        network_reason_code=_network_reason_code(session, dispute),
+        currency=dispute.currency,
+        payment_amount_minor=payment.amount_minor,
+        refunded_minor=payment.refunded_minor,
+        dispute_amount_minor=dispute.amount_minor,
+        chargeback_minor=dispute.amount_minor if lost else 0,
+        chargeback_fee_minor=dispute.chargeback_fee_minor if lost else 0,
+    )
+    session.add(
+        OutboxEvent(
+            event_id=event.event_id,
+            topic=DISPUTES_TOPIC,
+            payload=event.model_dump(mode="json"),
+            headers={},
+            created_at=now,
+            published_at=None,
+        )
+    )
+
+
+def _opener_label(actor_role: str, payer_user_id: uuid.UUID | None) -> DisputeActorRole:
+    """Fails closed: "consumer" only for the payer's own open, "card_network" only for the network."""
+    if actor_role == "card_network":
+        return "card_network"
+    if actor_role == "consumer" and payer_user_id is not None:
+        return "consumer"
+    raise UnknownDisputeActorError
+
+
+def _resolver_label(actor_role: str) -> DisputeActorRole:
+    if actor_role == "card_network":
+        return "card_network"
+    if actor_role == "ops_lead":
+        return "ops_lead"
+    raise UnknownDisputeActorError
+
+
+def _network_reason_code(session: Session, dispute: Dispute) -> str | None:
+    """The opener comes from the append-only audit row; with none, no reason code is sent (fail closed)."""
+    opener_role = session.scalar(
+        select(AuditLog.actor_role)
+        .where(AuditLog.action == "dispute.opened", AuditLog.target == f"dispute:{dispute.id}")
+        .limit(1)
+    )
+    if opener_role != "card_network" or not _NETWORK_REASON_CODE.fullmatch(dispute.reason):
+        return None
+    return dispute.reason
 
 
 def _notice_payload(dispute: Dispute) -> dict[str, object]:

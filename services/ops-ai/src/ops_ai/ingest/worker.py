@@ -6,7 +6,7 @@ import threading
 from datetime import datetime, timedelta
 from types import FrameType
 
-from contracts.events import PAYMENTS_TOPIC
+from contracts.events import DISPUTES_TOPIC, PAYMENTS_TOPIC
 from redis import Redis
 from redis.exceptions import RedisError
 from sqlalchemy.exc import SQLAlchemyError
@@ -17,6 +17,7 @@ from ops_ai.compliance.consumer import consume_compliance
 from ops_ai.config import load_ops_ai_settings
 from ops_ai.db import make_engine, make_session_factory
 from ops_ai.ingest.consumer import PAYMENT_FACTS_GROUP, consume_payments
+from ops_ai.ingest.disputes import DISPUTE_WORKFLOWS_GROUP, consume_disputes
 from ops_ai.observability.consumer import record_consumer_lag
 from ops_ai.observability.server import start_metrics_server
 from ops_ai.observability.tracing import configure_logging
@@ -39,8 +40,8 @@ def run_consumer(
     stop: threading.Event,
     block_ms: int = 500,
 ) -> int:
-    """Consumes gw.payments.v1 and gw.compliance.v1 until `stop` is set; returns the number of entries read
-    (re-reads included).
+    """Consumes gw.payments.v1, gw.compliance.v1 and gw.disputes.v1 until `stop` is set; returns the number of
+    entries read (re-reads included).
 
     Each iteration first re-reads this consumer's unacked entries, so an event whose apply failed is retried.
     Redis and DB errors are logged by class name only (messages can carry connection details) and retried.
@@ -63,6 +64,8 @@ def run_consumer(
             total += consume_payments(session_factory, redis, clock, consumer_name, block_ms=block_ms)
             total += consume_compliance(session_factory, redis, clock, consumer_name, start_id="0")
             total += consume_compliance(session_factory, redis, clock, consumer_name)
+            total += consume_disputes(session_factory, redis, clock, consumer_name, start_id="0")
+            total += consume_disputes(session_factory, redis, clock, consumer_name)
         except (RedisError, SQLAlchemyError, OSError) as error:
             logger.warning("consumer iteration failed: %s", type(error).__name__)
             stop.wait(RETRY_BACKOFF_SECONDS)
@@ -76,9 +79,22 @@ def sample_consumer_lag(
     while not stop.is_set():
         try:
             record_consumer_lag(redis, PAYMENTS_TOPIC, PAYMENT_FACTS_GROUP)
+            record_consumer_lag(redis, DISPUTES_TOPIC, DISPUTE_WORKFLOWS_GROUP)
         except (RedisError, OSError) as error:
             logger.warning("consumer lag sample failed: %s", type(error).__name__)
         stop.wait(interval_seconds)
+
+
+def make_worker_redis(redis_url: str) -> Redis:
+    """Decodes replies as UTF-8 with replacement: an entry that is not valid UTF-8 then reaches the consumer
+    (and its dead-letter) instead of failing every XREADGROUP of its stream."""
+    return Redis.from_url(
+        redis_url,
+        decode_responses=True,
+        encoding_errors="replace",
+        socket_connect_timeout=REDIS_CONNECT_TIMEOUT_SECONDS,
+        socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
+    )
 
 
 def main() -> None:
@@ -86,12 +102,7 @@ def main() -> None:
     start_metrics_server(os.environ.get("METRICS_PORT"))
     settings = load_ops_ai_settings()
     session_factory = make_session_factory(make_engine(settings.database_url))
-    redis = Redis.from_url(
-        settings.redis_url,
-        decode_responses=True,
-        socket_connect_timeout=REDIS_CONNECT_TIMEOUT_SECONDS,
-        socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
-    )
+    redis = make_worker_redis(settings.redis_url)
     stop = threading.Event()
 
     def _request_stop(_signum: int, _frame: FrameType | None) -> None:
