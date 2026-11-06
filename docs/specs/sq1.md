@@ -254,6 +254,43 @@ def index_incidents(session) -> int                                    # documen
 - Fallback: no embedder → FTS results; an un-indexed incident is still found with an embedder.
 - The route uses `deps.embedder`.
 
+## 11. E2E golden on the failure route (`POST /v1/assistant/failures`, 11-06)
+
+The eval suite already posts each golden to its own `route`; this section adds a golden for the failure assistant and
+the one harness change it needs.
+
+### 11.1 List indices in golden field paths — `ops_ai/evaluation/golden.py`
+
+`expect.fields` keys are dotted paths. A segment that is a non-negative integer (`0`, `12`) indexes a JSON list:
+`reasons.0.taxonomy_code`. Out of range, a negative or non-numeric segment on a list, or an index on a non-list →
+the field is missing (the relevancy check fails, never raises). Mapping keys resolve as before, so every existing
+golden scores the same.
+
+### 11.2 Golden `eval/golden/sq1_failure_route.json`
+
+SQ1 question as `sq1_merchant` on `/v1/assistant/failures`, over the eval seed (seed 42, anchor 2026-11-03T15:00Z,
+mock LLM). Values below are what the route returns on that seed:
+
+- status 200; fields `abstained` false, `query.method` `card`, `comparison.elevated` true,
+  `comparison.window.by_bin.0.card_bin` `"400000"`, `reasons.0.taxonomy_code` and `fixes.0.taxonomy_code`
+  `issuer_unavailable` (root cause and first-ranked playbook fix);
+- evidence ref prefixes `aggregate:window`, `aggregate:baseline`, `comparison:baseline`, `aggregate:bin:400000`,
+  `change:bin_onset:400000`, `change:new_decline_code:issuer_unavailable`, `reason:issuer_unavailable`, `payment:`;
+- required terms `400000`, `issuer_unavailable`;
+- tool calls, in order: `compare_baseline`, `change_timeline`, `failure_reasons`, `search_incidents`,
+  `list_failed_payments`;
+- hypothesis ranking over the route's evidence: BIN outage before acquirer outage before an integration error whose
+  incident ref is not in the evidence.
+- No `incident:` prefix: the route searches incidents with FTS only, and on this seed the query
+  `BIN 400000 issuer unavailable` finds none (the `/investigate` golden `sq1_bin_outage` covers incident citations).
+
+### 11.3 Tests (RED first)
+
+- New `ops_ai/evaluation/__tests__/test_golden_list_paths.py`: list index resolves; out of range, negative,
+  non-numeric and index-on-mapping are missing; mapping-only paths unchanged.
+- `test_golden.py` shipped-case list gains `sq1_failure_route` (approved change of an existing test).
+- `make eval` scores the new case through the real API with every gate passed.
+
 ## Out of scope here
 
 SQ2–SQ4, `change_timeline`, pgvector, the OpenAI adapter, re-anchoring an existing seed.
