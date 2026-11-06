@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 ALICE = "alice@example.com"
 BOB = "bob@example.com"
 PASSWORD = "route-test-password-7Q"
+SAME_COUNTRY = "US"  # sender and recipient share a country, so transfers stay domestic
 THRESHOLD = AMOUNT_THRESHOLD_MINOR["USD"]
 BLOCKED_ACTION = "kyc.operation_blocked"
 
@@ -27,6 +28,11 @@ def _user(session_factory: sessionmaker[Session], clock: FixedClock, email: str)
     with session_factory() as session:
         result = sign_up(session, clock, email, PASSWORD)
         session.commit()
+    with session_factory.begin() as session:
+        session.execute(
+            text("UPDATE gateway.users SET country = :country WHERE id = :id"),
+            {"country": SAME_COUNTRY, "id": result.user_id},
+        )
     return result.user_id
 
 
