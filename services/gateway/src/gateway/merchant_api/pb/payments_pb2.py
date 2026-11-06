@@ -22,7 +22,7 @@ _sym_db = _symbol_database.Default()
 
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
-    b'\n&gateway/merchant_api/pb/payments.proto\x12\x12payplat.gateway.v1"M\n\tCardInput\x12\x0e\n\x06number\x18\x01 \x01(\t\x12\x11\n\texp_month\x18\x02 \x01(\x05\x12\x10\n\x08\x65xp_year\x18\x03 \x01(\x05\x12\x0b\n\x03\x63vc\x18\x04 \x01(\t"{\n\x14\x43reatePaymentRequest\x12\x14\n\x0c\x61mount_minor\x18\x01 \x01(\x03\x12\x10\n\x08\x63urrency\x18\x02 \x01(\t\x12\x0e\n\x06method\x18\x03 \x01(\t\x12+\n\x04\x63\x61rd\x18\x04 \x01(\x0b\x32\x1d.payplat.gateway.v1.CardInput")\n\x0b\x43\x61rdSummary\x12\x0b\n\x03\x62in\x18\x01 \x01(\t\x12\r\n\x05last4\x18\x02 \x01(\t"\xcd\x01\n\x15\x43reatePaymentResponse\x12\x12\n\npayment_id\x18\x01 \x01(\t\x12\r\n\x05state\x18\x02 \x01(\t\x12\x14\n\x0c\x61mount_minor\x18\x03 \x01(\x03\x12\x10\n\x08\x63urrency\x18\x04 \x01(\t\x12\x0e\n\x06method\x18\x05 \x01(\t\x12-\n\x04\x63\x61rd\x18\x06 \x01(\x0b\x32\x1f.payplat.gateway.v1.CardSummary\x12\x19\n\x0c\x64\x65\x63line_code\x18\x07 \x01(\tH\x00\x88\x01\x01\x42\x0f\n\r_decline_code"\'\n\x11GetPaymentRequest\x12\x12\n\npayment_id\x18\x01 \x01(\t"\x9d\x02\n\x07Payment\x12\x12\n\npayment_id\x18\x01 \x01(\t\x12\r\n\x05state\x18\x02 \x01(\t\x12\x14\n\x0c\x61mount_minor\x18\x03 \x01(\x03\x12\x10\n\x08\x63urrency\x18\x04 \x01(\t\x12\x0e\n\x06method\x18\x05 \x01(\t\x12-\n\x04\x63\x61rd\x18\x06 \x01(\x0b\x32\x1f.payplat.gateway.v1.CardSummary\x12\x19\n\x0c\x64\x65\x63line_code\x18\x07 \x01(\tH\x00\x88\x01\x01\x12\x16\n\x0erefunded_minor\x18\x08 \x01(\x03\x12\x16\n\x0e\x64isputed_minor\x18\t \x01(\x03\x12\x18\n\x10\x63hargeback_minor\x18\n \x01(\x03\x12\x12\n\ncreated_at\x18\x0b \x01(\tB\x0f\n\r_decline_code"\xd6\x01\n\x13ListPaymentsRequest\x12\r\n\x05limit\x18\x01 \x01(\x05\x12\x13\n\x06\x63ursor\x18\x02 \x01(\tH\x00\x88\x01\x01\x12\x12\n\x05state\x18\x03 \x01(\tH\x01\x88\x01\x01\x12\x19\n\x0c\x63reated_from\x18\x04 \x01(\tH\x02\x88\x01\x01\x12\x17\n\ncreated_to\x18\x05 \x01(\tH\x03\x88\x01\x01\x12\x13\n\x06method\x18\x06 \x01(\tH\x04\x88\x01\x01\x42\t\n\x07_cursorB\x08\n\x06_stateB\x0f\n\r_created_fromB\r\n\x0b_created_toB\t\n\x07_method"l\n\x14ListPaymentsResponse\x12*\n\x05items\x18\x01 \x03(\x0b\x32\x1b.payplat.gateway.v1.Payment\x12\x18\n\x0bnext_cursor\x18\x02 \x01(\tH\x00\x88\x01\x01\x42\x0e\n\x0c_next_cursor2\xad\x02\n\x10MerchantPayments\x12\x64\n\rCreatePayment\x12(.payplat.gateway.v1.CreatePaymentRequest\x1a).payplat.gateway.v1.CreatePaymentResponse\x12P\n\nGetPayment\x12%.payplat.gateway.v1.GetPaymentRequest\x1a\x1b.payplat.gateway.v1.Payment\x12\x61\n\x0cListPayments\x12\'.payplat.gateway.v1.ListPaymentsRequest\x1a(.payplat.gateway.v1.ListPaymentsResponseb\x06proto3'
+    b'\n&gateway/merchant_api/pb/payments.proto\x12\x12payplat.gateway.v1"M\n\tCardInput\x12\x0e\n\x06number\x18\x01 \x01(\t\x12\x11\n\texp_month\x18\x02 \x01(\x05\x12\x10\n\x08\x65xp_year\x18\x03 \x01(\x05\x12\x0b\n\x03\x63vc\x18\x04 \x01(\t"\xb5\x01\n\x14\x43reatePaymentRequest\x12\x14\n\x0c\x61mount_minor\x18\x01 \x01(\x03\x12\x10\n\x08\x63urrency\x18\x02 \x01(\t\x12\x0e\n\x06method\x18\x03 \x01(\t\x12+\n\x04\x63\x61rd\x18\x04 \x01(\x0b\x32\x1d.payplat.gateway.v1.CardInput\x12 \n\x13settlement_currency\x18\x05 \x01(\tH\x00\x88\x01\x01\x42\x16\n\x14_settlement_currency")\n\x0b\x43\x61rdSummary\x12\x0b\n\x03\x62in\x18\x01 \x01(\t\x12\r\n\x05last4\x18\x02 \x01(\t"\xcd\x01\n\x15\x43reatePaymentResponse\x12\x12\n\npayment_id\x18\x01 \x01(\t\x12\r\n\x05state\x18\x02 \x01(\t\x12\x14\n\x0c\x61mount_minor\x18\x03 \x01(\x03\x12\x10\n\x08\x63urrency\x18\x04 \x01(\t\x12\x0e\n\x06method\x18\x05 \x01(\t\x12-\n\x04\x63\x61rd\x18\x06 \x01(\x0b\x32\x1f.payplat.gateway.v1.CardSummary\x12\x19\n\x0c\x64\x65\x63line_code\x18\x07 \x01(\tH\x00\x88\x01\x01\x42\x0f\n\r_decline_code"\'\n\x11GetPaymentRequest\x12\x12\n\npayment_id\x18\x01 \x01(\t"\x9d\x02\n\x07Payment\x12\x12\n\npayment_id\x18\x01 \x01(\t\x12\r\n\x05state\x18\x02 \x01(\t\x12\x14\n\x0c\x61mount_minor\x18\x03 \x01(\x03\x12\x10\n\x08\x63urrency\x18\x04 \x01(\t\x12\x0e\n\x06method\x18\x05 \x01(\t\x12-\n\x04\x63\x61rd\x18\x06 \x01(\x0b\x32\x1f.payplat.gateway.v1.CardSummary\x12\x19\n\x0c\x64\x65\x63line_code\x18\x07 \x01(\tH\x00\x88\x01\x01\x12\x16\n\x0erefunded_minor\x18\x08 \x01(\x03\x12\x16\n\x0e\x64isputed_minor\x18\t \x01(\x03\x12\x18\n\x10\x63hargeback_minor\x18\n \x01(\x03\x12\x12\n\ncreated_at\x18\x0b \x01(\tB\x0f\n\r_decline_code"\xd6\x01\n\x13ListPaymentsRequest\x12\r\n\x05limit\x18\x01 \x01(\x05\x12\x13\n\x06\x63ursor\x18\x02 \x01(\tH\x00\x88\x01\x01\x12\x12\n\x05state\x18\x03 \x01(\tH\x01\x88\x01\x01\x12\x19\n\x0c\x63reated_from\x18\x04 \x01(\tH\x02\x88\x01\x01\x12\x17\n\ncreated_to\x18\x05 \x01(\tH\x03\x88\x01\x01\x12\x13\n\x06method\x18\x06 \x01(\tH\x04\x88\x01\x01\x42\t\n\x07_cursorB\x08\n\x06_stateB\x0f\n\r_created_fromB\r\n\x0b_created_toB\t\n\x07_method"l\n\x14ListPaymentsResponse\x12*\n\x05items\x18\x01 \x03(\x0b\x32\x1b.payplat.gateway.v1.Payment\x12\x18\n\x0bnext_cursor\x18\x02 \x01(\tH\x00\x88\x01\x01\x42\x0e\n\x0c_next_cursor2\xad\x02\n\x10MerchantPayments\x12\x64\n\rCreatePayment\x12(.payplat.gateway.v1.CreatePaymentRequest\x1a).payplat.gateway.v1.CreatePaymentResponse\x12P\n\nGetPayment\x12%.payplat.gateway.v1.GetPaymentRequest\x1a\x1b.payplat.gateway.v1.Payment\x12\x61\n\x0cListPayments\x12\'.payplat.gateway.v1.ListPaymentsRequest\x1a(.payplat.gateway.v1.ListPaymentsResponseb\x06proto3'
 )
 
 _globals = globals()
@@ -32,20 +32,20 @@ if not _descriptor._USE_C_DESCRIPTORS:
     DESCRIPTOR._loaded_options = None
     _globals["_CARDINPUT"]._serialized_start = 62
     _globals["_CARDINPUT"]._serialized_end = 139
-    _globals["_CREATEPAYMENTREQUEST"]._serialized_start = 141
-    _globals["_CREATEPAYMENTREQUEST"]._serialized_end = 264
-    _globals["_CARDSUMMARY"]._serialized_start = 266
-    _globals["_CARDSUMMARY"]._serialized_end = 307
-    _globals["_CREATEPAYMENTRESPONSE"]._serialized_start = 310
-    _globals["_CREATEPAYMENTRESPONSE"]._serialized_end = 515
-    _globals["_GETPAYMENTREQUEST"]._serialized_start = 517
-    _globals["_GETPAYMENTREQUEST"]._serialized_end = 556
-    _globals["_PAYMENT"]._serialized_start = 559
-    _globals["_PAYMENT"]._serialized_end = 844
-    _globals["_LISTPAYMENTSREQUEST"]._serialized_start = 847
-    _globals["_LISTPAYMENTSREQUEST"]._serialized_end = 1061
-    _globals["_LISTPAYMENTSRESPONSE"]._serialized_start = 1063
-    _globals["_LISTPAYMENTSRESPONSE"]._serialized_end = 1171
-    _globals["_MERCHANTPAYMENTS"]._serialized_start = 1174
-    _globals["_MERCHANTPAYMENTS"]._serialized_end = 1475
+    _globals["_CREATEPAYMENTREQUEST"]._serialized_start = 142
+    _globals["_CREATEPAYMENTREQUEST"]._serialized_end = 323
+    _globals["_CARDSUMMARY"]._serialized_start = 325
+    _globals["_CARDSUMMARY"]._serialized_end = 366
+    _globals["_CREATEPAYMENTRESPONSE"]._serialized_start = 369
+    _globals["_CREATEPAYMENTRESPONSE"]._serialized_end = 574
+    _globals["_GETPAYMENTREQUEST"]._serialized_start = 576
+    _globals["_GETPAYMENTREQUEST"]._serialized_end = 615
+    _globals["_PAYMENT"]._serialized_start = 618
+    _globals["_PAYMENT"]._serialized_end = 903
+    _globals["_LISTPAYMENTSREQUEST"]._serialized_start = 906
+    _globals["_LISTPAYMENTSREQUEST"]._serialized_end = 1120
+    _globals["_LISTPAYMENTSRESPONSE"]._serialized_start = 1122
+    _globals["_LISTPAYMENTSRESPONSE"]._serialized_end = 1230
+    _globals["_MERCHANTPAYMENTS"]._serialized_start = 1233
+    _globals["_MERCHANTPAYMENTS"]._serialized_end = 1534
 # @@protoc_insertion_point(module_scope)

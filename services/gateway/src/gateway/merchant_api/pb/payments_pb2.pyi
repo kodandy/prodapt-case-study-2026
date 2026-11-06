@@ -61,10 +61,13 @@ class CreatePaymentRequest(_message.Message):
     CURRENCY_FIELD_NUMBER: _builtins.int
     METHOD_FIELD_NUMBER: _builtins.int
     CARD_FIELD_NUMBER: _builtins.int
+    SETTLEMENT_CURRENCY_FIELD_NUMBER: _builtins.int
     amount_minor: _builtins.int
     currency: _builtins.str
     method: _builtins.str
     """empty means the default, "card" """
+    settlement_currency: _builtins.str
+    """unset means settle in `currency`; otherwise one of USD, EUR, JPY, INR (B2.3)"""
     @_builtins.property
     def card(self) -> Global___CardInput: ...
     def __init__(
@@ -74,14 +77,39 @@ class CreatePaymentRequest(_message.Message):
         currency: _builtins.str = ...,
         method: _builtins.str = ...,
         card: Global___CardInput | None = ...,
+        settlement_currency: _builtins.str | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["card", b"card"]
+    _HasFieldArgType: _TypeAlias = _typing.Literal[
+        "_settlement_currency",
+        b"_settlement_currency",
+        "card",
+        b"card",
+        "settlement_currency",
+        b"settlement_currency",
+    ]
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal[
-        "amount_minor", b"amount_minor", "card", b"card", "currency", b"currency", "method", b"method"
+        "_settlement_currency",
+        b"_settlement_currency",
+        "amount_minor",
+        b"amount_minor",
+        "card",
+        b"card",
+        "currency",
+        b"currency",
+        "method",
+        b"method",
+        "settlement_currency",
+        b"settlement_currency",
     ]
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
+    _WhichOneofReturnType__settlement_currency: _TypeAlias = _typing.Literal["settlement_currency"]
+    _WhichOneofArgType__settlement_currency: _TypeAlias = _typing.Literal[
+        "_settlement_currency", b"_settlement_currency"
+    ]
+    def WhichOneof(
+        self, oneof_group: _WhichOneofArgType__settlement_currency
+    ) -> _WhichOneofReturnType__settlement_currency | None: ...
 
 Global___CreatePaymentRequest: _TypeAlias = CreatePaymentRequest
 

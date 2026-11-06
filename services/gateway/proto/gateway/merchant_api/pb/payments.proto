@@ -24,6 +24,8 @@ message CreatePaymentRequest {
   // empty means the default, "card"
   string method = 3;
   CardInput card = 4;
+  // unset means settle in `currency`; otherwise one of USD, EUR, JPY, INR (B2.3)
+  optional string settlement_currency = 5;
 }
 
 message CardSummary {
