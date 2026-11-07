@@ -30,8 +30,13 @@ PROVIDER_CALLS = Counter(
     ("route", "outcome"),
     registry=REGISTRY,
 )
+# Each uvicorn worker keeps its own breaker; across workers the scrape shows the worst live state.
 CIRCUIT_STATE = Gauge(
-    "gateway_circuit_state", "Provider circuit: 0 closed, 1 open, 2 half_open", ("route",), registry=REGISTRY
+    "gateway_circuit_state",
+    "Provider circuit: 0 closed, 1 open, 2 half_open",
+    ("route",),
+    registry=REGISTRY,
+    multiprocess_mode="livemax",
 )
 RATE_LIMITED = Counter(
     "gateway_rate_limit_rejected",

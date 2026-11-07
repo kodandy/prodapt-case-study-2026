@@ -1,8 +1,10 @@
+import os
 import time
 
 from fastapi import FastAPI, Response
 from opentelemetry import trace
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
+from prometheus_client.multiprocess import MultiProcessCollector
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from gateway.observability.metrics import HTTP_LATENCY, HTTP_REQUESTS, REGISTRY
@@ -13,6 +15,17 @@ METRICS_PATH = "/metrics"
 UNMATCHED_ROUTE = "unmatched"
 KNOWN_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
 OTHER_METHOD = "OTHER"
+MULTIPROC_DIR_ENV = "PROMETHEUS_MULTIPROC_DIR"
+
+
+def render_metrics() -> bytes:
+    """Prometheus text for this service. With `PROMETHEUS_MULTIPROC_DIR` set (several uvicorn workers), the
+    sum over every worker's files in that directory; otherwise this process's REGISTRY."""
+    if not os.environ.get(MULTIPROC_DIR_ENV):
+        return generate_latest(REGISTRY)
+    registry = CollectorRegistry()
+    MultiProcessCollector(registry)  # type: ignore[no-untyped-call]  # prometheus_client leaves it unannotated
+    return generate_latest(registry)
 
 
 def route_template(scope: Scope) -> str:
@@ -86,6 +99,6 @@ def install_observability(app: FastAPI, service_name: str = "gateway") -> None:
 
     @app.get(METRICS_PATH, include_in_schema=False)
     def metrics() -> Response:
-        return Response(generate_latest(REGISTRY), media_type=CONTENT_TYPE_LATEST)
+        return Response(render_metrics(), media_type=CONTENT_TYPE_LATEST)
 
     app.add_middleware(ObservabilityMiddleware, service_name=service_name)
