@@ -49,3 +49,18 @@ def test_render_metrics_without_multiproc_dir_reports_only_this_process(tmp_path
 
     # Assert
     assert not [line for line in exposition.splitlines() if line.startswith("gateway_http_requests_total{")]
+
+
+def test_render_metrics_reports_the_worst_circuit_state_over_worker_processes(tmp_path: Path) -> None:
+    # Arrange
+    set_state = (
+        "from gateway.observability.metrics import CIRCUIT_STATE; CIRCUIT_STATE.labels('simulator').set({})"
+    )
+    _run(set_state.format(0), tmp_path)
+    _run(set_state.format(1), tmp_path)
+
+    # Act
+    exposition = _run(PRINT_METRICS, tmp_path)
+
+    # Assert
+    assert 'gateway_circuit_state{route="simulator"} 1.0' in exposition.splitlines()
