@@ -281,17 +281,17 @@ k6 on `POST /v1/payments` (card). Target: **p99 < 2 s and error < 1 %** (`docs/p
 |---|---|---:|---:|---:|---:|---|
 | 2 req/s (shared VM, 11-05) | 181 requests, none dropped | 405 ms | 1.91 s | 2.82 s | 0 % | Not met |
 | 2 req/s (less loaded VM, 11-06) | 181 requests, none dropped | 72 ms | 524 ms | **1.25 s** | 0 % | **Met** |
-| 40 req/s (1 process, committed, 11-06) | 3,044 completed, 556 iterations dropped | 3.98 s | 12.0 s | 13.8 s | 0 % | **Not met** |
-| 40 req/s (4 uvicorn workers, local override, 11-06) | 3,601 completed, none dropped | 81 ms | 314 ms | **564 ms** | 0 % | **Met** |
+| 40 req/s (1 process, previous default, 11-06) | 3,044 completed, 556 iterations dropped | 3.98 s | 12.0 s | 13.8 s | 0 % | Not met |
+| 40 req/s (4 uvicorn workers, committed, 11-07) | 3,601 completed, none dropped | 37 ms | 110 ms | **338 ms** | 0 % | **Met** |
 
-- Environment: a **shared laptop VM** next to other compose stacks; 40 req/s is **CPU-bound in one gateway process**; 4 workers meet it, but 4 workers need multiprocess metrics before they become the default
+- Environment: a **shared laptop VM** next to other compose stacks; one gateway process was **CPU-bound** at 40 req/s, so the committed compose now runs **4 uvicorn workers** with Prometheus multiprocess metrics
 - **Design only** (no code, no measurement): 100k TPS / 100M users (P2-7), 99.999 % (P2-2), multi-region (P2-1)
 
 <!--
-0:45。2 req/s では目標を満たす（負荷の少ない VM で p99 1.25 s）。40 req/s では満たしていない、と最初に言う。error は 0 % で、5xx もない。40 req/s の主因は
-gateway が 1 プロセスで CPU を使い切ること（docker stats で約 100〜130 %）。per-card lock は claim の短いトランザクション内だけなので主因ではない。
-同じコードを uvicorn 4 worker で動かすと 40 req/s で p99 564 ms になり目標を満たした。ただしこれはローカルの override で、commit 済みの compose は 1 プロセスのまま。
-4 worker を既定にするには、worker ごとに分かれる Prometheus metrics の multiprocess 対応が要る。本番構成（多数のカード、gateway の水平 replica）を測ったものではない。
+0:45。2 req/s では目標を満たす（負荷の少ない VM で p99 1.25 s）。40 req/s も commit 済みの compose（gateway-api は uvicorn 4 worker）で満たす（11-07、p99 338 ms）。error は 0 % で、5xx もない。
+以前の 1 プロセス構成は 40 req/s で CPU を使い切って未達だった（p99 13.8 s）。per-card lock は claim の短いトランザクション内だけなので主因ではない。
+4 worker を既定にするため、Prometheus metrics を multiprocess mode にして /metrics が全 worker の合計を返すようにした（テストあり）。
+breaker は worker ごとに持つ。本番構成（多数のカード、gateway の水平 replica）を測ったものではない。
 切り分けには 2 つ要る。(1) 専用マシン、(2) 多数の tokenised card を混ぜた負荷。
 今は allowlist の test PAN が 5 つしかないので、(2) ができない。
 100k TPS・99.999 %・multi-region は数字を出していない。設計だけ。
@@ -329,7 +329,7 @@ PR-1（同一 key 20 並列で provider 呼び出しが 1 回になるテスト�
 
 **Next steps, in this order**: ① build the reconciler (converge C1/C5, resolve `unknown`) ② re-measure on a dedicated environment with many cards ③ Redis ACL + per-service DB roles ④ add a key and run LLM-judged eval in CI
 
-**Summary**: SQ1–SQ4 run end to end with tool evidence and checks. The correctness core (idempotency, ledger) is pinned by tests, **with one known concurrent-test failure**. The performance target is **met at 2 req/s**; at 40 req/s it is **missed** by the committed one-process gateway and met only with 4 workers in a local override, and production scale is **unmeasured**; both are labelled that way.
+**Summary**: SQ1–SQ4 run end to end with tool evidence and checks. The correctness core (idempotency, ledger) is pinned by tests, **with one known concurrent-test failure**. The performance target is **met at 2 and 40 req/s** on a laptop (40 req/s with the committed 4 gateway workers), and production scale is **unmeasured**; both are labelled that way.
 
 <!--
 0:35。順番の理由。reconciler は正しさの穴なので、性能より先にやる。再計測は、設計判断の前提を確かめるため。

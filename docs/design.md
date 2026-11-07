@@ -797,7 +797,7 @@ Each cut was made to keep a Basic item or a P0 proof. Order of the list: closest
 | Answer-contract checker | Tools-first routes made it less urgent | claims with `evidence_refs`, slots rendered from tool output, reject digits outside slots, regenerate once then T2 Status on main: **Built for `/query` and `/failures`:** `ai/assistant/grounding.py` (B5.2, D5.1). |
 | Rate limits, circuit breaker | P1, after correctness | Redis token bucket per API key and per user, 429 + `Retry-After`, fail-open with a metric; breaker per route that never reroutes an `unknown` attempt Status on main: **Built:** Redis token buckets and a per-route breaker ([production-readiness](production-readiness.md#resilience)); the breaker counts non-decline provider rejections as failures. |
 | OTel, metrics, alert rules, Grafana | P0-12–14 lost to Basic items | OTel SDK with FastAPI/SQLAlchemy/Redis/httpx instrumentation, trace context in outbox headers; Prometheus `/metrics`; `promtool test rules` in CI Status on main: **Built (partial):** P0-12–P0-14; no production exporter, `make alerts-test` is outside `make ci`. |
-| Load test | P1-5 not run | k6 on `POST /v1/payments` at a stated load, p50/p95/p99 with the error rate Status on main: **Run:** k6 at 2 and 40 req/s on a laptop; the p99 < 2 s target was not met ([docs/perf](perf/README.md)). |
+| Load test | P1-5 not run | k6 on `POST /v1/payments` at a stated load, p50/p95/p99 with the error rate Status on main: **Run:** k6 at 2 and 40 req/s on a laptop; the p99 < 2 s target is met at both rates, 40 req/s with four gateway workers ([docs/perf](perf/README.md)). |
 | Key revocation | JWTs are short-lived (≤ 900 s) | `jti` denylist in Redis checked by ops-ai; API-key revocation flag checked on lookup |
 
 ---
@@ -958,8 +958,8 @@ Nothing in this section is implemented or measured. Numbers are design targets o
   `constant-arrival-rate`): at an offered 2 req/s, p50 405 ms / p95 1.91 s / p99 2.82 s with 0 % errors (re-run on 2026-11-06 on a less loaded
   VM: p50 72 ms / p95 524 ms / p99 1.25 s, target met); at an offered
   40 req/s the first run saturated near 7 completed req/s (p99 44.5 s); the 2026-11-06 re-run shows one gateway process
-  is CPU-bound (p99 13.77 s) and that four uvicorn workers meet the target (p99 564 ms, local override, not the
-  committed default because metrics are per process). Conditions of the first runs: one laptop, a Docker VM shared by about 14 compose stacks, one single-worker
+  is CPU-bound (p99 13.77 s); the committed compose now runs four uvicorn workers with Prometheus multiprocess
+  metrics and meets the target (2026-11-07: p99 338 ms, 0 % errors). Conditions of the first runs: one laptop, a Docker VM shared by about 14 compose stacks, one single-worker
   gateway process, local Postgres and Redis, simulator acquirer, all load on 3 test cards (the per-card lock
   is held only in the claim transaction and was not the limit). So these numbers do not size a production pod; sizing still waits for a run on dedicated hardware
   with many distinct cards.
